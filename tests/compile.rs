@@ -3007,7 +3007,7 @@ fn compile_lists_the_files_whose_extern_lines_give_a_declaration_attributes() {
 fn compile_lists_the_effects_each_extern_line_declares_for_a_class_and_a_method() {
     let mailer = "<?php\n\nnamespace Lib;\n\nfinal class Mailer\n{\n    public function send(): void {}\n\n    public function count(): int\n    {\n        return 0;\n    }\n}\n";
     let functions = "<?php\n\nnamespace Lib;\n\nfunction sentAt(): int\n{\n    return 1;\n}\n";
-    let smtp = "namespace App.Mail;\n\npublic foreign class Smtp\n{\n}\n";
+    let smtp = "namespace App.Mail;\n\npublic effect class Smtp\n{\n}\n";
     let stubs = "namespace App.Stubs;\n\nimport App.Mail.Smtp;\nimport Lib;\nimport Lib.Mailer;\n\nextern Mailer uses none;\nextern Mailer.send uses Smtp;\nextern Lib.sentAt uses Smtp;\n\npublic class Stubs\n{\n}\n";
     let directory = lawful_project(&[
         ("vendor/acme/lib/Mailer.php", mailer),

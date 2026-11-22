@@ -940,20 +940,20 @@ fn a_file_with_extern_declarations_lowers_to_the_nodes_it_lowers_to_without_them
     assert_eq!(with.tree(), without.tree());
 }
 
-/// `foreign` tells the checker which effect a class's objects carry, spec section 29, so the engine gets the plain
+/// `effect` tells the checker which effect a class's objects carry, spec section 29, so the engine gets the plain
 /// class, which a test fake may extend. Only the function type of each method lists the effect, as `is` tests a
 /// closure of it.
 #[test]
-fn a_foreign_class_lowers_to_the_nodes_of_the_plain_class() {
-    let foreign = Lowered::new(
-        "namespace App.Billing;\n\npublic foreign class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
+fn an_effect_class_lowers_to_the_nodes_of_the_plain_class() {
+    let effect = Lowered::new(
+        "namespace App.Billing;\n\npublic effect class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
     );
     let plain = Lowered::new(
         "namespace App.Billing;\n\npublic class Payments\n{\n    public int charge(int cents) => cents;\n}\n",
     );
 
     assert_eq!(
-        foreign.tree(),
+        effect.tree(),
         plain.tree().replace("\"Function<int(int)>\"", "\"Function<int(int) uses App.Billing.Payments>\"")
     );
 }
@@ -32432,7 +32432,7 @@ fn the_unit_names_each_function_type_with_the_fingerprint_of_its_effects() {
 fn each_accessor_and_each_method_without_a_body_names_its_function_type() {
     let meter = (
         "src/App/Tenant/Meter.sharp",
-        "namespace App.Tenant;\n\npublic foreign class Meter\n{\n    public int now() => 7;\n}\n",
+        "namespace App.Tenant;\n\npublic effect class Meter\n{\n    public int now() => 7;\n}\n",
     );
     let code = "namespace App.Tenant;\n\npublic abstract class Report\n{\n    public Report(private Meter meter) { }\n\n    public int doubled => this.meter.now() * 2;\n\n    public int total { get; set => field = value; didSet => this.meter.now(); } = 0;\n\n    public static int stock { get => field; set => field = value; } = 5;\n\n    public abstract int read() uses Meter;\n\n    public abstract string kind { get; }\n}\n";
     let lowered = Lowered::with(code, &[meter]);
@@ -32463,7 +32463,7 @@ fn each_accessor_and_each_method_without_a_body_names_its_function_type() {
 fn the_fingerprint_of_each_function_type_s_name_is_the_one_its_lowering_gave() {
     let meter = (
         "src/App/Tenant/Meter.sharp",
-        "namespace App.Tenant;\n\npublic foreign class Meter\n{\n    public int now() => 7;\n}\n",
+        "namespace App.Tenant;\n\npublic effect class Meter\n{\n    public int now() => 7;\n}\n",
     );
     let code = "namespace App.Tenant;\n\npublic class Report\n{\n    public Report(private Meter meter) { }\n\n    public int doubled => this.meter.now() * 2;\n\n    public int twice(int x) => x * 2;\n\n    public Function<int(int) uses Meter> scaled() => (int x) => x * this.meter.now();\n}\n";
 
@@ -35083,22 +35083,22 @@ fn a_class_parses_as_a_struct_does() {
 
 /// Spec sections 10 and 29: the `parse` and `tryParse` a class gets carry their whole type, as a declared method does,
 /// with the effects of what `parse` runs: the main constructor, the `set` accessor of a property it writes, and the
-/// `parse` of a class a field holds, here a `foreign` class's.
+/// `parse` of a class a field holds, here an effect class's.
 #[test]
 fn a_generated_parse_lists_the_effects_of_what_it_runs() {
     let files = lowered_each(
         &[
             (
                 "src/App/Ledger.sharp",
-                "namespace App;\n\npublic foreign class Ledger\n{\n    public static int opened() => 1;\n}\n",
+                "namespace App;\n\npublic effect class Ledger\n{\n    public static int opened() => 1;\n}\n",
             ),
             (
                 "src/App/Audit.sharp",
-                "namespace App;\n\npublic foreign class Audit\n{\n    public static string cleaned(string text) => text;\n}\n",
+                "namespace App;\n\npublic effect class Audit\n{\n    public static string cleaned(string text) => text;\n}\n",
             ),
             (
                 "src/App/Line.sharp",
-                "namespace App;\n\npublic foreign class Line\n{\n    public Line(public int count { get; }) { }\n}\n",
+                "namespace App;\n\npublic effect class Line\n{\n    public Line(public int count { get; }) { }\n}\n",
             ),
             (
                 "src/App/Order.sharp",

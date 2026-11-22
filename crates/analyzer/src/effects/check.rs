@@ -304,10 +304,10 @@ pub(crate) fn function_values_must_fit_their_types(effects: &Effects, codebase: 
                     format!("This lambda {}", impurity.describe(&class_name, &effect_name))
                 }
                 (Runs::Body(_), _) => format!("{} {}", method(), impurity.describe(&class_name, &effect_name)),
-                (Runs::Foreign { .. }, Some(Effect::Foreign(effect))) => {
+                (Runs::Declared { .. }, Some(Effect::Class(effect))) => {
                     format!("{} has the effect `{}`", method(), effect_name(effect))
                 }
-                (Runs::Foreign { .. }, _) => format!("{} may have any effect", method()),
+                (Runs::Declared { .. }, _) => format!("{} may have any effect", method()),
                 (Runs::Undeclared { .. }, _) => unreachable!("a value of undeclared plain PHP is refused on its own"),
             };
             let body = if matches!(value.runs, Runs::Body(Body::Lambda(_))) { "lambda" } else { "method" };
@@ -326,7 +326,7 @@ pub(crate) fn function_values_must_fit_their_types(effects: &Effects, codebase: 
 
             match value.runs {
                 Runs::Body(_) => issue.with_annotation(Annotation::secondary(impurity.span)),
-                Runs::Foreign { .. } | Runs::Undeclared { .. } => issue,
+                Runs::Declared { .. } | Runs::Undeclared { .. } => issue,
             }
         })
         .collect()
@@ -1047,7 +1047,7 @@ where
     }
 }
 
-/// Spec section 29: each name a `uses` writes is an effect. Any file may declare a `foreign` class, so the check
+/// Spec section 29: each name a `uses` writes is an effect. Any file may declare an effect class, so the check
 /// reads the codebase, and the file depends on each class it names.
 pub(crate) fn check_uses<A>(
     context: &mut Context<'_, '_, A>,
@@ -1109,7 +1109,7 @@ pub(crate) fn check_uses<A>(
                 .class_likes
                 .values()
                 .find(|effect| {
-                    effect.flags.is_foreign()
+                    effect.flags.is_effect_class()
                         && is_sharp_namespace(effect.original_name.as_bytes())
                         && short_name(effect.original_name).eq_ignore_ascii_case(&short)
                 })
@@ -1140,9 +1140,9 @@ pub(crate) fn check_uses<A>(
             continue;
         }
 
-        // The message names the `foreign` classes the file can name without another import: the standard library's,
-        // in any of its namespaces (spec section 29), its namespace's and its imports'. The file depends on each class
-        // it could name, so the message follows a class that becomes `foreign` or stops being one, as a compile from
+        // The message names the effect classes the file can name without another import: the standard library's, in
+        // any of its namespaces (spec section 29), its namespace's and its imports'. The file depends on each class it
+        // could name, so the message follows a class that becomes an effect class or stops being one, as a compile from
         // scratch gives it.
         let nameable: Vec<_> = context
             .codebase
@@ -1166,7 +1166,7 @@ pub(crate) fn check_uses<A>(
         }
         let mut effects: Vec<String> = nameable
             .into_iter()
-            .filter(|class| class.flags.is_foreign())
+            .filter(|class| class.flags.is_effect_class())
             .map(|class| sharp_effect_name(context.codebase, &context.imported_names, class.original_name))
             .collect();
         effects.sort_unstable();
@@ -1175,12 +1175,12 @@ pub(crate) fn check_uses<A>(
         context.collector.report_with_code(
             IssueCode::InvalidEffect,
             Issue::error(format!(
-                "`{}` is not an effect: `uses` takes {} or a `foreign` class.",
+                "`{}` is not an effect: `uses` takes {} or a class declared `effect class`.",
                 String::from_utf8_lossy(name.value),
                 effects.join(", "),
             ))
             .with_annotation(Annotation::primary(name.span).with_message("Written here."))
-            .with_note("An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`."),
+            .with_note("An effect is a class declared `effect class`, as the standard library's `Clock` is, or `Events`, the effect of `emit`."),
         );
     }
 }
@@ -1266,9 +1266,9 @@ impl<'ast, 'arena> Walker<'ast, 'arena, UsesNames<'ast, 'arena>> for UsesWalker 
     }
 }
 
-/// Spec section 29: a module binding's lifetime decides how often a `foreign` object is created, and a static outlives
+/// Spec section 29: a module binding's lifetime decides how often an effect object is created, and a static outlives
 /// every binding, so a static property of `class` holds none, alone or inside a collection.
-pub(crate) fn check_foreign_statics<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+pub(crate) fn check_effect_statics<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
 where
     A: Arena,
 {
@@ -1280,7 +1280,7 @@ where
             continue;
         };
 
-        report_foreign_in_static(
+        report_effect_object_in_static(
             context,
             class.original_name,
             property.name.0,
@@ -1291,8 +1291,8 @@ where
 }
 
 /// Spec section 29: a write of a value of `value_type` at `span` to the static `property` of `class` stores no
-/// `foreign` object, whatever the static's declared type, as `Cache.loose = this.store` into an `Any?` would.
-pub(crate) fn check_foreign_static_write<A>(
+/// effect object, whatever the static's declared type, as `Cache.loose = this.store` into an `Any?` would.
+pub(crate) fn check_effect_static_write<A>(
     context: &mut Context<'_, '_, A>,
     class: Word,
     property: Word,
@@ -1303,12 +1303,12 @@ pub(crate) fn check_foreign_static_write<A>(
 {
     let class = context.codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
 
-    report_foreign_in_static(context, class, property, value_type, span);
+    report_effect_object_in_static(context, class, property, value_type, span);
 }
 
-/// Reports `foreign-in-static` at `span` when `held_type`, a type the static `property` of `class` holds, holds a
-/// `foreign` object, alone or inside a collection.
-fn report_foreign_in_static<A>(
+/// Reports `effect-object-in-static` at `span` when `held_type`, a type the static `property` of `class` holds, holds
+/// an effect object, alone or inside a collection.
+fn report_effect_object_in_static<A>(
     context: &mut Context<'_, '_, A>,
     class: Word,
     property: Word,
@@ -1321,7 +1321,7 @@ fn report_foreign_in_static<A>(
         TypeRef::Atomic(TAtomic::Object(object)) => object
             .get_name()
             .and_then(|name| context.codebase.get_class_like(name))
-            .filter(|held| held.flags.is_foreign()),
+            .filter(|held| held.flags.is_effect_class()),
         _ => None,
     });
     let Some(held) = held else {
@@ -1331,11 +1331,11 @@ fn report_foreign_in_static<A>(
     let held = sharp_class_like_name(context.codebase, &context.imported_names, held.original_name);
     let property_name = display_member(context, class, property);
     context.collector.report_with_code(
-        IssueCode::ForeignInStatic,
+        IssueCode::EffectObjectInStatic,
         Issue::error(format!("`{property_name}` is static, so it cannot hold a `{held}`."))
             .with_annotation(Annotation::primary(span))
             .with_note(
-                "A module binding decides how often a `foreign` object is created, and a static outlives every binding, so no static holds one.",
+                "A module binding decides how often an effect object is created, and a static outlives every binding, so no static holds one.",
             )
             .with_help(format!("Take the `{held}` as a constructor or method parameter instead.")),
     );

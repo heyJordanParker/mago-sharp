@@ -151,7 +151,7 @@ pub(crate) fn default_class(name: &[u8]) -> Option<&'static [u8]> {
 }
 
 /// The standard effect whose short name is `name`, which a bare name in a `uses` of a `.sharp` file names by default:
-/// `Sharp\Time\Clock` for `Clock`, spec section 29, or the [effect of `emit`](EMIT_EFFECT), which no `foreign` class
+/// `Sharp\Time\Clock` for `Clock`, spec section 29, or the [effect of `emit`](EMIT_EFFECT), which no `effect` class
 /// is.
 pub(crate) fn standard_effect(name: &[u8]) -> Option<&'static [u8]> {
     sharp_classes::STANDARD_EFFECTS

@@ -2692,7 +2692,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 Modifier::Lazy(node) => Node::Keyword(node),
                 Modifier::Late(node) => Node::Keyword(node),
                 Modifier::Internal(node) => Node::Keyword(node),
-                Modifier::Foreign(node) => Node::Keyword(node),
+                Modifier::Effect(node) => Node::Keyword(node),
                 Modifier::Ref(node) => Node::Keyword(node),
             }),
             Node::Namespace(node) => {

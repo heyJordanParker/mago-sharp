@@ -10,7 +10,7 @@ declare(strict_types=1);
  *   the prelude;
  * - the standard root classes, spec section 23: each class `Sharp/Internal/Builtins.sharp` declares with no import,
  *   and each class of `sharp/bin/builtins`'s `STANDARD_NAMESPACED_CLASSES`, which it imports;
- * - the standard effects, spec section 29: each `foreign` class of the standard library, in any of its namespaces;
+ * - the standard effects, spec section 29: each `effect` class of the standard library, in any of its namespaces;
  * - the class marked `EffectOfEmit`, the effect of `emit`, and the interface marked `PropertyBehavior`, the one a
  *   property behavior implements.
  *
@@ -128,7 +128,7 @@ foreach ($sources as $entry) {
     $path = $entry->getPathname();
     $source = read($path);
     $declarations = [];
-    preg_match_all('/^public foreign class (\w+)/m', $source, $declarations);
+    preg_match_all('/^public effect class (\w+)/m', $source, $declarations);
     foreach ($declarations[1] as $class) {
         $effects[] = namespace_of($path, $source) . "\\{$class}";
     }
@@ -172,7 +172,7 @@ echo
     rust(
         'pub(crate)',
         'STANDARD_EFFECTS',
-        "/// The standard effects, spec section 29: each `foreign` class of the standard library, which a bare name in `uses`\n/// names by default, as a bare name of `Sharp` names its class. Sorted.",
+        "/// The standard effects, spec section 29: each `effect` class of the standard library, which a bare name in `uses`\n/// names by default, as a bare name of `Sharp` names its class. Sorted.",
         $effects,
     );
 $emit = str_replace('\\', '\\\\', $marked['EffectOfEmit'][0]);

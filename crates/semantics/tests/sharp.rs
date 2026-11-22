@@ -611,7 +611,7 @@ fn a_php_form_php_sharp_never_has_fails_as_a_typo_does() {
 /// `fetch`, fails as a typo does.
 #[test]
 fn a_member_that_breaks_a_rule_names_it_and_an_unknown_accessor_fails_as_a_typo_does() {
-    let class = "namespace App.Tenant;\n\nclass Report\n{\n    public foreign int run(override int x) => x;\n    public int d { get(int x); set; }\n    private Iterable items;\n}\n";
+    let class = "namespace App.Tenant;\n\nclass Report\n{\n    public ref int run(override int x) => x;\n    public int d { get(int x); set; }\n    private Iterable items;\n}\n";
     let accessor = "namespace App.Tenant;\n\nclass Report\n{\n    public int e { fetch; set; }\n}\n";
     let interface = "namespace App.Tenant;\n\ninterface Shape\n{\n    area();\n}\n";
 
@@ -619,9 +619,9 @@ fn a_member_that_breaks_a_rule_names_it_and_an_unknown_accessor_fails_as_a_typo_
         [issues(class), issues(accessor), issues(interface)],
         [
             vec![
-                "5:28 Promoted properties are not allowed outside of constructors.",
-                "5:12 A method takes no `foreign`: remove it.",
-                "5:28 A parameter takes no `override`: remove it.",
+                "5:24 Promoted properties are not allowed outside of constructors.",
+                "5:12 A method takes no `ref`: remove it.",
+                "5:24 A parameter takes no `override`: remove it.",
                 "6:20 `get` takes no parameter list.",
                 "7:13 `Iterable` takes 1 type argument: the element.",
             ],
@@ -1503,7 +1503,7 @@ fn the_keyword_names_example_reserves_only_the_keywords_php_sharp_uses() {
 /// included, and the error says to write it so.
 #[test]
 fn every_keyword_names_a_local_or_parameter_only_with_at() {
-    const RESERVED: [&str; 53] = [
+    const RESERVED: [&str; 52] = [
         "let",
         "const",
         "emit",
@@ -1535,7 +1535,6 @@ fn every_keyword_names_a_local_or_parameter_only_with_at() {
         "case",
         "event",
         "extern",
-        "foreign",
         "module",
         "struct",
         "static",
@@ -4118,7 +4117,7 @@ fn a_static_class_cannot_extend_a_class_or_implement_an_interface() {
 
 #[test]
 fn a_static_class_takes_only_public_and_static() {
-    for (modifier, class) in [("abstract", "Text"), ("final", "Slug"), ("foreign", "Clock")] {
+    for (modifier, class) in [("abstract", "Text"), ("final", "Slug"), ("effect", "Clock")] {
         let code = leak(format!("namespace App.Tenant;\n\n{modifier} static class {class}\n{{\n}}\n"));
 
         assert_eq!(
@@ -4145,11 +4144,11 @@ fn an_extern_method_outside_the_sharp_namespace_is_left_to_the_analyzer() {
     }
 }
 
-/// A `foreign` class takes a native body for what plain PHP cannot reach, as `Environment` reads the command line, so
+/// An `effect` class takes a native body for what plain PHP cannot reach, as `Environment` reads the command line, so
 /// a `static` one is accepted there as in a static class, whatever its access.
 #[test]
-fn an_extern_method_is_static_in_a_static_or_foreign_class_with_no_body_in_any_namespace() {
-    let rule = "An `extern` method is `static`, in a static or `foreign` class, with no body.";
+fn an_extern_method_is_static_in_a_static_or_effect_class_with_no_body_in_any_namespace() {
+    let rule = "An `extern` method is `static`, in a static or `effect` class, with no body.";
 
     for namespace in ["Sharp.Text", "App"] {
         for (class, expected) in [
@@ -4162,7 +4161,7 @@ fn an_extern_method_is_static_in_a_static_or_foreign_class_with_no_body_in_any_n
                 vec![format!("6:33 {rule}"), format!("7:26 {rule}")],
             ),
             (
-                "public foreign class Shell\n{\n    private static extern List<string> lines();\n    public extern string name();\n}\n",
+                "public effect class Shell\n{\n    private static extern List<string> lines();\n    public extern string name();\n}\n",
                 vec![format!("6:26 {rule}")],
             ),
         ] {
@@ -4207,7 +4206,7 @@ fn an_extern_method_with_a_body_has_its_body_checked() {
 
     assert_eq!(
         issues(code),
-        ["5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.", "7:9 Unexpected `echo`"]
+        ["5:33 An `extern` method is `static`, in a static or `effect` class, with no body.", "7:9 Unexpected `echo`"]
     );
 }
 

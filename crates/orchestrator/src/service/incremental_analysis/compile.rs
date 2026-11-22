@@ -2147,11 +2147,11 @@ mod tests {
         (metadata, symbol_references)
     }
 
-    /// The standard library's `Sharp\System\Environment`, the `foreign` class of the effect `Environment`, at the
+    /// The standard library's `Sharp\System\Environment`, the effect class of the effect `Environment`, at the
     /// library's path, with its `currentDirectory`.
     const ENVIRONMENT: (&str, &str) = (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Environment.sharp",
-        "namespace Sharp.System;\n\npublic foreign class Environment\n{\n    public string currentDirectory() => \"/\";\n}\n",
+        "namespace Sharp.System;\n\npublic effect class Environment\n{\n    public string currentDirectory() => \"/\";\n}\n",
     );
 
     /// A project of files, each a workspace-relative name and its contents. A PHP file under `vendor/` is vendored, and
@@ -3015,7 +3015,7 @@ mod tests {
     /// the effects keeps the key.
     #[test]
     fn a_body_edit_two_calls_away_that_changes_its_effects_changes_the_callers_function_type() {
-        let meter = "namespace App;\n\npublic foreign class Meter\n{\n    public int now() => 7;\n}\n";
+        let meter = "namespace App;\n\npublic effect class Meter\n{\n    public int now() => 7;\n}\n";
         let clerk = "namespace App;\n\npublic class Clerk\n{\n    public int count(Meter meter) => new Ledger().tally(meter);\n}\n";
         let ledger = |tally: &str| {
             format!("namespace App;\n\npublic class Ledger\n{{\n    public int tally(Meter meter) => {tally};\n}}\n")
@@ -4160,8 +4160,8 @@ mod tests {
             ("app/Shop/Status.sharp", "Status : Payable", "Status"),
             ("app/Stubs/Mail.sharp", "extern Mailer uses none;", "extern Mailer uses Http;"),
             ("app/Shop/Rates.sharp", "int rate(int id);", "int rate(int id) uses Http;"),
-            ("app/Shop/Payments.sharp", "public class Payments", "public foreign class Payments"),
-            ("app/Shop/Base.sharp", "public abstract class Base", "public abstract foreign class Base"),
+            ("app/Shop/Payments.sharp", "public class Payments", "public effect class Payments"),
+            ("app/Shop/Base.sharp", "public abstract class Base", "public abstract effect class Base"),
         ] {
             let mut files = headers();
             let (_, contents) =
@@ -4314,9 +4314,10 @@ mod tests {
     }
 
     /// A `uses` that names no effect is refused with the effects its file can name. A class elsewhere that becomes
-    /// `foreign`, in the file's namespace or in another, gives the same message after the edit as a clean compile does.
+    /// an effect class, in the file's namespace or in another, gives the same message after the edit as a clean compile
+    /// does.
     #[test]
-    fn a_uses_refusal_after_another_class_becomes_foreign_matches_a_clean_compile() {
+    fn a_uses_refusal_after_another_class_becomes_an_effect_class_matches_a_clean_compile() {
         let files = || {
             vec![
                 (
@@ -4332,8 +4333,8 @@ mod tests {
         let base = shop_project(&files());
 
         for (edited_file, from, to) in [
-            ("app/Shop/Base.sharp", "public abstract class Base", "public abstract foreign class Base"),
-            ("app/Vault/Vault.sharp", "public class Vault", "public foreign class Vault"),
+            ("app/Shop/Base.sharp", "public abstract class Base", "public abstract effect class Base"),
+            ("app/Vault/Vault.sharp", "public class Vault", "public effect class Vault"),
         ] {
             let mut edited_files = files();
             let (_, contents) =

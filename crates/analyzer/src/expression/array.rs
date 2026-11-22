@@ -398,7 +398,7 @@ fn get_placed_type(
 /// Records the collection the place declared `declared` gives the literal `array_literal` that holds elements, written
 /// there as `value`, as [`get_placed_type`] gives it, once the literal's own type fits it, as the declared type of the
 /// literal, which the lowering makes its `Map` or `Set` with. The literal keeps its own type, so the place checks each
-/// element as it is, a lambda's effects and a `foreign` object included.
+/// element as it is, a lambda's effects and an effect object included.
 fn record_placed_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,

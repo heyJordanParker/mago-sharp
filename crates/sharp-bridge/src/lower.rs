@@ -10612,7 +10612,7 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
             | Modifier::PublicSet(_)
             | Modifier::ProtectedSet(_)
             | Modifier::PrivateSet(_)
-            | Modifier::Foreign(_)
+            | Modifier::Effect(_)
             | Modifier::Ref(_) => unreachable!("check_slice refuses the modifier `{modifier}`"),
         };
     }
@@ -10648,13 +10648,13 @@ fn static_type_text(text: &str, count: usize) -> String {
 }
 
 /// The flags of a class's modifiers. `public` and `internal` add none, because every PHP class is public and the
-/// analyzer checks spec section 5's namespace reach, and `foreign` adds none, because only the checker reads it. A
+/// analyzer checks spec section 5's namespace reach, and `effect` adds none, because only the checker reads it. A
 /// static class, whose members are all static, runs as a final PHP class.
 fn class_flags(modifiers: &Sequence<Modifier>) -> u32 {
     let mut flags = 0;
     for modifier in modifiers {
         flags |= match modifier {
-            Modifier::Public(_) | Modifier::Internal(_) | Modifier::Foreign(_) => 0,
+            Modifier::Public(_) | Modifier::Internal(_) | Modifier::Effect(_) => 0,
             Modifier::Abstract(_) => ZEND_ACC_EXPLICIT_ABSTRACT_CLASS,
             Modifier::Final(_) | Modifier::Static(_) => ZEND_ACC_FINAL,
             Modifier::Protected(_)

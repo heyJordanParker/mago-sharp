@@ -40,7 +40,7 @@ use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
-use crate::effects::check::check_foreign_static_write;
+use crate::effects::check::check_effect_static_write;
 use crate::error::AnalysisError;
 use crate::expression::access::analyze_rest_of_chain;
 use crate::expression::access::refuse_static_through_class_value;
@@ -795,7 +795,7 @@ where
 }
 
 /// A method that changes a static collection, as `Cache.all.add(this.store)`, stores its arguments in the static, which
-/// holds no `foreign` object, spec section 29.
+/// holds no effect object, spec section 29.
 pub(super) fn check_stored_in_static<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
@@ -820,7 +820,7 @@ pub(super) fn check_stored_in_static<A>(
     let class = word(context.resolved_names.get(&class.name));
     let stored = argument_list.arguments.iter().map(Argument::value);
     for (value, stored) in stored.filter_map(|value| Some((value, artifacts.get_expression_type(value)?))) {
-        check_foreign_static_write(context, class, word(name.value), stored, value.span());
+        check_effect_static_write(context, class, word(name.value), stored, value.span());
     }
 }
 

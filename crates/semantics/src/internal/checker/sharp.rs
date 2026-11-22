@@ -870,7 +870,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         // `check_class` reports `protected` and `private` on a class, and PHP's own check `abstract` with `final`.
-        // `check_static_class` reports `abstract`, `final` and `foreign` on a static class.
+        // `check_static_class` reports `abstract`, `final` and `effect` on a static class.
         (
             Node::Modifier(
                 Modifier::Public(_)
@@ -880,7 +880,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Modifier::Final(_)
                 | Modifier::Static(_)
                 | Modifier::Internal(_)
-                | Modifier::Foreign(_),
+                | Modifier::Effect(_),
             ),
             Class,
         ) => Some(Class),
@@ -1526,7 +1526,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::TupleElementHint(_), Parameter) => Some(Parameter),
         // The effects an `extern`, a function type or a method without a body lists, spec section 29, which the
-        // analyzer's `check_uses` decides, because an effect is a `foreign` class any file may declare.
+        // analyzer's `check_uses` decides, because an effect is an `effect` class any file may declare.
         (Node::Uses(_), File | Parameter | Method | Signature) => Some(place),
         // Spec section 13: `readonly` after the parameters keeps `this` readonly, so a method with no `this` to keep, and
         // one the language already keeps readonly, takes none.
@@ -3136,7 +3136,7 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
     };
 
     for modifier in &class.modifiers {
-        if let Modifier::Abstract(keyword) | Modifier::Final(keyword) | Modifier::Foreign(keyword) = modifier {
+        if let Modifier::Abstract(keyword) | Modifier::Final(keyword) | Modifier::Effect(keyword) = modifier {
             report(
                 format!("A static class takes only `public` and `static`: remove `{}`.", BytesDisplay(keyword.value)),
                 keyword.span,
@@ -3433,14 +3433,14 @@ fn check_abstract_access(method: &Method, context: &mut Context<'_, '_, '_>) {
     );
 }
 
-/// The place of a method's parts, refusing an `extern` method that is not `static`, in a static or `foreign` class,
-/// with no body. A `foreign` class's native body is the one part of an effect that plain PHP cannot reach, as
+/// The place of a method's parts, refusing an `extern` method that is not `static`, in a static or `effect` class,
+/// with no body. An `effect` class's native body is the one part of an effect that plain PHP cannot reach, as
 /// `Environment` reads the command line. The refusal is at its name, so its other parts, a body written by mistake
 /// among them, stay checked. Only the standard library declares native bodies, but the engine compiles the library's
 /// files from `vendor/` as any other, so the analyzer, which knows a file's package, refuses one anywhere else.
 fn check_extern(method: &Method, context: &mut Context<'_, '_, '_>) -> Option<Place> {
     if !is_extern(method)
-        || (enclosing_class(context.program, method.span()).is_some_and(|class| class.is_static || class.is_foreign)
+        || (enclosing_class(context.program, method.span()).is_some_and(|class| class.is_static || class.is_effect)
             && method.is_static()
             && matches!(method.body, MethodBody::Abstract(_)))
     {
@@ -3448,7 +3448,7 @@ fn check_extern(method: &Method, context: &mut Context<'_, '_, '_>) -> Option<Pl
     }
 
     report_refusal(
-        Issue::error("An `extern` method is `static`, in a static or `foreign` class, with no body.")
+        Issue::error("An `extern` method is `static`, in a static or `effect` class, with no body.")
             .with_annotation(Annotation::primary(method.name.span).with_message("Declared `extern` here.")),
         method.span(),
         Place::Method,
@@ -7140,7 +7140,7 @@ struct ClassLike<'ast, 'arena> {
     type_parameters: Option<&'ast TypeParameterList<'arena>>,
     members: &'ast Sequence<'arena, ClassLikeMember<'arena>>,
     is_static: bool,
-    is_foreign: bool,
+    is_effect: bool,
     /// Whether no class can extend it: a `final` class, spec section 22, a struct, which is never inherited, spec
     /// section 10, or an enum.
     is_final: bool,
@@ -7154,7 +7154,7 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
             type_parameters: class.type_parameters.as_ref(),
             members: &class.members,
             is_static: class.modifiers.contains_static(),
-            is_foreign: class.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Foreign(_))),
+            is_effect: class.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Effect(_))),
             is_final: class.modifiers.contains_final(),
         }
     }
@@ -7166,7 +7166,7 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
             type_parameters: r#struct.type_parameters.as_ref(),
             members: &r#struct.members,
             is_static: false,
-            is_foreign: false,
+            is_effect: false,
             is_final: true,
         }
     }
@@ -7201,7 +7201,7 @@ impl<'ast, 'arena> Declarations<'ast, 'arena> {
                     type_parameters: None,
                     members: &r#enum.members,
                     is_static: false,
-                    is_foreign: false,
+                    is_effect: false,
                     is_final: true,
                 });
             }

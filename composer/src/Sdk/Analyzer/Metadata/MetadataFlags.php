@@ -71,8 +71,8 @@ final class MetadataFlags
     public const EXTENSION_METHOD = 1 << 49;
     /** A PHP# extension's computed property, spec section 26. */
     public const EXTENSION_PROPERTY = 1 << 50;
-    /** A PHP# `foreign` class, spec section 29: an effect. */
-    public const FOREIGN = 1 << 51;
+    /** A PHP# `effect` class, spec section 29: an effect. */
+    public const EFFECT_CLASS = 1 << 51;
     /** A PHP# struct, spec section 10. */
     public const STRUCT = 1 << 52;
     /** A PHP# property each creation of its object must set, spec sections 6.1 and 10. */

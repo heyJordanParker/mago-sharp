@@ -273,18 +273,12 @@ where
         }
 
         Ok(match self.stream.lookahead(1)? {
-            Some(token) if token.kind == T![Identifier] => !matches!(
-                token.value,
-                b"struct"
-                    | b"virtual"
-                    | b"override"
-                    | b"required"
-                    | b"extern"
-                    | b"lazy"
-                    | b"late"
-                    | b"internal"
-                    | b"foreign"
-            ),
+            Some(token) if token.kind == T![Identifier] => {
+                !matches!(
+                    token.value,
+                    b"struct" | b"virtual" | b"override" | b"required" | b"extern" | b"lazy" | b"late" | b"internal"
+                ) && !self.is_effect(1)?
+            }
             Some(token) => {
                 // `readonly readonly Order` reads as one readonly type inside another, which the checker refuses.
                 matches!(

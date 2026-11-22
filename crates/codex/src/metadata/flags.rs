@@ -78,8 +78,8 @@ impl MetadataFlags {
     /// A PHP# extension's computed property, spec section 26: the public static method of a static class it runs as,
     /// which takes only the extension's receiver and is read as a property of the receiver.
     pub const EXTENSION_PROPERTY: MetadataFlags = MetadataFlags(1 << 50);
-    /// A PHP# `foreign` class, spec section 29: an effect, which code has by holding one of its objects.
-    pub const FOREIGN: MetadataFlags = MetadataFlags(1 << 51);
+    /// A PHP# `effect` class, spec section 29: an effect, which code has by holding one of its objects.
+    pub const EFFECT_CLASS: MetadataFlags = MetadataFlags(1 << 51);
     /// A PHP# struct, spec section 10: a final class whose object never changes and compares by value.
     pub const STRUCT: MetadataFlags = MetadataFlags(1 << 52);
     /// A PHP# property each creation of its object must set, spec sections 6.1 and 10: one written `required`, or a
@@ -238,8 +238,8 @@ impl MetadataFlags {
 
     #[inline]
     #[must_use]
-    pub const fn is_foreign(self) -> bool {
-        self.contains(Self::FOREIGN)
+    pub const fn is_effect_class(self) -> bool {
+        self.contains(Self::EFFECT_CLASS)
     }
 
     #[inline]
@@ -649,7 +649,7 @@ mod tests {
             ("EVENT", MetadataFlags::EVENT),
             ("EXTENSION_METHOD", MetadataFlags::EXTENSION_METHOD),
             ("EXTENSION_PROPERTY", MetadataFlags::EXTENSION_PROPERTY),
-            ("FOREIGN", MetadataFlags::FOREIGN),
+            ("EFFECT_CLASS", MetadataFlags::EFFECT_CLASS),
             ("STRUCT", MetadataFlags::STRUCT),
             ("REQUIRED", MetadataFlags::REQUIRED),
             ("OPERATOR", MetadataFlags::OPERATOR),

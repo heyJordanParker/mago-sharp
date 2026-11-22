@@ -204,7 +204,7 @@ where
                 return Ok(next.is_some_and(|next| {
                     next.kind.is_modifier()
                         || matches!(next.kind, T!["class" | "interface" | "enum"])
-                        || matches!(next.value, b"struct" | b"sealed" | b"foreign" | b"internal")
+                        || matches!(next.value, b"struct" | b"sealed" | b"effect" | b"internal")
                         || self.miscased_keyword(next).is_some_and(|next| {
                             is_modifier_word(next) || matches!(next, "class" | "interface" | "enum" | "struct")
                         })

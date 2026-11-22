@@ -15515,8 +15515,7 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
 #[test]
 fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() {
     let sharp = "namespace Demo;\n\nimport App.Effects.Payments as Billing;\nimport Sharp.Net.Mail as Post;\n\nclass Receipt\n{\n    public string step(Function<int(int) uses Http, Post, Billing> step) => `Step: ${step}`;\n}\n";
-    let payments =
-        ("src/App/Effects/Payments.sharp", "namespace App.Effects;\n\npublic foreign class Payments\n{\n}\n");
+    let payments = ("src/App/Effects/Payments.sharp", "namespace App.Effects;\n\npublic effect class Payments\n{\n}\n");
 
     assert_eq!(
         worded(("src/Demo/Receipt.sharp", sharp), &[payments]),
@@ -26202,7 +26201,7 @@ fn an_effect_name_a_file_imports_or_declares_is_that_class() {
 fn a_uses_takes_the_effect_class_of_the_files_namespace_over_the_standard_effect_of_its_name() {
     let database = (
         "src/App/Shop/Database.sharp",
-        "namespace App.Shop;\n\npublic foreign class Database\n{\n    public int rows() => 3;\n}\n",
+        "namespace App.Shop;\n\npublic effect class Database\n{\n    public int rows() => 3;\n}\n",
     );
     let counter = (
         "src/App/Shop/Counter.sharp",
@@ -28456,7 +28455,7 @@ fn effect_issues(files: &[(&'static str, &'static str)]) -> Vec<String> {
 }
 
 /// Spec sections 10, 20 and 29: a struct and an enum are values, so their methods, `get` bodies and operators have no
-/// effects, a data case's included. A struct method that calls a `foreign` parameter, an `Http` or a `Dns`, an enum
+/// effects, a data case's included. A struct method that calls an effect object parameter, an `Http` or a `Dns`, an enum
 /// method that emits, and a struct method and a method of an enum with a data case that call plain PHP with an `extern`
 /// effect are refused, naming the member and the effect. A pure struct method, a struct method that calls plain PHP its
 /// `extern` line declares `uses none`, and a class method with the same effect, compile.
@@ -28647,12 +28646,12 @@ fn an_extern_of_a_plain_php_class_is_accepted() {
     assert_eq!(issues(stub, &[STRIPE]), Vec::<String>::new());
 }
 
-/// A project declares its own effect as a `foreign` class, spec section 29, and every `uses` takes it: an `extern`'s,
+/// A project declares its own effect as an effect class, spec section 29, and every `uses` takes it: an `extern`'s,
 /// a function type's, written in a file that imports the class, and an interface method's in the class's namespace. A
 /// plain class of that name is no effect.
 #[test]
-fn a_uses_takes_a_foreign_class_and_refuses_any_other_class() {
-    let foreign = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic foreign class Payments\n{\n}\n");
+fn a_uses_takes_an_effect_class_and_refuses_any_other_class() {
+    let effect = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic effect class Payments\n{\n}\n");
     let plain = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic class Payments\n{\n}\n");
     let extern_ = (
         "app/Stubs/Stripe.sharp",
@@ -28671,9 +28670,21 @@ fn a_uses_takes_a_foreign_class_and_refuses_any_other_class() {
     for (form, refused) in
         [(extern_, "6:26 invalid-effect"), (function_type, "7:40 invalid-effect"), (method, "5:32 invalid-effect")]
     {
-        assert_eq!(issues(form, &[foreign, STRIPE]), Vec::<String>::new(), "{}", form.0);
+        assert_eq!(issues(form, &[effect, STRIPE]), Vec::<String>::new(), "{}", form.0);
         assert_eq!(issues(form, &[plain, STRIPE]), [refused], "{}", form.0);
     }
+}
+
+/// `effect` is a modifier only among a class's modifiers, spec section 29, so a parameter, a local and a property
+/// named `effect` compile.
+#[test]
+fn a_parameter_a_local_and_a_property_named_effect_compile() {
+    let potion = (
+        "app/Shop/Potion.sharp",
+        "namespace App.Shop;\n\npublic class Potion\n{\n    public string effect { get; }\n\n    public Potion(string effect)\n    {\n        this.effect = effect;\n    }\n\n    public int strength(int effect) => effect * 2;\n\n    public string label()\n    {\n        const effect = this.effect;\n\n        return effect;\n    }\n}\n",
+    );
+
+    assert_eq!(issues(potion, &[]), Vec::<String>::new());
 }
 
 /// Spec section 29: a method takes on the effects of each function it is given, with nothing written, as Swift's
@@ -29095,7 +29106,7 @@ fn uses_none_warns_on_a_method_and_is_refused_beside_another_effect() {
                 format!("7:22 invalid-effect {beside}"),
                 format!("9:45 invalid-effect {beside}"),
                 format!("11:38 invalid-effect {beside}"),
-                "11:44 invalid-effect `Htp` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Mail, PhpGlobals, Process, Random, Events or a `foreign` class. | Written here. | An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`.".to_owned(),
+                "11:44 invalid-effect `Htp` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Mail, PhpGlobals, Process, Random, Events or a class declared `effect class`. | Written here. | An effect is a class declared `effect class`, as the standard library's `Clock` is, or `Events`, the effect of `emit`.".to_owned(),
             ],
             Vec::<String>::new(),
         )
@@ -29231,14 +29242,14 @@ fn a_function_or_extension_method_value_has_its_effects_where_it_runs() {
     );
 }
 
-/// A name in `uses` that is no effect is refused with the effects its file can name: each `foreign` class of the
-/// standard library, of the file's namespace and of its imports, by name, then `Events`. A `foreign` class the file
+/// A name in `uses` that is no effect is refused with the effects its file can name: each effect class of the
+/// standard library, of the file's namespace and of its imports, by name, then `Events`. An effect class the file
 /// cannot name stays out, so the message changes only with what the file reads.
 #[test]
 fn a_uses_that_names_no_effect_lists_the_effects_its_file_can_name() {
-    let payments = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic foreign class Payments\n{\n}\n");
-    let ledger = ("app/Books/Ledger.sharp", "namespace App.Books;\n\npublic foreign class Ledger\n{\n}\n");
-    let audit = ("app/Audit/Trail.sharp", "namespace App.Audit;\n\npublic foreign class Trail\n{\n}\n");
+    let payments = ("app/Billing/Payments.sharp", "namespace App.Billing;\n\npublic effect class Payments\n{\n}\n");
+    let ledger = ("app/Books/Ledger.sharp", "namespace App.Books;\n\npublic effect class Ledger\n{\n}\n");
+    let audit = ("app/Audit/Trail.sharp", "namespace App.Audit;\n\npublic effect class Trail\n{\n}\n");
     let gateway = (
         "app/Billing/Gateway.sharp",
         "namespace App.Billing;\n\nimport App.Books.Ledger;\n\npublic interface Gateway\n{\n    int charge(int cents) uses Clok;\n\n    int keep(Ledger ledger);\n}\n",
@@ -29247,7 +29258,7 @@ fn a_uses_that_names_no_effect_lists_the_effects_its_file_can_name() {
     assert_eq!(
         worded(gateway, &[payments, ledger, audit]),
         [
-            "7:32 invalid-effect `Clok` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Ledger, Mail, Payments, PhpGlobals, Process, Random, Events or a `foreign` class. | Written here. | An effect is a `foreign` class, as the standard library's `Clock` is, or `Events`, the effect of `emit`."
+            "7:32 invalid-effect `Clok` is not an effect: `uses` takes Cache, Clock, Console, Database, Dns, Environment, Files, Http, Ledger, Mail, Payments, PhpGlobals, Process, Random, Events or a class declared `effect class`. | Written here. | An effect is a class declared `effect class`, as the standard library's `Clock` is, or `Events`, the effect of `emit`."
         ]
     );
 }
@@ -30768,10 +30779,10 @@ fn a_static_method_value_has_its_method_s_effects_where_it_runs() {
     }
 }
 
-/// A method value of a `foreign` class has that class's effect wherever it runs, as a call of the method has, so a law
+/// A method value of an effect class has that class's effect wherever it runs, as a call of the method has, so a law
 /// that runs `environment.require` through a function parameter is impure.
 #[test]
-fn a_method_value_of_a_foreign_class_has_its_effect_where_it_runs() {
+fn a_method_value_of_an_effect_class_has_its_effect_where_it_runs() {
     let shelf = (
         "app/Shop/Shelf.sharp",
         "namespace App.Shop;\n\nimport Sharp.System.Environment;\n\npublic class Shelf\n{\n    public Shelf(private Environment environment) { }\n\n    public static string carried(Function<string(string)> body) => body(\"HOME\");\n\n    public string home => Shelf.carried(this.environment.require);\n\n    law reads(Shelf shelf) => shelf.home != \"\";\n}\n",
@@ -30870,7 +30881,7 @@ const SERVICES_STUB: (&str, &str) = (
 
 /// A plain PHP method value runs the method, so a function type holds it only when it lists every effect the method's
 /// `extern` declares, as a call of the method has them. A method with no `extern` line is refused as any plain PHP is,
-/// and a method of the `foreign` class `Sharp\System\Environment` has the effect `Environment`.
+/// and a method of the effect class `Sharp\System\Environment` has the effect `Environment`.
 #[test]
 fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
     let pricing = (
@@ -31591,14 +31602,14 @@ fn environment_require_is_called_on_an_environment_object() {
     assert_eq!(issues(deploy, &[]), ["11:46 invalid-static-method-access"]);
 }
 
-/// Spec section 29: code has a `foreign` class's effect by holding one of its objects, so a getter that calls or reads
-/// through a field or a constructor parameter of a project's `foreign` class has it, and a law reading the getter is
+/// Spec section 29: code has an effect class's effect by holding one of its objects, so a getter that calls or reads
+/// through a field or a constructor parameter of a project's effect class has it, and a law reading the getter is
 /// refused, naming the class.
 #[test]
-fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
+fn a_getter_reaching_through_an_effect_object_has_the_effect_of_its_class() {
     let payments = (
         "app/Billing/Payments.sharp",
-        "namespace App.Billing;\n\npublic foreign class Payments\n{\n    public int fee { get; } = 30;\n\n    public int charge(int cents) => cents;\n}\n",
+        "namespace App.Billing;\n\npublic effect class Payments\n{\n    public int fee { get; } = 30;\n\n    public int charge(int cents) => cents;\n}\n",
     );
     let field = (
         "app/Shop/Checkout.sharp",
@@ -31639,10 +31650,10 @@ fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
     );
     assert_eq!(reported(named, &[payments]), ["9:39 parse Unexpected `{`"]);
 
-    // A subclass of a `foreign` class is that class's object, so it has that class's effect.
+    // A subclass of an effect class is that class's object, so it has that class's effect.
     let gateway = (
         "app/Billing/Gateway.sharp",
-        "namespace App.Billing;\n\npublic abstract foreign class Gateway\n{\n    public virtual int fee() => 1;\n}\n",
+        "namespace App.Billing;\n\npublic abstract effect class Gateway\n{\n    public virtual int fee() => 1;\n}\n",
     );
     let stripe = (
         "app/Billing/Stripe.sharp",
@@ -31660,11 +31671,11 @@ fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
     );
 }
 
-/// Spec section 29: code that reaches a `foreign` object has its class's effect, whatever its members do, so each
-/// member of a `foreign` class has that effect too. A pure interface method refuses a `foreign` implementation, and a
-/// call through an interface or a base class has the effect of its `foreign` implementation.
+/// Spec section 29: code that reaches an effect object has its class's effect, whatever its members do, so each
+/// member of an effect class has that effect too. A pure interface method refuses an effect class's implementation, and a
+/// call through an interface or a base class has the effect of its effect class's implementation.
 #[test]
-fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class() {
+fn an_effect_class_s_members_have_its_effect_behind_an_interface_or_a_base_class() {
     let store = |uses: &'static str| {
         (
             "app/Cache/Store.sharp",
@@ -31676,7 +31687,7 @@ fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
     };
     let quiet = (
         "app/Cache/QuietStore.sharp",
-        "namespace App.Cache;\n\npublic foreign class QuietStore : Store\n{\n    public int size() => 3;\n}\n",
+        "namespace App.Cache;\n\npublic effect class QuietStore : Store\n{\n    public int size() => 3;\n}\n",
     );
     let quiet_reader = (
         "app/Cache/QuietReader.sharp",
@@ -31688,7 +31699,7 @@ fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
     );
     let sneaky = (
         "app/Cache/Sneaky.sharp",
-        "namespace App.Cache;\n\npublic foreign class Sneaky : Plain\n{\n    public override int size() => 2;\n}\n",
+        "namespace App.Cache;\n\npublic effect class Sneaky : Plain\n{\n    public override int size() => 2;\n}\n",
     );
     let plain_reader = (
         "app/Cache/PlainReader.sharp",
@@ -31698,7 +31709,7 @@ fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
     assert_eq!(
         effect_issues(&[quiet, store(""), quiet_reader]),
         [
-            "app/Cache/QuietStore.sharp:5:26 incompatible-effects: `QuietStore.size` is a member of the `foreign` class `QuietStore`, so the pure `Store.size` cannot accept it."
+            "app/Cache/QuietStore.sharp:5:26 incompatible-effects: `QuietStore.size` is a member of the effect class `QuietStore`, so the pure `Store.size` cannot accept it."
         ]
     );
     assert_eq!(
@@ -31711,33 +31722,33 @@ fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
     assert_eq!(
         effect_issues(&[sneaky, plain, plain_reader]),
         [
-            "app/Cache/PlainReader.sharp:11:40 impure-law: Law `counted` reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`. Laws hold only over pure code.",
-            "app/Cache/PlainReader.sharp:9:41 invalid-return-statement: This lambda reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`, so a pure `Function<int()>` cannot hold it.",
+            "app/Cache/PlainReader.sharp:11:40 impure-law: Law `counted` reaches `Sneaky.size`, a member of the effect class `Sneaky`. Laws hold only over pure code.",
+            "app/Cache/PlainReader.sharp:9:41 invalid-return-statement: This lambda reaches `Sneaky.size`, a member of the effect class `Sneaky`, so a pure `Function<int()>` cannot hold it.",
         ]
     );
 }
 
-/// Spec section 29: a `foreign` object is created in a module binding and nowhere else, so a `.sharp` file's `new` of a
-/// `foreign` class, or of a class that extends one, is refused outside a binding's expression. Plain PHP creates one
+/// Spec section 29: an effect object is created in a module binding and nowhere else, so a `.sharp` file's `new` of an
+/// effect class, or of a class that extends one, is refused outside a binding's expression. Plain PHP creates one
 /// freely.
 #[test]
-fn a_foreign_object_is_created_only_in_a_module_binding() {
-    let store = ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore\n{\n}\n");
+fn an_effect_object_is_created_only_in_a_module_binding() {
+    let store = ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic effect class RedisStore\n{\n}\n");
     let fake = ("app/Cache/FakeStore.sharp", "namespace App.Cache;\n\npublic class FakeStore : RedisStore\n{\n}\n");
     let factory = (
         "app/Cache/Factory.sharp",
         "namespace App.Cache;\n\npublic class Factory\n{\n    public RedisStore make() => new RedisStore();\n\n    public RedisStore fake()\n    {\n        const make = () => new FakeStore();\n        return make();\n    }\n}\n",
     );
-    let help = "A module binding decides how often a `foreign` object is created. | Take it as a constructor or method parameter, and create it in a module binding.";
+    let help = "A module binding decides how often an effect object is created. | Take it as a constructor or method parameter, and create it in a module binding.";
 
     assert_eq!(
         worded(factory, &[store, fake]),
         [
             format!(
-                "5:37 foreign-outside-module `RedisStore` is `foreign`, so only a module binding creates it. | {help}"
+                "5:37 effect-object-outside-module `RedisStore` is an effect class, so only a module binding creates it. | {help}"
             ),
             format!(
-                "9:32 foreign-outside-module `FakeStore` is a `foreign` `RedisStore`, so only a module binding creates it. | {help}"
+                "9:32 effect-object-outside-module `FakeStore` extends the effect class `RedisStore`, so only a module binding creates it. | {help}"
             ),
         ]
     );
@@ -31753,16 +31764,17 @@ fn a_foreign_object_is_created_only_in_a_module_binding() {
     assert_eq!(worded(php, &[store]), Vec::<String>::new());
 }
 
-/// Spec section 29: a static outlives the module binding that creates a `foreign` object, so a static field holds none,
+/// Spec section 29: a static outlives the module binding that creates an effect object, so a static field holds none,
 /// alone or inside a collection. A static field written without its type holds nothing the check can name, so only the parser
 /// reports it. `App.Cache.Cache` shares its short name with the standard library's `Cache`, so a message names it in
 /// full.
 #[test]
-fn a_static_field_holding_a_foreign_object_is_refused() {
-    let store = ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore\n{\n}\n");
+fn a_static_field_holding_an_effect_object_is_refused() {
+    let store = ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic effect class RedisStore\n{\n}\n");
     let message = "`App.Cache.Cache.store` is static, so it cannot hold a `RedisStore`.";
 
-    // A static needs a value, which no static of a `foreign` type alone can have but `null`, so the refusal shows alone.
+    // A static needs a value, which no static of an effect class's type alone can have but `null`, so the refusal shows
+    // alone.
     assert_eq!(
         worded(
             (
@@ -31782,7 +31794,7 @@ fn a_static_field_holding_a_foreign_object_is_refused() {
         assert_eq!(
             worded(("app/Cache/Cache.sharp", cache), &[store]),
             [format!(
-                "5:{column} foreign-in-static {message} | A module binding decides how often a `foreign` object is created, and a static outlives every binding, so no static holds one. | Take the `RedisStore` as a constructor or method parameter instead."
+                "5:{column} effect-object-in-static {message} | A module binding decides how often an effect object is created, and a static outlives every binding, so no static holds one. | Take the `RedisStore` as a constructor or method parameter instead."
             )],
             "{field}"
         );
@@ -32546,17 +32558,17 @@ fn an_unchecked_exception_setting_names_only_its_own_class() {
     }
 }
 
-/// Spec sections 24 and 29: an effect is a class-like named by its key, so the `foreign` PHP# classes `Disk` and `DISK`
+/// Spec sections 24 and 29: an effect is a class-like named by its key, so the PHP# effect classes `Disk` and `DISK`
 /// are two effects, and `uses DISK` allows no call of a `Disk`.
 #[test]
 fn an_effect_allows_only_its_own_class_and_not_its_twin() {
     let disk = (
         "app/Cache/Disk.sharp",
-        "namespace App.Cache;\n\npublic foreign class Disk\n{\n    public int size() => 3;\n}\n",
+        "namespace App.Cache;\n\npublic effect class Disk\n{\n    public int size() => 3;\n}\n",
     );
     let twin = (
         "app/Cache/DISK.sharp",
-        "namespace App.Cache;\n\npublic foreign class DISK\n{\n    public int size() => 4;\n}\n",
+        "namespace App.Cache;\n\npublic effect class DISK\n{\n    public int size() => 4;\n}\n",
     );
     let store =
         ("app/Cache/Store.sharp", "namespace App.Cache;\n\npublic interface Store\n{\n    int size() uses DISK;\n}\n");
@@ -32573,12 +32585,12 @@ fn an_effect_allows_only_its_own_class_and_not_its_twin() {
     );
 }
 
-/// Spec section 29: a `foreign` object is an ordinary type in a parameter and a return value. A method that calls one
+/// Spec section 29: an effect object is an ordinary type in a parameter and a return value. A method that calls one
 /// it takes has its effect, as when it calls one it holds, so a pure interface method's implementation that calls a
 /// `Clock` parameter is refused. A caller that uses a returned one has the effect at that call. A static still holds
 /// none.
 #[test]
-fn a_foreign_object_is_an_ordinary_parameter_and_return_type() {
+fn an_effect_object_is_an_ordinary_parameter_and_return_type() {
     let instant = (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Instant.sharp",
         include_str!("../../../../composer/library/Sharp/Time/Instant.sharp"),
@@ -32617,7 +32629,7 @@ fn a_foreign_object_is_an_ordinary_parameter_and_return_type() {
         "namespace App.Shop;\n\nimport Sharp.Time.Clock;\n\npublic class Kept\n{\n    protected static Clock? clock = null;\n}\n",
     );
     assert!(
-        issues(kept, &[]).iter().any(|issue| issue.ends_with(" foreign-in-static")),
+        issues(kept, &[]).iter().any(|issue| issue.ends_with(" effect-object-in-static")),
         "a static: {:?}",
         issues(kept, &[])
     );
@@ -32666,15 +32678,15 @@ fn a_pure_method_may_change_its_object_and_its_arguments() {
     );
 }
 
-/// Spec section 29: no static holds a `foreign` object, so a write of one into a static whose declared type is wider,
+/// Spec section 29: no static holds an effect object, so a write of one into a static whose declared type is wider,
 /// such as `Any?`, a `List<Any>` or an interface the class implements, is refused at the value, as a changing
 /// collection method on a static is.
 #[test]
-fn a_foreign_object_written_into_a_static_is_refused() {
+fn an_effect_object_written_into_a_static_is_refused() {
     let store = ("app/Cache/Store.sharp", "namespace App.Cache;\n\npublic interface Store\n{\n}\n");
     let redis =
-        ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore : Store\n{\n}\n");
-    let message = "foreign-in-static `App.Cache.Cache.loose` is static, so it cannot hold a `RedisStore`. | A module binding decides how often a `foreign` object is created, and a static outlives every binding, so no static holds one. | Take the `RedisStore` as a constructor or method parameter instead.";
+        ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic effect class RedisStore : Store\n{\n}\n");
+    let message = "effect-object-in-static `App.Cache.Cache.loose` is static, so it cannot hold a `RedisStore`. | A module binding decides how often an effect object is created, and a static outlives every binding, so no static holds one. | Take the `RedisStore` as a constructor or method parameter instead.";
 
     for (field, write, column) in [
         ("protected static Any? loose = null;", "Cache.loose = this.store;", 40),
@@ -32697,17 +32709,18 @@ fn a_foreign_object_written_into_a_static_is_refused() {
     }
 }
 
-/// A value whose type parameter has a `foreign` bound is a `foreign` object, and so is a generic class's `foreign`
-/// type argument, so a static holds neither. A bound that is no `foreign` class holds nothing the check can name.
+/// A value whose type parameter has an effect class for its bound is an effect object, and so is a generic class's
+/// type argument that is an effect class, so a static holds neither. A bound that is no effect class holds nothing the
+/// check can name.
 #[test]
-fn a_foreign_object_behind_a_type_parameter_or_a_type_argument_is_refused_in_a_static() {
+fn an_effect_object_behind_a_type_parameter_or_a_type_argument_is_refused_in_a_static() {
     let store = ("app/Cache/Store.sharp", "namespace App.Cache;\n\npublic interface Store\n{\n}\n");
     let redis =
-        ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic foreign class RedisStore : Store\n{\n}\n");
+        ("app/Cache/RedisStore.sharp", "namespace App.Cache;\n\npublic effect class RedisStore : Store\n{\n}\n");
     let shelf = ("app/Cache/Shelf.sharp", "namespace App.Cache;\n\npublic class Shelf<TItem>\n{\n}\n");
     let refused = |property: &str, column: usize| {
         vec![format!(
-            "5:{column} foreign-in-static `App.Cache.Cache.{property}` is static, so it cannot hold a `RedisStore`. | A module binding decides how often a `foreign` object is created, and a static outlives every binding, so no static holds one. | Take the `RedisStore` as a constructor or method parameter instead."
+            "5:{column} effect-object-in-static `App.Cache.Cache.{property}` is static, so it cannot hold a `RedisStore`. | A module binding decides how often an effect object is created, and a static outlives every binding, so no static holds one. | Take the `RedisStore` as a constructor or method parameter instead."
         )]
     };
 

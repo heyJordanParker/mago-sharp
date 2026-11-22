@@ -905,9 +905,9 @@ where
             }
 
             if modifiers
-                .is_some_and(|modifiers| modifiers.iter().any(|modifier| matches!(modifier, Modifier::Foreign(_))))
+                .is_some_and(|modifiers| modifiers.iter().any(|modifier| matches!(modifier, Modifier::Effect(_))))
             {
-                class_like_metadata.flags |= MetadataFlags::FOREIGN;
+                class_like_metadata.flags |= MetadataFlags::EFFECT_CLASS;
             }
 
             codebase.symbols.add_class_like(name, SymbolKind::Class, sharp);

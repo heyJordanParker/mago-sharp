@@ -93,7 +93,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
-use crate::effects::check::check_foreign_statics;
+use crate::effects::check::check_effect_statics;
 use crate::effects::summary::record_parse;
 use crate::error::AnalysisError;
 use crate::expression::binary::comparison::missing_equality;
@@ -1398,7 +1398,7 @@ where
     }
 
     if context.dialect.is_sharp() {
-        check_foreign_statics(context, class_like_metadata);
+        check_effect_statics(context, class_like_metadata);
     }
 
     // A PHP# enum gives each member its interfaces state, each method by its own and each property by its own member or

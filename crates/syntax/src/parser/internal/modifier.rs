@@ -18,9 +18,26 @@ where
         self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"internal"
     }
 
-    /// Whether `token` is spec section 29's `foreign`, which starts a class's modifiers, as `public` does.
-    pub(crate) fn is_foreign(&self, token: Token<'_>) -> bool {
-        self.dialect.is_sharp() && token.kind == T![Identifier] && token.value == b"foreign"
+    /// Whether the token `offset` ahead is spec section 29's `effect`: the word `effect` among a class's modifiers, so
+    /// the modifiers after it end at `class`, as in `public effect abstract class Store`. Everywhere else `effect` is a
+    /// name, as a parameter's, a local's or a property's.
+    pub(crate) fn is_effect(&self, offset: usize) -> Result<bool, ParseError<'arena>> {
+        if !self.dialect.is_sharp() {
+            return Ok(false);
+        }
+        let mut tokens = self.stream.peek_tokens().skip(offset);
+        if !tokens.next().transpose()?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"effect") {
+            return Ok(false);
+        }
+        while let Some(token) = tokens.next().transpose()? {
+            match token.kind {
+                T!["class"] => return Ok(true),
+                kind if kind.is_modifier() => {}
+                _ => return Ok(false),
+            }
+        }
+
+        Ok(false)
     }
 
     /// Whether C#'s `partial` starts here, before a type's keyword or its other modifiers, as in `partial class Order`
@@ -38,8 +55,7 @@ where
                 || next.kind.is_modifier()
                 || (next.kind == T![Identifier] && matches!(next.value, b"struct" | b"sealed" | b"event"))
                 || self.is_internal(next)
-                || self.is_foreign(next)
-        }))
+        }) || self.is_effect(1)?)
     }
 
     /// Whether the token `offset` ahead is spec section 5's `internal`.
@@ -129,6 +145,7 @@ where
 
                 Modifier::Internal(internal)
             }
+            Some(T![Identifier]) if self.is_effect(0)? => Modifier::Effect(self.expect_any_keyword()?),
             // A class lives in one file, so C#'s `partial` fails as a typo does, and the declaration parses on without
             // it.
             Some(T![Identifier]) if self.is_at_partial()? => {
@@ -153,7 +170,6 @@ where
                     Some(b"lazy") => Modifier::Lazy(self.expect_any_keyword()?),
                     Some(b"late") => Modifier::Late(self.expect_any_keyword()?),
                     Some(b"internal") => Modifier::Internal(self.expect_any_keyword()?),
-                    Some(b"foreign") => Modifier::Foreign(self.expect_any_keyword()?),
                     Some(b"ref") => Modifier::Ref(self.expect_any_keyword()?),
                     _ => return Ok(None),
                 }
@@ -166,5 +182,5 @@ where
 /// Whether `word` is a PHP# member's modifier written as a word rather than a keyword, as `virtual` and `internal` are,
 /// which a `(` that opens the member's type may follow.
 pub(crate) fn is_member_modifier_word(word: &[u8]) -> bool {
-    matches!(word, b"virtual" | b"override" | b"required" | b"extern" | b"lazy" | b"late" | b"internal" | b"foreign")
+    matches!(word, b"virtual" | b"override" | b"required" | b"extern" | b"lazy" | b"late" | b"internal")
 }

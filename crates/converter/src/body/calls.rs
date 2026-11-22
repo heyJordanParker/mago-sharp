@@ -364,7 +364,7 @@ impl<'input> Converter<'input, '_> {
     }
 
     /// The effect a call of `callee`, a function or a method it reaches through `class`, has as the checker reads it
-    /// (spec section 29), as a refusal names it: "has the effect `Translator`" for the effect of a `foreign` class
+    /// (spec section 29), as a refusal names it: "has the effect `Translator`" for the effect of an `effect` class
     /// `class` is or extends, or the first effect the `extern` line the call falls under lists, as
     /// [`CodebaseMetadata::extern_of_method`] finds it for a method and [`CodebaseMetadata::extern_of`] for a function,
     /// "may have any effect" for a line that says `uses any`, and "has no `extern` line" for a call no line covers,
@@ -378,8 +378,8 @@ impl<'input> Converter<'input, '_> {
         let class = class.and_then(|class| codebase.get_class_like(class));
         if let Some(class) = class {
             let parents = class.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(*parent));
-            if let Some(foreign) = std::iter::once(class).chain(parents).find(|class| class.flags.is_foreign()) {
-                return Some(format!("has the effect `{}`", foreign.original_name));
+            if let Some(effect) = std::iter::once(class).chain(parents).find(|class| class.flags.is_effect_class()) {
+                return Some(format!("has the effect `{}`", effect.original_name));
             }
         }
         if callee.flags.is_sharp() || callee.flags.is_built_in() || callee.span.file_id == self.input.file.id {

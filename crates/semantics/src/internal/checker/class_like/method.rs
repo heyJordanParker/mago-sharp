@@ -256,7 +256,7 @@ pub fn check_method<'ast, 'arena>(
             | Modifier::Lazy(_)
             | Modifier::Late(_)
             | Modifier::Internal(_)
-            | Modifier::Foreign(_)
+            | Modifier::Effect(_)
             | Modifier::Ref(_) => {}
             Modifier::Extern(_) => is_extern = true,
         }

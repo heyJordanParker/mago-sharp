@@ -98,7 +98,7 @@ pub(crate) fn sharp_class_like_name(codebase: &CodebaseMetadata, imported_names:
 }
 
 /// Returns the effect `effect` as a `uses` in a `.sharp` file with the `imported_names` of its imports writes it. A
-/// standard effect, a `foreign` class of the standard library, is the name the file's import of it gives it, as in
+/// standard effect, an effect class of the standard library, is the name the file's import of it gives it, as in
 /// `Post` for `import Sharp.Net.Mail as Post;`, or else its own name, which is that effect in every `uses` whatever
 /// class the file imports or declares under it, spec section 29. Any other effect is named as [`sharp_class_like_name`]
 /// names a class.

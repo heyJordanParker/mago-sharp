@@ -59,7 +59,7 @@ pub fn check_parameter_list(
                 | Modifier::Lazy(_)
                 | Modifier::Late(_)
                 | Modifier::Internal(_)
-                | Modifier::Foreign(_)
+                | Modifier::Effect(_)
                 | Modifier::Ref(_) => {}
                 Modifier::Static(keyword) | Modifier::Final(keyword) | Modifier::Abstract(keyword) => {
                     let kw = BytesDisplay(keyword.value);

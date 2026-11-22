@@ -32,7 +32,7 @@ impl Fingerprintable for Modifier<'_> {
             Modifier::Lazy(_) => "lazy".hash(hasher),
             Modifier::Late(_) => "late".hash(hasher),
             Modifier::Internal(_) => "internal".hash(hasher),
-            Modifier::Foreign(_) => "foreign".hash(hasher),
+            Modifier::Effect(_) => "effect".hash(hasher),
             Modifier::Ref(_) => "ref".hash(hasher),
         }
     }
@@ -67,7 +67,7 @@ pub fn fingerprint_modifiers<'modifier, H>(
             Modifier::Lazy(_) => Some("lazy"),
             Modifier::Late(_) => Some("late"),
             Modifier::Internal(_) => Some("internal"),
-            Modifier::Foreign(_) => Some("foreign"),
+            Modifier::Effect(_) => Some("effect"),
             Modifier::Ref(_) => Some("ref"),
         })
         .collect();

@@ -555,12 +555,12 @@ fn an_extension_block_type_parameter_change_changes_the_fingerprint() {
 }
 
 #[test]
-fn a_foreign_modifier_change_changes_the_fingerprint() {
+fn an_effect_modifier_change_changes_the_fingerprint() {
     let payments = |code| fingerprint_of(b"src/Payments.sharp", code);
     let plain = payments(b"public class Payments\n{\n}\n");
-    let foreign = payments(b"public foreign class Payments\n{\n}\n");
+    let effect = payments(b"public effect class Payments\n{\n}\n");
 
-    assert_ne!(plain, foreign, "Marking a class `foreign` should change the fingerprint");
+    assert_ne!(plain, effect, "Marking a class `effect` should change the fingerprint");
 }
 
 /// Each PHP# form changes the fingerprint when its own part changes, so an edit to it reaches the analysis cache. Each

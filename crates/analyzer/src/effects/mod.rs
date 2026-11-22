@@ -36,8 +36,9 @@ pub(crate) mod summary;
 /// A reason a body is impure other than a change of state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Effect {
-    /// An effect an `extern` line lists for the plain PHP called, named by its class, such as `Sharp\Http`.
-    Foreign(Word),
+    /// An effect named by its class, such as `Sharp\Http`: one an `extern` line lists for the plain PHP called, or the
+    /// effect class of an object code reaches.
+    Class(Word),
     /// A call into plain PHP whose `extern` line says `uses any`, which may have any effect, spec section 29.
     Any,
     /// An `emit`, spec section 15, which has the effect `Sharp\Events` whatever its listeners do. Its cause is the
@@ -46,11 +47,11 @@ pub(crate) enum Effect {
 }
 
 impl Effect {
-    /// The effect as a `uses` names it, by full class name: a foreign effect's class, and `Sharp\Events` for an
-    /// `emit`. `None` for a call whose `extern` line says `uses any`, which no `uses` names.
+    /// The effect as a `uses` names it, by full class name: its class, and `Sharp\Events` for an `emit`. `None` for a
+    /// call whose `extern` line says `uses any`, which no `uses` names.
     pub(crate) fn named(self) -> Option<Word> {
         match self {
-            Effect::Foreign(effect) => Some(effect),
+            Effect::Class(effect) => Some(effect),
             Effect::Emit => Some(events()),
             Effect::Any => None,
         }
@@ -110,9 +111,9 @@ pub(crate) enum Runs {
     /// A PHP# lambda or method, whose effects only the solve knows.
     Body(Body),
     /// A method whose effects need no solve, as its full class name and its member, with the effects a call of it has:
-    /// a plain PHP method's, which its `extern` line declares, a `foreign` class's method's, and a PHP# method's
+    /// a plain PHP method's, which its `extern` line declares, an effect class's method's, and a PHP# method's
     /// without a body, which its `uses` lists.
-    Foreign { callee: (Word, Word), effects: Vec<Effect> },
+    Declared { callee: (Word, Word), effects: Vec<Effect> },
     /// A plain PHP method or function that no `extern` line declares, as its full class name and its member, and the
     /// line it needs, as [`EffectSummary::undeclared`] holds one.
     Undeclared { callee: (Word, Word), line: (Word, Word) },
@@ -204,9 +205,9 @@ pub(crate) struct Impurity {
     pub(crate) every_effect: bool,
 }
 
-/// The cause of the effect a member of a `foreign` class has by itself, spec section 29, which no call or write gives:
+/// The cause of the effect a member of an effect class has by itself, spec section 29, which no call or write gives:
 /// an empty class and an empty member.
-pub(crate) fn member_of_foreign_class() -> (Word, Word) {
+pub(crate) fn member_of_effect_class() -> (Word, Word) {
     (empty_word(), empty_word())
 }
 
@@ -214,10 +215,10 @@ impl Impurity {
     /// The reason as a sentence's predicate, such as "calls `Pdf.render`, which may have any effect", with each class
     /// named by `class_name` and each effect by `effect_name`.
     pub(crate) fn describe(&self, class_name: &dyn Fn(Word) -> String, effect_name: &dyn Fn(Word) -> String) -> String {
-        if self.cause == member_of_foreign_class()
-            && let Some(Effect::Foreign(effect)) = self.effect
+        if self.cause == member_of_effect_class()
+            && let Some(Effect::Class(effect)) = self.effect
         {
-            let class = format!("a member of the `foreign` class `{}`", effect_name(effect));
+            let class = format!("a member of the effect class `{}`", effect_name(effect));
 
             return match self.path.last() {
                 Some(body) => format!("reaches `{}`, {class}", written(*body, class_name)),
@@ -233,7 +234,7 @@ impl Impurity {
 
         let cause = written(self.cause, class_name);
         match (self.path.last().map(|body| written(*body, class_name)), self.effect) {
-            (None, Some(Effect::Foreign(effect))) => {
+            (None, Some(Effect::Class(effect))) => {
                 format!("calls `{cause}`, which has the effect `{}`", effect_name(effect))
             }
             (None, Some(Effect::Any)) => format!("calls `{cause}`, which may have any effect"),
@@ -241,7 +242,7 @@ impl Impurity {
                 format!("emits `{cause}`, which has the effect `{}`", effect_name(events()))
             }
             (_, None) => self.describe_change(class_name),
-            (Some(body), Some(Effect::Foreign(effect))) => {
+            (Some(body), Some(Effect::Class(effect))) => {
                 format!("reaches `{body}`, which calls `{cause}` with the effect `{}`", effect_name(effect))
             }
             (Some(body), Some(Effect::Any)) => format!("reaches `{body}`, which calls `{cause}` with any effect"),
@@ -518,7 +519,7 @@ impl Effects {
     }
 
     /// The effects of the PHP# method or lambda `function`, by full class name, each once, as a function type's `uses`
-    /// lists them: each effect of the plain PHP and the `foreign` classes it reaches, and `Sharp\Events` when it emits.
+    /// lists them: each effect of the plain PHP and the effect classes it reaches, and `Sharp\Events` when it emits.
     /// A change of state is no effect. A method without a body has the effects its `uses` lists, as a call of it does,
     /// when it holds each implementation to them, spec section 29. `None` when it calls plain PHP whose `extern` line
     /// says `uses any`, which no function type lists, and for a function no summary records and no such declaration
@@ -694,7 +695,7 @@ impl Effects {
                 Runs::Body(body) => {
                     (self.names[*self.index.get(body)?], self.effect_outside(codebase, *body, &value.allowed)?)
                 }
-                Runs::Foreign { callee, effects } => {
+                Runs::Declared { callee, effects } => {
                     let effect = effects.iter().find(|effect| is_outside(codebase, **effect, &value.allowed))?;
 
                     let impurity = Impurity {
@@ -796,12 +797,12 @@ impl Effects {
     }
 }
 
-/// Whether `allowed` does not list `effect`: a foreign effect it does not name, one of `uses any`, or an `emit` when
+/// Whether `allowed` does not list `effect`: an effect class it does not name, one of `uses any`, or an `emit` when
 /// it does not name `Sharp\Events`. An effect is a class-like, named by its key, spec section 24, so the PHP# `Db` and
 /// `DB` are two effects.
 fn is_outside(codebase: &CodebaseMetadata, effect: Effect, allowed: &[Word]) -> bool {
     let named = match effect {
-        Effect::Foreign(effect) => effect,
+        Effect::Class(effect) => effect,
         Effect::Emit => events(),
         Effect::Any => return true,
     };
@@ -832,11 +833,11 @@ pub(crate) fn holding_declaration(
     })
 }
 
-/// Whether `name`, a class name as the binder resolves it, is an effect, spec section 29: a `foreign` class, the
+/// Whether `name`, a class name as the binder resolves it, is an effect, spec section 29: an effect class, the
 /// standard library's among them, or `Events`.
 fn is_effect(codebase: &CodebaseMetadata, name: Word) -> bool {
     codebase.class_key(name) == codebase.class_key(events())
-        || codebase.get_class_like(name).is_some_and(|class| class.flags.is_foreign())
+        || codebase.get_class_like(name).is_some_and(|class| class.flags.is_effect_class())
 }
 
 /// Each use of plain PHP no `extern` line declares, spec section 29, once, with the line it needs and the position of

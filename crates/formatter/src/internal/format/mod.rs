@@ -1794,7 +1794,7 @@ where
                 Modifier::Lazy(keyword) => keyword.format(f),
                 Modifier::Late(keyword) => keyword.format(f),
                 Modifier::Internal(keyword) => keyword.format(f),
-                Modifier::Foreign(keyword) => keyword.format(f),
+                Modifier::Effect(keyword) => keyword.format(f),
                 Modifier::Ref(keyword) => keyword.format(f),
             }
         })

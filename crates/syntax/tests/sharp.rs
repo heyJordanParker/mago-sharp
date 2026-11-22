@@ -4887,13 +4887,15 @@ fn static_starts_a_static_class_and_extern_a_method_without_a_body() {
     assert_eq!(source(CODE, &methods[1].modifiers.as_slice()[0]), "extern");
 }
 
-/// `foreign` is among a class's modifiers, spec section 29, after an attribute too, and stays a name elsewhere, here
-/// a field's class type.
+/// `effect` is among a class's modifiers, spec section 29, after an attribute and before `abstract` too, and stays a
+/// name elsewhere, here a field's class type. `foreign` before `class` is a word PHP# doesn't know, as any other is.
 #[test]
-fn foreign_is_a_class_modifier_and_stays_a_name_elsewhere() {
+fn an_effect_class_is_declared_with_effect() {
     for code in [
-        "public foreign class Payments\n{\n    foreign gateway;\n}\n",
-        "[Audited]\nforeign class Payments\n{\n    foreign gateway;\n}\n",
+        "public effect class Payments\n{\n    effect gateway;\n}\n",
+        "[Audited]\neffect class Payments\n{\n    effect gateway;\n}\n",
+        "public effect abstract class Payments\n{\n    effect gateway;\n}\n",
+        "public abstract effect class Payments\n{\n    effect gateway;\n}\n",
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "app/Billing/Payments.sharp", code);
@@ -4903,12 +4905,22 @@ fn foreign_is_a_class_modifier_and_stays_a_name_elsewhere() {
             panic!("expected a class, got {:#?}", program.statements);
         };
         let modifiers: Vec<String> = class.modifiers.iter().map(ToString::to_string).collect();
-        assert_eq!(modifiers.last().map(String::as_str), Some("Foreign"), "{code}");
+        assert!(modifiers.iter().any(|modifier| modifier == "Effect"), "{code}: {modifiers:?}");
         let Some(ClassLikeMember::Property(field)) = class.members.first() else {
             panic!("expected a field, got {:#?}", class.members);
         };
-        assert_eq!(field.hint().map(|hint| source(code, hint)), Some("foreign"), "{code}");
+        assert_eq!(field.hint().map(|hint| source(code, hint)), Some("effect"), "{code}");
     }
+
+    let errors = |word: &str| {
+        let code: &'static str = Box::leak(format!("public {word} class Payments\n{{\n}}\n").into_boxed_str());
+        let arena = LocalArena::new();
+        let program = parse(&arena, "app/Billing/Payments.sharp", code);
+
+        program.errors.iter().map(|error| error.to_string().replace(word, "<word>")).collect::<Vec<_>>()
+    };
+    assert!(!errors("foreign").is_empty());
+    assert_eq!(errors("foreign"), errors("payable"));
 }
 
 /// A method without a body states the effects its implementations may have after `uses`, spec section 29: an

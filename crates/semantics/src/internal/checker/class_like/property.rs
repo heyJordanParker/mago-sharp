@@ -311,7 +311,7 @@ pub fn check_property(
             | Modifier::Lazy(_)
             | Modifier::Late(_)
             | Modifier::Internal(_)
-            | Modifier::Foreign(_)
+            | Modifier::Effect(_)
             | Modifier::Ref(_) => {}
         }
     }

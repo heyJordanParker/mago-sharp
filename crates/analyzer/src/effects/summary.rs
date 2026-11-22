@@ -72,7 +72,7 @@ use crate::effects::EffectSummary;
 use crate::effects::FunctionValue;
 use crate::effects::Roots;
 use crate::effects::Runs;
-use crate::effects::member_of_foreign_class;
+use crate::effects::member_of_effect_class;
 use crate::resolver::static_property::StaticProperty;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_holder;
@@ -106,11 +106,11 @@ pub(crate) fn record<'ast, 'arena, A>(
     let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, initializer, code);
     summary.function_values = function_values;
     summary.readonly_calls = readonly_calls;
-    // Code that reaches a `foreign` object has its class's effect, whatever its members do (spec section 29), so each
-    // member has it too. A pure declaration then refuses a `foreign` implementation, and a call through an interface or
-    // a base class has the effect of the `foreign` override it reaches.
-    if let Some(effect) = foreign_class(context.codebase, class) {
-        summary.effects.insert(0, (Effect::Foreign(effect), code.span(), member_of_foreign_class()));
+    // Code that reaches an effect object has its class's effect, whatever its members do (spec section 29), so each
+    // member has it too. A pure declaration then refuses an effect class's implementation, and a call through an
+    // interface or a base class has the effect of the effect class's override it reaches.
+    if let Some(effect) = effect_class(context.codebase, class) {
+        summary.effects.insert(0, (Effect::Class(effect), code.span(), member_of_effect_class()));
     }
     artifacts.effect_summaries.push(summary);
     artifacts.effect_summaries.append(&mut lambdas);
@@ -167,7 +167,7 @@ pub(crate) fn record_behaviors<A>(
 /// writes, so each one's function type lists the effects of what it runs. `parse` calls the main constructor, writes
 /// each property field through its `set` accessor, and calls the `parse` of each struct or class a field's type holds,
 /// and `tryParse` calls `parse`. The `parse` of a family calls the `parse` of one of its variants. Each
-/// makes the object it gives, so neither changes state. A call that reaches a `foreign` object has its class's effect,
+/// makes the object it gives, so neither changes state. A call that reaches an effect object has its class's effect,
 /// as a written call does.
 pub(crate) fn record_parse<A>(
     context: &Context<'_, '_, A>,
@@ -179,9 +179,9 @@ pub(crate) fn record_parse<A>(
     let codebase = context.codebase;
     let span = class.span;
     let summary = |body, member: &[u8]| {
-        // Each member of a `foreign` class has its class's effect, as `record` gives a written one.
-        let effects = foreign_class(codebase, class.name)
-            .map(|effect| (Effect::Foreign(effect), span, member_of_foreign_class()))
+        // Each member of an effect class has its class's effect, as `record` gives a written one.
+        let effects = effect_class(codebase, class.name)
+            .map(|effect| (Effect::Class(effect), span, member_of_effect_class()))
             .into_iter()
             .collect();
 
@@ -200,9 +200,9 @@ pub(crate) fn record_parse<A>(
     };
     // `callee`, a member of an object of `object` that messages name `member`, runs as a written call of it does.
     let reach = |summary: &mut EffectSummary, object: Word, callee: Body, member: &[u8]| {
-        if let Some(effect) = foreign_class(codebase, object) {
+        if let Some(effect) = effect_class(codebase, object) {
             let class_name = codebase.get_class_like(object).map_or(object, |metadata| metadata.original_name);
-            summary.effects.push((Effect::Foreign(effect), span, (class_name, word(member))));
+            summary.effects.push((Effect::Class(effect), span, (class_name, word(member))));
         } else {
             summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
         }
@@ -384,14 +384,14 @@ fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: Word) -> 
     let class_name = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
     let callee = (class_name, metadata.original_name);
 
-    Some(if let Some(effect) = foreign_class(codebase, class) {
-        Runs::Foreign { callee, effects: vec![Effect::Foreign(effect)] }
+    Some(if let Some(effect) = effect_class(codebase, class) {
+        Runs::Declared { callee, effects: vec![Effect::Class(effect)] }
     } else if declaring.flags.is_sharp() && metadata.method_metadata.as_ref().is_some_and(|m| m.is_abstract) {
-        Runs::Foreign { callee, effects: metadata.uses.iter().map(|effect| Effect::Foreign(*effect)).collect() }
+        Runs::Declared { callee, effects: metadata.uses.iter().map(|effect| Effect::Class(*effect)).collect() }
     } else if declaring.flags.is_sharp() {
         Runs::Body(Body::Method(declaring.name, declaring.method_key(method)))
     } else if is_prelude_stub(declaring_class) {
-        Runs::Foreign { callee, effects: Vec::new() }
+        Runs::Declared { callee, effects: Vec::new() }
     } else {
         let line = class_line(codebase, declaring_class);
 
@@ -802,9 +802,9 @@ where
         let member = word(name.value);
         let codebase = self.codebase();
         for class in self.object_classes(object) {
-            if let Some(effect) = foreign_class(codebase, class) {
+            if let Some(effect) = effect_class(codebase, class) {
                 let class = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
-                self.summary.effects.push((Effect::Foreign(effect), span, (class, member)));
+                self.summary.effects.push((Effect::Class(effect), span, (class, member)));
             }
         }
         for class in self.member_classes(object) {
@@ -993,7 +993,7 @@ where
         {
             let cause = (empty_word(), self.text(function.span()));
             for effect in declared_effects(self.context.codebase, function_type) {
-                self.summary.effects.push((Effect::Foreign(effect), span, cause));
+                self.summary.effects.push((Effect::Class(effect), span, cause));
             }
         }
 
@@ -1134,7 +1134,7 @@ where
             .map(|metadata| declared_effects(codebase, &metadata.type_union))
             .unwrap_or_default();
         for effect in effects {
-            self.summary.effects.push((Effect::Foreign(effect), span, cause));
+            self.summary.effects.push((Effect::Class(effect), span, cause));
         }
     }
 
@@ -1163,7 +1163,7 @@ where
             let called = format!("{}.{name}", self.text(receiver.span()));
             let cause = (empty_word(), word(called.as_bytes()));
             for effect in declared_effects(codebase, &element) {
-                self.summary.effects.push((Effect::Foreign(effect), span, cause));
+                self.summary.effects.push((Effect::Class(effect), span, cause));
             }
         }
     }
@@ -1246,8 +1246,8 @@ where
         } else {
             (receiver_roots, roots)
         };
-        if let Some(effect) = foreign_class(codebase, class) {
-            self.summary.effects.push((Effect::Foreign(effect), span, cause));
+        if let Some(effect) = effect_class(codebase, class) {
+            self.summary.effects.push((Effect::Class(effect), span, cause));
 
             return;
         }
@@ -1256,7 +1256,7 @@ where
             // A method without a body has the effects its `uses` lists, which each implementation is held to.
             if metadata.method_metadata.as_ref().is_some_and(|method| method.is_abstract) {
                 for effect in &metadata.uses {
-                    self.summary.effects.push((Effect::Foreign(*effect), span, cause));
+                    self.summary.effects.push((Effect::Class(*effect), span, cause));
                 }
 
                 return;
@@ -1390,7 +1390,7 @@ where
             .unwrap_or_default();
         let cause = (empty_word(), self.text(span));
         for effect in effects {
-            self.summary.effects.push((Effect::Foreign(effect), span, cause));
+            self.summary.effects.push((Effect::Class(effect), span, cause));
         }
     }
 
@@ -1541,7 +1541,7 @@ where
                     let arguments = vec![elements.clone(); metadata.parameters.len()];
                     self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments });
                 }
-                Runs::Foreign { callee, effects } => {
+                Runs::Declared { callee, effects } => {
                     for effect in effects {
                         self.summary.effects.push((effect, span, callee));
                     }
@@ -1753,14 +1753,14 @@ fn function_extern(codebase: &CodebaseMetadata, function: Word) -> ((Word, Word)
 fn plain_php_effects(declaration: &ExternMetadata) -> Vec<Effect> {
     let any = declaration.uses_any.then_some(Effect::Any);
 
-    declaration.effects.iter().map(|effect| Effect::Foreign(*effect)).chain(any).collect()
+    declaration.effects.iter().map(|effect| Effect::Class(*effect)).chain(any).collect()
 }
 
 /// What a value of plain PHP runs wherever it is called: the `callee`, with the effects its `extern` line
 /// `declaration` declares, or, without one, the line it needs, `line`.
 fn plain_php_runs(declaration: Option<&ExternMetadata>, callee: (Word, Word), line: (Word, Word)) -> Runs {
     match declaration {
-        Some(declaration) => Runs::Foreign { callee, effects: plain_php_effects(declaration) },
+        Some(declaration) => Runs::Declared { callee, effects: plain_php_effects(declaration) },
         None => Runs::Undeclared { callee, line },
     }
 }
@@ -1771,14 +1771,14 @@ fn class_line(codebase: &CodebaseMetadata, class: Word) -> (Word, Word) {
     (codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name), empty_word())
 }
 
-/// The `foreign` class an object of `class` is, spec section 29: `class` itself or a parent marked `foreign`, by its
+/// The effect class an object of `class` is, spec section 29: `class` itself or a parent marked `effect`, by its
 /// original name. Code that reaches such an object has that class's effect, whatever its members do.
-fn foreign_class(codebase: &CodebaseMetadata, class: Word) -> Option<Word> {
+fn effect_class(codebase: &CodebaseMetadata, class: Word) -> Option<Word> {
     let metadata = codebase.get_class_like(class)?;
 
     std::iter::once(metadata)
         .chain(metadata.all_parent_classes.iter().filter_map(|parent| codebase.get_class_like(*parent)))
-        .find(|metadata| metadata.flags.is_foreign())
+        .find(|metadata| metadata.flags.is_effect_class())
         .map(|metadata| metadata.original_name)
 }
 

@@ -276,9 +276,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
     }
 }
 
-/// Spec section 29: a `foreign` object is created in a module binding, and nowhere else, so a `.sharp` file's `new` of
-/// a class that is `foreign`, or extends one, is refused outside a binding's expression, a lambda in it included.
-fn check_foreign_outside_module<A>(
+/// Spec section 29: an effect object is created in a module binding, and nowhere else, so a `.sharp` file's `new` of
+/// an effect class, or of a class that extends one, is refused outside a binding's expression, a lambda in it included.
+fn check_effect_object_outside_module<A>(
     context: &mut Context<'_, '_, A>,
     metadata: &ClassLikeMetadata,
     class: &Word,
@@ -290,9 +290,9 @@ fn check_foreign_outside_module<A>(
     if !context.dialect.is_sharp() {
         return;
     }
-    let Some(foreign) = std::iter::once(metadata)
+    let Some(effect) = std::iter::once(metadata)
         .chain(metadata.all_parent_classes.iter().filter_map(|parent| context.codebase.get_class_like(*parent)))
-        .find(|class| class.flags.is_foreign())
+        .find(|class| class.flags.is_effect_class())
     else {
         return;
     };
@@ -300,16 +300,16 @@ fn check_foreign_outside_module<A>(
         return;
     }
 
-    let what = if std::ptr::eq(foreign, metadata) {
-        "`foreign`".to_owned()
+    let what = if std::ptr::eq(effect, metadata) {
+        "is an effect class".to_owned()
     } else {
-        format!("a `foreign` `{}`", display_class_like_name(context, foreign.original_name))
+        format!("extends the effect class `{}`", display_class_like_name(context, effect.original_name))
     };
     context.collector.report_with_code(
-        IssueCode::ForeignOutsideModule,
-        Issue::error(format!("`{class}` is {what}, so only a module binding creates it."))
+        IssueCode::EffectObjectOutsideModule,
+        Issue::error(format!("`{class}` {what}, so only a module binding creates it."))
             .with_annotation(Annotation::primary(class_span))
-            .with_note("A module binding decides how often a `foreign` object is created.")
+            .with_note("A module binding decides how often an effect object is created.")
             .with_help("Take it as a constructor or method parameter, and create it in a module binding."),
     );
 }
@@ -500,7 +500,7 @@ where
     let classname_str = display_class_like_name(context, metadata.original_name);
 
     crate::utils::availability::check_class_like_availability(context, metadata, &classname_str, class_expression_span);
-    check_foreign_outside_module(context, metadata, &classname_str, instantiation_span, class_expression_span);
+    check_effect_object_outside_module(context, metadata, &classname_str, instantiation_span, class_expression_span);
 
     if metadata.kind.is_interface() && !classname.is_from_class_string() {
         context.collector.report_with_code(
