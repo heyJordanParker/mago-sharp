@@ -627,7 +627,12 @@ fn compiled_consumer(
     let inputs = std::sync::Mutex::new(Vec::new());
     let ((compiled, _), _) = incremental
         .compile(
-            Folder { last: &CompiledFiles::default(), compiled: &mut |_| Ok(None), intact: &mut |_| false },
+            Folder {
+                last: &CompiledFiles::default(),
+                compiled: &|_| Ok(None),
+                intact: &mut |_| false,
+                write: &|_, bytes| bytes,
+            },
             None,
             |path| {
                 inputs.lock().unwrap().push(String::from_utf8_lossy(path).into_owned());

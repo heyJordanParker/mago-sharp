@@ -704,7 +704,12 @@ fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
     let inputs = std::sync::Mutex::new(BTreeMap::new());
     let ((compiled, _), _) = server
         .compile(
-            Folder { last: &CompiledFiles::default(), compiled: &mut |_| Ok(None), intact: &mut |_| false },
+            Folder {
+                last: &CompiledFiles::default(),
+                compiled: &|_| Ok(None),
+                intact: &mut |_| false,
+                write: &|_, bytes| bytes,
+            },
             None,
             |path| {
                 let input = database.get(&FileId::new(path)).ok().map(|file| Input {

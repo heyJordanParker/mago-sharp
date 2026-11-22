@@ -685,7 +685,12 @@ impl<'configuration> Session<'configuration> {
         let database = self.server.database().read_only();
         let issues = keys(&self.server, prover.hidden.shown(analysis.issues, &database));
         let ((compilations, _), _) = self.server.compile(
-            Folder { last: &CompiledFiles::default(), compiled: &mut |_| Ok(None), intact: &mut |_| false },
+            Folder {
+                last: &CompiledFiles::default(),
+                compiled: &|_| Ok(None),
+                intact: &mut |_| false,
+                write: &|_, _| (),
+            },
             None,
             |path| unit::stamp(&prover.root, path),
             |_, _, _| Ok(Default::default()),

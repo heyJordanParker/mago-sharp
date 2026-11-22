@@ -86,9 +86,9 @@ const MODULE_FILE: &str = "Module.sharp";
 /// What [`IncrementalAnalysisService::compile`] made of one `.sharp` file, or of a plain PHP file whose class the
 /// engine would refuse to link.
 #[derive(Debug)]
-pub enum Compilation {
-    /// The bytes of its `.sharpc` file.
-    Accepted(Vec<u8>),
+pub enum Compilation<Written = Vec<u8>> {
+    /// What its folder's [`Folder::write`] gave for the bytes of its `.sharpc` file.
+    Accepted(Written),
     /// Its error-level issues, which stop it from running.
     Refused(IssueCollection),
     /// Its `.sharpc` file holds the bytes this compile would write, or bytes the engine treats the same: the caller
@@ -105,29 +105,39 @@ type Lowered = Result<(LoweredUnit, Translation), IssueCollection>;
 type KeptFile<'last> = (Option<Vec<u8>>, &'last CompiledFile);
 
 /// A folder [`IncrementalAnalysisService::compile`] compiles into.
-pub struct Folder<'folder> {
+pub struct Folder<'folder, Written = Vec<u8>> {
     /// The [`CompiledFiles`] the last compile into the folder kept.
     pub last: &'folder CompiledFiles,
     /// The compiled file of a file in the folder, or none when no file is there.
-    pub compiled: &'folder mut CompiledReader<'folder>,
+    pub compiled: &'folder CompiledReader<'folder>,
     /// Whether a file's compiled file in the folder is the one the last compile wrote, as the caller knows from the
     /// file's status.
     pub intact: &'folder mut dyn FnMut(&File) -> bool,
+    /// Takes the bytes of an accepted file's compiled file the moment the compile makes them, from any of its threads,
+    /// and gives what [`Compilation::Accepted`] holds of it, a failed write included, so no file's bytes wait on
+    /// another file's.
+    pub write: &'folder CompiledWriter<'folder, Written>,
 }
 
-/// What gives a file's compiled file in a [`Folder`], or none when no file is there.
-pub type CompiledReader<'folder> = dyn FnMut(&File) -> Result<Option<Vec<u8>>, DatabaseError> + 'folder;
+/// What gives a file's compiled file in a [`Folder`], or none when no file is there, from any thread.
+pub type CompiledReader<'folder> = dyn Fn(&File) -> Result<Option<Vec<u8>>, DatabaseError> + Sync + 'folder;
+
+/// What takes the bytes of a file's compiled file in a [`Folder`], from any thread.
+pub type CompiledWriter<'folder, Written> = dyn Fn(&File, Vec<u8>) -> Written + Sync + 'folder;
 
 /// What [`IncrementalAnalysisService::compile`] made of each file of one folder, and the [`CompiledFiles`] the next
 /// compile into the folder keeps files by.
-pub type Compiled = (Vec<(FileId, Compilation)>, CompiledFiles);
+pub type Compiled<Written = Vec<u8>> = (Vec<(FileId, Compilation<Written>)>, CompiledFiles);
 
 /// A `.sharp` file lowered, or the errors that refused it, and its Lean translation until the laws' check takes it.
 type Lowering = (Result<LoweredUnit, IssueCollection>, Option<Translation>);
 
+/// A file a folder keeps or lowered, its compilation there, and what the next compile into the folder keeps of it.
+type Made<'files, Written> = (&'files Arc<File>, Compilation<Written>, Option<CompiledFile>);
+
 /// What a compile holds of one folder it compiles into while it lowers.
-struct Target<'folder> {
-    folder: Folder<'folder>,
+struct Target<'folder, Written> {
+    folder: Folder<'folder, Written>,
     /// The errors that refuse a file in the folder, by file.
     errors: HashMap<FileId, IssueCollection>,
     /// The errors of each file no error refuses in the folder, by file.
@@ -138,9 +148,9 @@ struct Target<'folder> {
     lowered: HashMap<FileId, usize>,
 }
 
-impl<'folder> Target<'folder> {
+impl<'folder, Written> Target<'folder, Written> {
     fn new(
-        folder: Folder<'folder>,
+        folder: Folder<'folder, Written>,
         errors: HashMap<FileId, IssueCollection>,
         unrefused: HashMap<FileId, IssueCollection>,
     ) -> Self {
@@ -164,8 +174,8 @@ impl<'folder> Target<'folder> {
 }
 
 /// What a compile holds of one folder it compiles into once the laws are checked.
-struct Inputs<'folder> {
-    target: Target<'folder>,
+struct Inputs<'folder, Written> {
+    target: Target<'folder, Written>,
     /// The issues of each file whose law is not proved, which refuse it in the folder.
     refused: HashMap<FileId, IssueCollection>,
     /// The hash of the declarations of each file the folder accepts, where it is not all zero.
@@ -174,7 +184,7 @@ struct Inputs<'folder> {
     input_paths: HashMap<FileId, Vec<InputPath>>,
 }
 
-impl Inputs<'_> {
+impl<Written> Inputs<'_, Written> {
     /// Whether the folder accepts `file`: no law refuses it, and it keeps its compiled file or lowered, from
     /// `lowerings`.
     fn accepted(&self, file: &File, lowerings: &[Lowering]) -> bool {
@@ -595,20 +605,26 @@ impl IncrementalAnalysisService {
     /// fills: no error and no law refuses a file there, as for the compile whose `refusing` keeps none. A file both
     /// folders lower the same, one neither refuses that inlines the same forms in both, is lowered once.
     ///
+    /// Each folder's `write` takes the bytes of each compiled file the folder accepts as soon as they are made, once the
+    /// laws are checked, so a compile that fails after that may have written some of them.
+    ///
     /// # Errors
     ///
     /// Returns [`OrchestratorError`] when no analysis ran yet, when re-analyzing a file fails, or when `compiled`,
     /// `stamp` or `check` fails.
     #[allow(clippy::too_many_arguments)]
-    pub fn compile<'folder>(
+    pub fn compile<'folder, Written>(
         &mut self,
-        folder: Folder<'folder>,
-        hosts: Option<Folder<'folder>>,
+        folder: Folder<'folder, Written>,
+        hosts: Option<Folder<'folder, Written>>,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         check: impl FnOnce(Vec<Translation>, &Reach, &HashSet<FileId>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
-    ) -> Result<(Compiled, Option<Compiled>), OrchestratorError> {
+    ) -> Result<(Compiled<Written>, Option<Compiled<Written>>), OrchestratorError>
+    where
+        Written: Send,
+    {
         if !self.initialized {
             return Err(OrchestratorError::General("analyze() must be called before compile()".to_string()));
         }
@@ -801,9 +817,9 @@ impl IncrementalAnalysisService {
 
     /// Keeps in `target` each of `files` whose key holds in its folder, as [`Self::kept`] finds it with `reads`, `forms`
     /// and `effects`.
-    fn keep(
+    fn keep<Written>(
         &self,
-        target: &mut Target<'_>,
+        target: &mut Target<'_, Written>,
         files: &[&Arc<File>],
         reads: &HashMap<FileId, (Reads, HashSet<FileId>)>,
         forms: &HashMap<Vec<u8>, u64>,
@@ -812,7 +828,7 @@ impl IncrementalAnalysisService {
         for file in files {
             let Target { folder, errors, kept, .. } = &mut *target;
             if let Some(found) =
-                self.kept(file, folder.last, &mut folder.compiled, &mut folder.intact, reads, forms, effects, errors)?
+                self.kept(file, folder.last, folder.compiled, &mut folder.intact, reads, forms, effects, errors)?
             {
                 kept.insert(file.id, found);
             }
@@ -826,11 +842,11 @@ impl IncrementalAnalysisService {
     /// lowering instead, since a file's lowering rests only on its errors and the forms it inlines, which `lowered`
     /// passes only when they are `target`'s.
     #[allow(clippy::too_many_arguments)]
-    fn lower_into(
+    fn lower_into<Written>(
         &self,
-        target: &mut Target<'_>,
+        target: &mut Target<'_, Written>,
         files: &[&Arc<File>],
-        lowered: Option<&Target<'_>>,
+        lowered: Option<&Target<'_, Written>>,
         forms: &InlineForms,
         reach: &Reach,
         effects: &Effects,
@@ -867,9 +883,9 @@ impl IncrementalAnalysisService {
     /// resolves services through by `listening`, the files of its folder in `folder_files` when its code reaches an
     /// extension, and the files in `read_by_every_file`.
     #[allow(clippy::too_many_arguments)]
-    fn inputs<'folder>(
+    fn inputs<'folder, Written>(
         &self,
-        target: Target<'folder>,
+        target: Target<'folder, Written>,
         refused: HashMap<FileId, IssueCollection>,
         files: &[Arc<File>],
         lowerings: &[Lowering],
@@ -878,7 +894,7 @@ impl IncrementalAnalysisService {
         listening: &HashSet<FileId>,
         folder_files: &HashMap<&[u8], Vec<&[u8]>>,
         read_by_every_file: &HashSet<FileId>,
-    ) -> Inputs<'folder> {
+    ) -> Inputs<'folder, Written> {
         let mut inputs =
             Inputs { target, refused, read_by_declarations: HashMap::default(), input_paths: HashMap::default() };
         // Spec section 27: each file this compile writes a compiled file for whose declarations hash is not all zero is
@@ -971,16 +987,20 @@ impl IncrementalAnalysisService {
     /// The compilation of each of `files` in `inputs`' folder, in file name order, then of each plain PHP file the
     /// folder refuses, as [`Self::unlinkable_plain_php_classes`] finds them, and the [`CompiledFiles`] the next compile
     /// into the folder keeps files by. A file the folder keeps or lowered from `lowerings` compiles with what `reads`
-    /// holds it read, the stamp `stamps` holds of each of its inputs, and `standard_library`.
-    fn compiled(
+    /// holds it read, the stamp `stamps` holds of each of its inputs, and `standard_library`. The files compile at once,
+    /// and the folder's `write` takes each accepted file's bytes as soon as they are made.
+    fn compiled<Written>(
         &self,
-        inputs: Inputs<'_>,
+        inputs: Inputs<'_, Written>,
         files: &[Arc<File>],
         lowerings: &[Lowering],
         reads: &HashMap<FileId, (Reads, HashSet<FileId>)>,
         stamps: &HashMap<Vec<u8>, Input>,
         standard_library: &Library,
-    ) -> Result<Compiled, OrchestratorError> {
+    ) -> Result<Compiled<Written>, OrchestratorError>
+    where
+        Written: Send,
+    {
         let Inputs { mut target, mut refused, read_by_declarations, mut input_paths } = inputs;
         let stamped = |paths: Vec<InputPath>| -> Vec<Input> {
             paths
@@ -988,82 +1008,79 @@ impl IncrementalAnalysisService {
                 .map(|(path, declarations_hash)| Input { declarations_hash, ..stamps[&path].clone() })
                 .collect()
         };
-        let mut next = CompiledFiles::default();
-        let mut compilations = Vec::with_capacity(files.len());
-        for file in files {
-            let issues = refused.remove(&file.id);
-            let compilation = if let Some((bytes, record)) = target.kept.remove(&file.id) {
-                match issues {
-                    Some(issues) => Compilation::Refused(issues),
-                    None => {
-                        let inputs = stamped(input_paths.remove(&file.id).unwrap_or_default());
-                        let declarations_hash = read_by_declarations.get(&file.id).copied().unwrap_or_default();
-                        let stamps = stamps_hash(declarations_hash, &inputs, standard_library);
-                        next.files.insert(file.name.to_vec(), CompiledFile { stamps, ..record.clone() });
-                        match bytes {
-                            None if stamps == record.stamps => Compilation::Kept,
-                            bytes => {
-                                let bytes = match bytes {
-                                    Some(bytes) => bytes,
-                                    None => (target.folder.compiled)(file)?
-                                        .filter(|bytes| !unit::is_stale(bytes, record.key))
-                                        .ok_or_else(|| {
-                                            OrchestratorError::General(format!(
-                                                "The compiled file of {} changed while the compile ran. Compile again.",
-                                                String::from_utf8_lossy(&file.name)
-                                            ))
-                                        })?,
-                                };
-                                let Some(bytes) = unit::restamp(&bytes, declarations_hash, &inputs, standard_library)
-                                else {
-                                    unreachable!("a compiled file the compile keeps is one `unit::is_stale` read");
-                                };
-
-                                Compilation::Accepted(bytes)
-                            }
-                        }
+        // Each file the folder keeps or lowered, in file name order, with the issues that refuse it, its inputs and what
+        // it keeps.
+        let made: Vec<_> = files
+            .iter()
+            .filter_map(|file| {
+                let kept = target.kept.remove(&file.id);
+                (kept.is_some() || target.lowered.contains_key(&file.id))
+                    .then(|| (file, refused.remove(&file.id), input_paths.remove(&file.id).unwrap_or_default(), kept))
+            })
+            .collect();
+        let Target { folder: Folder { compiled, write, .. }, lowered, .. } = &target;
+        let made: Vec<Result<Made<'_, Written>, OrchestratorError>> = made
+            .into_par_iter()
+            .map(|(file, issues, paths, kept)| {
+                let declarations_hash = read_by_declarations.get(&file.id).copied().unwrap_or_default();
+                if let Some((bytes, record)) = kept {
+                    if let Some(issues) = issues {
+                        return Ok((file, Compilation::Refused(issues), None));
                     }
+                    let inputs = stamped(paths);
+                    let stamps = stamps_hash(declarations_hash, &inputs, standard_library);
+                    let next = CompiledFile { stamps, ..record.clone() };
+                    let bytes = match bytes {
+                        None if stamps == record.stamps => return Ok((file, Compilation::Kept, Some(next))),
+                        Some(bytes) => bytes,
+                        None => {
+                            compiled(file)?.filter(|bytes| !unit::is_stale(bytes, record.key)).ok_or_else(|| {
+                                OrchestratorError::General(format!(
+                                    "The compiled file of {} changed while the compile ran. Compile again.",
+                                    String::from_utf8_lossy(&file.name)
+                                ))
+                            })?
+                        }
+                    };
+                    let Some(bytes) = unit::restamp(&bytes, declarations_hash, &inputs, standard_library) else {
+                        unreachable!("a compiled file the compile keeps is one `unit::is_stale` read");
+                    };
+
+                    return Ok((file, Compilation::Accepted(write(file, bytes)), Some(next)));
                 }
-            } else {
-                let Some(lowering) = target.lowered.get(&file.id) else {
-                    continue;
-                };
-                match (&lowerings[*lowering].0, issues) {
-                    (Ok(_), Some(issues)) => Compilation::Refused(issues),
-                    (Err(issues), _) => Compilation::Refused(issues.clone()),
+                match (&lowerings[lowered[&file.id]].0, issues) {
+                    (Ok(_), Some(issues)) => Ok((file, Compilation::Refused(issues), None)),
+                    (Err(issues), _) => Ok((file, Compilation::Refused(issues.clone()), None)),
                     (Ok(LoweredUnit { unit, forms, namespace_classes, reaches_extension }), None) => {
                         let mut reads = reads.get(&file.id).map(|(reads, _)| reads.clone()).unwrap_or_default();
                         reads.inlined = unit.inlined().to_vec();
                         reads.function_types = unit.function_types().to_vec();
                         let key = key(source_hash(&file.contents), &reads);
-                        let inputs = stamped(input_paths.remove(&file.id).unwrap_or_default());
-                        let declarations_hash = read_by_declarations.get(&file.id).copied().unwrap_or_default();
+                        let inputs = stamped(paths);
                         let stamps = stamps_hash(declarations_hash, &inputs, standard_library);
-                        next.files.insert(
-                            file.name.to_vec(),
-                            CompiledFile {
-                                key,
-                                inlined: reads.inlined.into_iter().map(|read| read.name).collect(),
-                                function_types: reads.function_types.into_iter().map(|read| read.name).collect(),
-                                forms: forms.clone(),
-                                namespace_classes: namespace_classes.clone(),
-                                reaches_extension: *reaches_extension,
-                                stamps,
-                            },
-                        );
-
-                        Compilation::Accepted(encode(
-                            unit,
-                            &file.contents,
+                        let next = CompiledFile {
                             key,
-                            declarations_hash,
-                            &inputs,
-                            standard_library,
-                        ))
+                            inlined: reads.inlined.into_iter().map(|read| read.name).collect(),
+                            function_types: reads.function_types.into_iter().map(|read| read.name).collect(),
+                            forms: forms.clone(),
+                            namespace_classes: namespace_classes.clone(),
+                            reaches_extension: *reaches_extension,
+                            stamps,
+                        };
+                        let bytes = encode(unit, &file.contents, key, declarations_hash, &inputs, standard_library);
+
+                        Ok((file, Compilation::Accepted(write(file, bytes)), Some(next)))
                     }
                 }
-            };
-
+            })
+            .collect();
+        let mut next = CompiledFiles::default();
+        let mut compilations = Vec::with_capacity(made.len());
+        for made in made {
+            let (file, compilation, record) = made?;
+            if let Some(record) = record {
+                next.files.insert(file.name.to_vec(), record);
+            }
             compilations.push((file.id, compilation));
         }
         compilations.extend(self.unlinkable_plain_php_classes(&target.errors));
@@ -1081,7 +1098,7 @@ impl IncrementalAnalysisService {
         &self,
         file: &File,
         last: &'last CompiledFiles,
-        compiled: &mut impl FnMut(&File) -> Result<Option<Vec<u8>>, DatabaseError>,
+        compiled: &CompiledReader<'_>,
         intact: &mut impl FnMut(&File) -> bool,
         reads: &HashMap<FileId, (Reads, HashSet<FileId>)>,
         forms: &HashMap<Vec<u8>, u64>,
@@ -1130,7 +1147,10 @@ impl IncrementalAnalysisService {
     /// analysis's, as kotlinc checks a Java type only where it meets a Kotlin declaration and leaves every other Java
     /// error to javac: the type arguments a docblock's `@implements` or `@extends` gives a PHP# generic type among them,
     /// since the engine erases type parameters and reads no docblock.
-    fn unlinkable_plain_php_classes(&self, errors: &HashMap<FileId, IssueCollection>) -> Vec<(FileId, Compilation)> {
+    fn unlinkable_plain_php_classes<Written>(
+        &self,
+        errors: &HashMap<FileId, IssueCollection>,
+    ) -> Vec<(FileId, Compilation<Written>)> {
         let in_sharp_file = |annotation: &Annotation| {
             self.database.get(&annotation.span.file_id).is_ok_and(|file| Dialect::of(&file).is_sharp())
         };
@@ -2250,6 +2270,11 @@ mod tests {
         Ok(None)
     }
 
+    /// The bytes of a compiled file, which a compile into no folder gives back as they are.
+    fn unwritten(_: &File, bytes: Vec<u8>) -> Vec<u8> {
+        bytes
+    }
+
     /// Each compilation of a compile of `service` that keeps no file, as the first compile of a project runs.
     fn fresh(
         service: &mut IncrementalAnalysisService,
@@ -2258,7 +2283,12 @@ mod tests {
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<Vec<(FileId, Compilation)>, OrchestratorError> {
-        let folder = Folder { last: &CompiledFiles::default(), compiled: &mut uncompiled, intact: &mut |_| false };
+        let folder = Folder {
+            last: &CompiledFiles::default(),
+            compiled: &uncompiled,
+            intact: &mut |_| false,
+            write: &unwritten,
+        };
 
         service.compile(folder, None, stamp, check, standard_library, refusing).map(|((compiled, _), _)| compiled)
     }
@@ -3255,17 +3285,17 @@ mod tests {
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         mut intact: impl FnMut(&File) -> bool,
     ) -> (BTreeMap<String, Compilation>, CompiledFiles, BTreeSet<String>) {
-        let mut asked = BTreeSet::new();
-        let mut compiled = |file: &File| {
+        let asked = std::sync::Mutex::new(BTreeSet::new());
+        let compiled = |file: &File| {
             let name = String::from_utf8_lossy(&file.name).into_owned();
             let bytes = match previous.get(&name) {
                 Some(Compilation::Accepted(bytes)) => Some(bytes.clone()),
                 _ => None,
             };
-            asked.insert(name);
+            asked.lock().unwrap().insert(name);
             Ok(bytes)
         };
-        let folder = Folder { last, compiled: &mut compiled, intact: &mut intact };
+        let folder = Folder { last, compiled: &compiled, intact: &mut intact, write: &unwritten };
         let ((compiled, kept), _) = service
             .compile(folder, None, stamp, proved, &Library::default(), |issues| issues)
             .expect("the compile runs");
@@ -3280,7 +3310,7 @@ mod tests {
             })
             .collect();
 
-        (compiled, kept, asked)
+        (compiled, kept, asked.into_inner().unwrap())
     }
 
     /// Each compiled file's bytes, and each refused file's messages.

@@ -1136,7 +1136,12 @@ fn compile_with_fixture(
     }
     service.analyze()?;
     let ((compiled, _), _) = service.compile(
-        Folder { last: &CompiledFiles::default(), compiled: &mut |_| Ok(None), intact: &mut |_| false },
+        Folder {
+            last: &CompiledFiles::default(),
+            compiled: &|_| Ok(None),
+            intact: &mut |_| false,
+            write: &|_, bytes| bytes,
+        },
         None,
         |_| Ok(None),
         |_, _, _| Ok(Default::default()),

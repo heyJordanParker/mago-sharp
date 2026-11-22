@@ -211,8 +211,9 @@ impl Server {
         Ok(self.service.reload_classes(&classes.into_iter().collect())?)
     }
 
-    /// Compile each `.sharp` file of the last analysis into the bytes of its `.sharpc` file in `folder`, or the errors
-    /// that refuse it there, and give the [`CompiledFiles`] the next compile into it keeps files by. A file whose key
+    /// Compile each `.sharp` file of the last analysis into the bytes of its `.sharpc` file in `folder`, which the
+    /// folder's `write` takes as soon as they are made, or the errors that refuse it there, and give the
+    /// [`CompiledFiles`] the next compile into it keeps files by. A file whose key
     /// the folder's `last` holds keeps its compiled file, which the folder's `compiled` gives, and is not lowered again.
     /// One the folder's `intact` vouches for, as the compiled file the last compile wrote, is read only when a stamp it
     /// holds changed, and is [`Compilation::Kept`] otherwise. `hosts`, when given, is the folder the extension hosts
@@ -230,15 +231,18 @@ impl Server {
     ///
     /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a file, `compiled`, `stamp` or `check`
     /// fails.
-    pub fn compile<'folder>(
+    pub fn compile<'folder, Written>(
         &mut self,
-        folder: Folder<'folder>,
-        hosts: Option<Folder<'folder>>,
+        folder: Folder<'folder, Written>,
+        hosts: Option<Folder<'folder, Written>>,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         check: impl FnOnce(Vec<Translation>, &Reach, &HashSet<FileId>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
-    ) -> Result<(Compiled, Option<Compiled>), ServerError> {
+    ) -> Result<(Compiled<Written>, Option<Compiled<Written>>), ServerError>
+    where
+        Written: Send,
+    {
         self.service.compile(folder, hosts, stamp, check, standard_library, refusing).map_err(ServerError::from)
     }
 

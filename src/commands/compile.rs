@@ -727,10 +727,13 @@ fn write_hosts_folder(
         Ok(input)
     };
     let compilations = {
-        let (mut compiled, mut intact) =
-            (host_compiled(root, folder, sources), host_intact(root, folder, sources, outputs, filesystems));
+        let (compiled, mut intact, write) = (
+            host_compiled(root, folder, sources),
+            host_intact(root, folder, sources, outputs, filesystems),
+            host_write(root, folder, sources),
+        );
         server.compile(
-            Folder { last: last_compiled, compiled: &mut compiled, intact: &mut intact },
+            Folder { last: last_compiled, compiled: &compiled, intact: &mut intact, write: &write },
             None,
             |path| {
                 let input = remembered(path)?;
@@ -769,8 +772,9 @@ fn write_hosts_folder(
     Ok(recompiled)
 }
 
-/// Writes into `folder`, for the extension hosts of the project at `root` with `configuration`, the compiled files of
-/// `compiled`, which a compile made from `server`'s analysis, and the folder's other files, and keeps the record of
+/// Writes into `folder`, for the extension hosts of the project at `root` with `configuration`, the folder's files
+/// beside the compiled files of `compiled`, which a compile made from `server`'s analysis and wrote as [`host_write`]
+/// writes them, and keeps the record of
 /// what the compile read and wrote in `folder`'s [`INPUTS`], which `record` starts, with `stamped`, the stamps the
 /// compile took, those of the files `autoloader` serves, and `inputs`, the listeners' inputs [`listener_inputs`] gave
 /// from `server`'s database. A compiled file
@@ -785,7 +789,7 @@ fn write_hosts(
     sources: &BTreeMap<String, Found>,
     server: &Server,
     autoloader: Option<&Autoloader>,
-    (compilations, compiled_files): Compiled,
+    (compilations, compiled_files): Compiled<Result<Written, DatabaseError>>,
     outputs: &Outputs,
     mut stamped: Vec<Stamp>,
     inputs: &[unit::Input],
@@ -798,10 +802,10 @@ fn write_hosts(
 
     // Whether a file a host's worker loads changed, so a watch knows to start the workers again.
     let mut changed = false;
-    let mut keep = |path: &Path, bytes: &[u8], wrote: bool| {
+    let mut keep = |path: &Path, hash: [u8; 16], wrote: bool| {
         changed |= wrote;
         if let Some(record) = record.as_mut() {
-            record.output(path, bytes);
+            record.output(path, hash);
         }
     };
     let mut written = BTreeSet::new();
@@ -809,9 +813,8 @@ fn write_hosts(
     let mut accepted = HashSet::new();
     let mut recompiled = HashSet::new();
     let bytes = compiled_files.encode(configuration_hash(configuration))?;
-    keep(&compiled_files_path, &bytes, write_if_changed(&compiled_files_path, &bytes)?);
+    keep(&compiled_files_path, unit::source_hash(&bytes), write_if_changed(&compiled_files_path, &bytes)?);
     written.insert(compiled_files_path);
-    let mut writes = Vec::new();
     let mut kept = Vec::new();
     for (file_id, compilation) in compilations {
         let file = database.get_ref(&file_id)?;
@@ -819,8 +822,13 @@ fn write_hosts(
             continue;
         };
         match compilation {
-            Compilation::Accepted(bytes) => {
-                writes.push((file_id, compiled, bytes));
+            Compilation::Accepted(output) => {
+                let Written { hash, wrote } = output?;
+                if wrote {
+                    recompiled.insert(file_id);
+                }
+                keep(&compiled, hash, wrote);
+                written.insert(compiled);
                 accepted.insert(file_id);
             }
             Compilation::Kept => {
@@ -835,17 +843,6 @@ fn write_hosts(
                 refused.extend(errors);
             }
         }
-    }
-    // Each file is read and written on its own, so they are written at once and kept in the record in compile order.
-    let wrote: Vec<Result<bool, DatabaseError>> =
-        writes.par_iter().map(|(_, compiled, bytes)| write_if_changed(compiled, bytes)).collect();
-    for ((file_id, compiled, bytes), wrote) in writes.into_iter().zip(wrote) {
-        let wrote = wrote?;
-        if wrote {
-            recompiled.insert(file_id);
-        }
-        keep(&compiled, &bytes, wrote);
-        written.insert(compiled);
     }
     let classes = server
         .codebase()
@@ -867,7 +864,7 @@ fn write_hosts(
         let table = folder.join(LISTENERS);
         let dispatcher = server.dispatcher_module();
         let bytes = listener_table(inputs, &accepted, dispatcher.as_ref(), &externs, &effects, &families);
-        keep(&table, &bytes, write_if_changed(&table, &bytes)?);
+        keep(&table, unit::source_hash(&bytes), write_if_changed(&table, &bytes)?);
         written.insert(table);
     }
 
@@ -889,7 +886,7 @@ fn write_hosts(
     .report(refused, None)?;
     let report = report.lock().unwrap_or_else(PoisonError::into_inner).clone();
     let path = folder.join(HOST_REPORT);
-    keep(&path, &report, write_if_changed(&path, &report)?);
+    keep(&path, unit::source_hash(&report), write_if_changed(&path, &report)?);
     written.insert(path);
     if let Some(record) = record.as_mut() {
         for compiled in kept {
@@ -919,11 +916,21 @@ fn host_compiled<'a>(
     root: &'a Path,
     folder: &'a Path,
     sources: &'a BTreeMap<String, Found>,
-) -> impl FnMut(&File) -> Result<Option<Vec<u8>>, DatabaseError> + 'a {
+) -> impl Fn(&File) -> Result<Option<Vec<u8>>, DatabaseError> + Sync + 'a {
     move |file: &File| match host_compiled_path(root, folder, sources, file)? {
         Some(compiled) => read_listed(&compiled),
         None => Ok(None),
     }
+}
+
+/// Writes the compiled file of a file in `folder`, the hosts' folder of the project at `root` whose source files are
+/// `sources`, as [`write_compiled`] does.
+fn host_write<'a>(
+    root: &'a Path,
+    folder: &'a Path,
+    sources: &'a BTreeMap<String, Found>,
+) -> impl Fn(&File, Vec<u8>) -> Result<Written, DatabaseError> + Sync + 'a {
+    move |file: &File, bytes: Vec<u8>| write_compiled(host_compiled_path(root, folder, sources, file)?, &bytes)
 }
 
 /// Whether the compiled file of a file in `folder`, the hosts' folder of the project at `root` whose source files are
@@ -1077,6 +1084,30 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
     write_by_rename(path, bytes)?;
 
     Ok(true)
+}
+
+/// What a compile did with the bytes of an accepted file's compiled file, as [`write_compiled`] wrote them.
+#[derive(Debug)]
+struct Written {
+    /// The hash of the bytes, as the record keeps it.
+    hash: [u8; 16],
+    /// Whether the bytes differed from the file's, so the compile wrote them.
+    wrote: bool,
+}
+
+/// Writes `bytes`, the compiled file of an accepted file, to `compiled`, its path, when the file has one, as
+/// [`write_if_changed`] does.
+///
+/// # Errors
+///
+/// Returns the error of writing the file.
+fn write_compiled(compiled: Option<PathBuf>, bytes: &[u8]) -> Result<Written, DatabaseError> {
+    let wrote = match compiled {
+        Some(compiled) => write_if_changed(&compiled, bytes)?,
+        None => false,
+    };
+
+    Ok(Written { hash: unit::source_hash(bytes), wrote })
 }
 
 /// Whether the compile lowers `file`, a PHP# file of the project, which is the scope of its analysis. The compile
@@ -1300,10 +1331,11 @@ fn compiled(
         configuration_hash(configuration),
     );
     let mut hosts_filesystems = filesystems.clone();
-    let mut compiled = |file: &File| match compiled_path_of(&root, &sources, file)? {
+    let compiled = |file: &File| match compiled_path_of(&root, &sources, file)? {
         Some(compiled) => read_listed(&compiled),
         None => Ok(None),
     };
+    let write = |file: &File, bytes: Vec<u8>| write_compiled(compiled_path_of(&root, &sources, file)?, &bytes);
     let mut intact = |file: &File| match compiled_path_of(&root, &sources, file) {
         Ok(Some(compiled)) => is_unchanged(&compiled, outputs.get(&source_name(&root, &compiled)), &mut filesystems),
         _ => false,
@@ -1312,13 +1344,13 @@ fn compiled(
         (
             host_compiled(&root, &hosts.folder, &sources),
             host_intact(&root, &hosts.folder, &sources, outputs, &mut hosts_filesystems),
+            host_write(&root, &hosts.folder, &sources),
         )
     });
-    let hosts_folder = hosts.as_ref().zip(hosts_files.as_mut()).map(|((_, _, last, _), (compiled, intact))| Folder {
-        last,
-        compiled,
-        intact,
-    });
+    let hosts_folder = hosts
+        .as_ref()
+        .zip(hosts_files.as_mut())
+        .map(|((_, _, last, _), (compiled, intact, write))| Folder { last, compiled, intact, write });
     // A file whose errors the lowering does not survive is refused in the hosts' folder, whatever panic message its
     // lowering printed.
     let printing = hosts_folder.is_some().then(|| {
@@ -1327,7 +1359,7 @@ fn compiled(
         printing
     });
     let compilations = server.compile(
-        Folder { last: &last, compiled: &mut compiled, intact: &mut intact },
+        Folder { last: &last, compiled: &compiled, intact: &mut intact, write: &write },
         hosts_folder,
         recording_stamp(&root, &read_database, &stamped),
         |translations, reach, errored| lean.check(translations, reach, errored),
@@ -1358,7 +1390,6 @@ fn compiled(
     let mut refused_files = 0;
     let mut refused_php_files = 0;
     let mut packaged_refusals = Vec::new();
-    let mut writes = Vec::new();
     for (file_id, compilation) in compilations {
         let file = database.get_ref(&file_id)?;
         let name = String::from_utf8_lossy(&file.name);
@@ -1375,8 +1406,12 @@ fn compiled(
         };
 
         match compilation {
-            Compilation::Accepted(bytes) => {
-                writes.push((compiled, bytes));
+            Compilation::Accepted(output) => {
+                let Written { hash, .. } = output?;
+                if let Some(record) = record.as_mut() {
+                    record.output(&compiled, hash);
+                }
+                written.insert(compiled);
                 accepted.insert(file_id);
             }
             Compilation::Kept => {
@@ -1403,16 +1438,6 @@ fn compiled(
             }
         }
     }
-    // Each file is read and written on its own, so they are written at once and kept in the record in compile order.
-    let wrote: Vec<Result<bool, DatabaseError>> =
-        writes.par_iter().map(|(compiled, bytes)| write_if_changed(compiled, bytes)).collect();
-    wrote.into_iter().collect::<Result<Vec<bool>, _>>()?;
-    for (compiled, bytes) in writes {
-        if let Some(record) = record.as_mut() {
-            record.output(&compiled, &bytes);
-        }
-        written.insert(compiled);
-    }
 
     let listeners = server.listeners();
     let inputs = listener_inputs(database, |path| stamp_of(&root, database, path))?;
@@ -1429,7 +1454,7 @@ fn compiled(
         let bytes = listener_table(&inputs, &accepted, dispatcher.as_ref(), &externs, &effects, &families);
         write_if_changed(&table, &bytes)?;
         if let Some(record) = record.as_mut() {
-            record.output(&table, &bytes);
+            record.output(&table, unit::source_hash(&bytes));
         }
         written.insert(table);
     }
@@ -1437,7 +1462,7 @@ fn compiled(
         let bytes = compiled_files.encode(configuration_hash(configuration))?;
         write_if_changed(&compiled_files_path, &bytes)?;
         if let Some(record) = record.as_mut() {
-            record.output(&compiled_files_path, &bytes);
+            record.output(&compiled_files_path, unit::source_hash(&bytes));
         }
         written.insert(compiled_files_path);
         written.insert(compiled_folder.join(PROOFS));
@@ -1458,14 +1483,14 @@ fn compiled(
         let bytes = autoload_script(&root)?;
         write_if_changed(&autoload, &bytes)?;
         if let Some(record) = record.as_mut() {
-            record.output(&autoload, &bytes);
+            record.output(&autoload, unit::source_hash(&bytes));
         }
         written.insert(autoload);
         let preload = compiled_folder.join(PRELOAD);
         let bytes = preload_script(&types, &anonymous_class_types(codebase, loaded));
         write_if_changed(&preload, &bytes)?;
         if let Some(record) = record.as_mut() {
-            record.output(&preload, &bytes);
+            record.output(&preload, unit::source_hash(&bytes));
         }
         written.insert(preload);
         let kept: BTreeSet<PathBuf> = written
@@ -1812,14 +1837,15 @@ impl Record {
         self.marker_file.as_ref().map(|file| file.path().to_path_buf())
     }
 
-    /// Keeps the file at `path`, which the compile just wrote or kept with `bytes`, as an output with its status now.
-    fn output(&mut self, path: &Path, bytes: &[u8]) {
+    /// Keeps the file at `path`, which the compile wrote or kept with bytes whose [`unit::source_hash`] is `hash`, as an
+    /// output with its status now.
+    fn output(&mut self, path: &Path, hash: [u8; 16]) {
         match std::fs::metadata(path) {
             Ok(metadata) => {
                 let name = source_name(&self.root, path);
                 let status = Status::of(path, &metadata, &mut self.filesystems);
                 self.files.remove(&name);
-                self.outputs.insert(name, (status, unit::source_hash(bytes)));
+                self.outputs.insert(name, (status, hash));
             }
             Err(_) => self.lost = true,
         }
@@ -2751,7 +2777,7 @@ mod tests {
         }
         let sources = source_files(&root, &listing(&configuration), &mut forced, None);
         let mut record = Record::start(&configuration, &root, &sources, folder, forced.clone(), None).unwrap();
-        record.output(&output, b"compiled");
+        record.output(&output, unit::source_hash(b"compiled"));
         record.write(&folder.join(INPUTS), Outcome::default(), &ReadDatabase::empty(), []).unwrap();
         let mut current = || {
             let sources = source_files(&root, &listing(&configuration), &mut forced, None);
