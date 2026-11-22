@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod compiling;
+
 use std::borrow::Cow;
 use std::path::Path;
 use std::path::PathBuf;
