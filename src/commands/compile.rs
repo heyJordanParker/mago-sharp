@@ -76,8 +76,10 @@ use mago_orchestrator::service::phase::Phase;
 use mago_prelude::Prelude;
 use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::IssueCollection;
+use mago_reporting::Level;
 use mago_reporting::ReportingFormat;
 use mago_reporting::ReportingTarget;
+use mago_reporting::baseline::Baseline;
 use mago_reporting::color::ColorChoice as ReportingColorChoice;
 use mago_reporting::reporter::Reporter;
 use mago_reporting::reporter::ReporterConfig;
@@ -171,9 +173,7 @@ impl CompileCommand {
     /// included, when a source is a link to a file outside the workspace, when a package in `vendor/` holds a `.sharp`
     /// folder of its own, or when a PHP file someone wrote sits where a source's PHP file goes. Every accepted file is
     /// written either way.
-    pub fn execute(self, mut configuration: Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
-        configuration.extension_hosts = compile_for_hosts(&configuration)?.0;
-
+    pub fn execute(self, configuration: Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
         compile(&configuration, color_choice)
     }
 }
@@ -1001,6 +1001,16 @@ fn with_packages(mut database: Database<'static>) -> (Database<'static>, HashSet
     (database, included)
 }
 
+/// Each file of `included`, the `.sharp` files [`with_packages`] copied into `database`, that is a Composer package's,
+/// whose extension host issues an analysis leaves out.
+fn package_files(database: &Database<'_>, included: &HashSet<FileId>) -> Vec<FileId> {
+    database
+        .files()
+        .filter(|file| included.contains(&file.id) && package_of(&file.name).is_some())
+        .map(|file| file.id)
+        .collect()
+}
+
 /// A copy of `file` as a file of `file_type` that holds `contents`, as a package's `.sharp` file is copied into a file
 /// of the project, which the compile checks too.
 fn copy_of(file: &File, file_type: FileType, contents: Cow<'static, [u8]>) -> File {
@@ -1132,10 +1142,105 @@ fn is_lowered(file: &File) -> bool {
 
 /// Checks every PHP# file the analyzer loads, writes the compiled file of each accepted one, and deletes every other
 /// file in the `.sharp` folder, as [`CompileCommand::execute`] says.
+///
+/// Spec section 27: the `.sharp` folder holds the one compile of a tree, from the analysis without the extension hosts,
+/// as `mago --no-extensions compile` and a whole `mago analyze` write it, so the three keep each other's. With a host
+/// enabled, the run compiles as a whole `mago analyze` does, the hosts' folder included, and the hosts then take its
+/// analysis over: their rules only report, and each error they report in a PHP# file fails the run.
 fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
-    let (outcome, database, _) = compiled(configuration, color_choice, None, Keeping::Nothing, None)?;
+    if !configuration.extension_hosts.values().any(|host| host.enabled) {
+        let (outcome, database, _) = compiled(configuration, color_choice, None, Keeping::Nothing, None)?;
 
-    outcome.print(database, configuration, color_choice)
+        return outcome.print(database, configuration, color_choice);
+    }
+
+    let (started, outcome, loaded) = compile_with_hosts(configuration, color_choice, true)?;
+    let (database, issues) = hosted(configuration, color_choice, started, loaded)?;
+    let errors = issues
+        .into_iter()
+        .filter(|issue| issue.level == Level::Error && !outcome.issues.iter().any(|refused| refused == issue));
+    let errors = Hidden::new(configuration)?.shown(IssueCollection::from(errors), &database);
+
+    outcome.with_hosts_errors(errors).print(database, configuration, color_choice)
+}
+
+/// The issues the extension hosts `started` report in the PHP# files a compile lowers, the project's own, never a
+/// Composer package's, with the database they point into, as the compile's own analysis with the hosts reported them:
+/// the compile's analysis that `loaded` holds, which the hosts take over with the return-type requests it recorded, or
+/// else, when the compile had nothing to do, an analysis of the project with the hosts.
+///
+/// # Errors
+///
+/// Returns the error of loading the project or of analyzing it.
+fn hosted(
+    configuration: &Configuration,
+    color_choice: ColorChoice,
+    started: Option<Arc<ExternalAnalyzerHandle>>,
+    loaded: Loaded,
+) -> Result<(ReadDatabase, IssueCollection), Error> {
+    let orchestrator = whole_workspace(configuration, color_choice, true)?;
+    if let Some(started) = started {
+        orchestrator.set_external_analyzer_handle(started);
+    }
+    let (server, issues) = match loaded {
+        Loaded::Hosted { server, requests } => {
+            let mut server = server.scoped_to(is_lowered);
+            orchestrator.add_external_initialization_files(server.database_mut())?;
+            let issues = server.analyze_with_hosts(orchestrator.get_analyzer_plugin_registry(), &requests)?.issues;
+
+            (server, issues)
+        }
+        Loaded::Nothing | Loaded::Files(..) | Loaded::Analysis(..) => {
+            let (database, included) = project_database(&orchestrator, &configuration.source.workspace)?;
+            let package_files = package_files(&database, &included);
+            let mut server = Server::new(database, decode_prelude, server_settings(&orchestrator))
+                .with_package_files(package_files)
+                .scoped_to(is_lowered);
+            let issues = server.analyze()?.issues;
+
+            (server, issues)
+        }
+    };
+
+    Ok((server.database().read_only(), issues))
+}
+
+/// What the project's configuration hides of an analysis's issues, as `mago analyze` hides them: each issue an `ignore`
+/// entry or the baseline targets.
+struct Hidden {
+    ignored: CompiledIgnoreSet,
+    baseline: Option<Baseline>,
+}
+
+impl Hidden {
+    /// What `configuration` hides.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading the baseline.
+    fn new(configuration: &Configuration) -> Result<Self, Error> {
+        let ignored = CompiledIgnoreSet::compile(
+            &configuration.analyzer.ignore,
+            configuration.source.glob.to_database_settings(),
+        );
+        let baseline = match configuration.analyzer.baseline.as_deref().filter(|path| path.exists()) {
+            Some(path) => Some(unserialize_baseline(path)?.0),
+            None => None,
+        };
+
+        Ok(Self { ignored, baseline })
+    }
+
+    /// `issues`, each in a file of `database`, without each one an `ignore` entry or the baseline hides.
+    fn shown(&self, mut issues: IssueCollection, database: &ReadDatabase) -> IssueCollection {
+        issues.filter_out_ignored(&self.ignored, |file_id| {
+            database.get_ref(&file_id).ok().map(|file| String::from_utf8_lossy(&file.name).into_owned())
+        });
+        match &self.baseline {
+            Some(baseline) => baseline.filter_issues(issues, database),
+            None => issues,
+        }
+    }
 }
 
 /// What a whole `mago analyze` reports from, of what its compile loaded and analyzed.
@@ -1208,9 +1313,9 @@ pub(crate) fn compile_with_hosts(
     Ok((started, outcome, loaded))
 }
 
-/// Compiles the project with `configuration` into its `.sharp` folder, as [`compile`] does, and into the folder of
-/// `hosts`, when given, while that folder is out of date, from the same analysis and lowerings, under the folder's
-/// lock as [`compile_for_hosts`] takes it. With `keeping` [`Keeping::Hosted`], what `started` registers decides
+/// Compiles the project with `configuration`, which enables no extension host, into its `.sharp` folder, as [`compile`]
+/// does, and into the folder of `hosts`, when given, while that folder is out of date, from the same analysis and
+/// lowerings, under the folder's lock as [`compile_for_hosts`] takes it. With `keeping` [`Keeping::Hosted`], what `started` registers decides
 /// whether the compile records the hosts' return-type requests or keeps its scans. Returns the outcome of the
 /// compile into the `.sharp` folder, with the database its issues point into, and what `keeping` names, nothing when
 /// the compile had nothing to do or when its analysis reports in no file of the project.
@@ -1254,9 +1359,7 @@ fn compiled(
         .then(|| mago_database::lock::exclusive(&compiled_folder.join(WRITE_LOCK)))
         .transpose()?;
     let mut last = Record::read(&record_path);
-    // A host names none of what it reads, so only a compile without hosts can know it has nothing to do.
-    if !configuration.extension_hosts.values().any(|host| host.enabled)
-        && hosts.as_ref().is_none_or(|(_, (_, _, _, stale))| !stale)
+    if hosts.as_ref().is_none_or(|(_, (_, _, _, stale))| !stale)
         && let Some(record) = last.as_mut()
         && every_input_is_current(record, configuration, &root, &sources, &mut filesystems)
         && let Some(database) = record.outcome.report_database(&root)?
@@ -1302,14 +1405,6 @@ fn compiled(
         (hosts, outputs, last, record)
     });
 
-    if let Some(external_analyzer) = start_external_analyzer(
-        &configuration.extension_hosts,
-        configuration.php_version,
-        &configuration.analyzer.plugins,
-        configuration.analyzer.disable_default_plugins,
-    ) {
-        orchestrator.set_external_analyzer_handle(external_analyzer);
-    }
     // The run takes this analysis over with the hosts, so the analysis records what it would ask them, unless they
     // reach every file, which the run then analyzes from scratch from this analysis's scans.
     let records = match started.filter(|_| keeping == Keeping::Hosted) {
@@ -1341,11 +1436,7 @@ fn compiled(
             ));
         }
     };
-    let package_files: Vec<FileId> = database
-        .files()
-        .filter(|file| included.contains(&file.id) && package_of(&file.name).is_some())
-        .map(|file| file.id)
-        .collect();
+    let package_files = package_files(&database, &included);
     let reports = matches!(keeping, Keeping::Analysis | Keeping::Hosted)
         && database.files().any(|file| file.file_type == FileType::Host && !included.contains(&file.id));
     let server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator))
@@ -1365,13 +1456,7 @@ fn compiled(
     let issues = server.analyze()?.issues;
     // The requests of this analysis alone: a file the compile analyzes again to lower it makes the same ones.
     let requests = orchestrator.get_analyzer_plugin_registry().take_return_type_requests();
-    // The compile hides what `mago analyze` hides: a host rule's error an `ignore` entry or the baseline targets.
-    let ignored =
-        CompiledIgnoreSet::compile(&configuration.analyzer.ignore, configuration.source.glob.to_database_settings());
-    let baseline = match configuration.analyzer.baseline.as_deref().filter(|path| path.exists()) {
-        Some(path) => Some(unserialize_baseline(path)?.0),
-        None => None,
-    };
+    let hidden = Hidden::new(configuration)?;
     let read_database = server.database().read_only();
     let lean = Lean::new(&root, configuration.threads);
     let stamped = Mutex::new(Vec::new());
@@ -1414,15 +1499,7 @@ fn compiled(
         recording_stamp(&root, &read_database, &stamped),
         |translations, reach, errored| lean.check(translations, reach, errored),
         &library,
-        |mut issues| {
-            issues.filter_out_ignored(&ignored, |file_id| {
-                read_database.get_ref(&file_id).ok().map(|file| String::from_utf8_lossy(&file.name).into_owned())
-            });
-            match &baseline {
-                Some(baseline) => baseline.filter_issues(issues, &read_database),
-                None => issues,
-            }
-        },
+        |issues| hidden.shown(issues, &read_database),
     );
     if let Some(printing) = printing {
         std::panic::set_hook(printing);
@@ -1677,6 +1754,24 @@ impl Outcome {
     /// The issues of each file the compile refused, and each other error it found.
     pub(crate) fn into_parts(self) -> (IssueCollection, Vec<String>) {
         (self.issues, self.errors)
+    }
+
+    /// This outcome with `errors` beside its issues: the errors the extension hosts' analysis reported in the project's
+    /// PHP# files that the compile's own analysis did not. The hosts' rules only report, so each file keeps its compiled
+    /// file, and the errors fail the run.
+    fn with_hosts_errors(mut self, errors: IssueCollection) -> Self {
+        let (reported, them) = match errors.len() {
+            0 => return self,
+            1 => ("1 error".to_string(), "it"),
+            count => (format!("{count} errors"), "them"),
+        };
+        self.issues.extend(errors);
+        self.summary.push_str(&format!(
+            " The extension hosts reported {reported} in PHP# files: fix {them} and run vendor/bin/mago compile again."
+        ));
+        self.failed = true;
+
+        self
     }
 
     /// Whether the law checker refused a file, as one it could not install or a proof it stopped at its deadline. What
@@ -2183,15 +2278,16 @@ fn filesystem_of(path: &Path) -> Option<libc::statfs> {
     Some(unsafe { filesystem.assume_init() })
 }
 
-/// The hash of the settings of `configuration` that change what a compile writes: the PHP version, the sources, the
-/// extension hosts, and the parser's and the analyzer's settings, from their debug form, which holds every field, the
-/// ones serde skips included, as the deprecated `perform-heuristic-checks`. The threads, the stack size, the version
-/// checks, the linter's, the formatter's and the guard's settings, the editor URL, the configuration file and the
-/// command-line flags change nothing a compile writes, so runs that differ only there share one compile.
+/// The hash of the settings of `configuration` that change what a compile writes: the PHP version, the sources, and the
+/// parser's and the analyzer's settings, from their debug form, which holds every field, the ones serde skips included,
+/// as the deprecated `perform-heuristic-checks`. The extension hosts, the threads, the stack size, the version checks,
+/// the linter's, the formatter's and the guard's settings, the editor URL, the configuration file and the command-line
+/// flags change nothing a compile writes, since every compile lowers from the analysis without the hosts, so runs that
+/// differ only there share one compile.
 fn configuration_hash(configuration: &Configuration) -> [u8; 16] {
-    let Configuration { php_version, source, extension_hosts, parser, analyzer, .. } = configuration;
+    let Configuration { php_version, source, parser, analyzer, .. } = configuration;
 
-    unit::source_hash(format!("{php_version:?}{source:?}{extension_hosts:?}{parser:?}{analyzer:?}").as_bytes())
+    unit::source_hash(format!("{php_version:?}{source:?}{parser:?}{analyzer:?}").as_bytes())
 }
 
 /// Each file the loader reads, as the walk of `listing` found it, by the name the database gives it, as [`Found`]
@@ -2669,6 +2765,128 @@ mod tests {
         (directory, root, configuration)
     }
 
+    /// Whether the PHP SDK's Composer dependencies are installed, which `MAGO_REQUIRE_PHP_SDK_TESTS` requires.
+    fn php_sdk() -> bool {
+        let available = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/autoload.php").is_file();
+        assert!(
+            available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
+            "vendor dependencies are required for the extension host tests"
+        );
+        available
+    }
+
+    /// An extension host whose return-type provider types each call of `App\Box::value()` as `string`.
+    const BOX_HOST: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\MethodReturnTypeProvider;
+use Mago\Sdk\Analyzer\MethodTarget;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Analyzer\ReturnTypeProviderContext;
+use Mago\Sdk\Analyzer\Type;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+final class Boxes implements Plugin, MethodReturnTypeProvider
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('boxes', 'Boxes', 'Types the value of a box.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerMethodReturnTypeProvider($this);
+    }
+
+    public function getTargets(): array
+    {
+        return [MethodTarget::allMethods('App\\Box')];
+    }
+
+    public function getReturnType(ReturnTypeProviderContext $context): ?Type
+    {
+        return $context->invocation->name === 'value' ? Type::string() : null;
+    }
+}
+
+(new Worker(new Extension('boxes', 'Boxes', '0.0.0', analyzerPlugins: [new Boxes()])))->run();
+"#;
+
+    /// Each file under `folder`, its record of inputs included, by its path, with its modification time and its bytes.
+    fn files_as_written(folder: &Path) -> BTreeMap<PathBuf, (std::time::SystemTime, Vec<u8>)> {
+        let mut files = BTreeMap::new();
+        let mut folders = vec![folder.to_path_buf()];
+        while let Some(next) = folders.pop() {
+            for entry in std::fs::read_dir(&next).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    folders.push(path);
+                } else {
+                    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+                    files.insert(path.clone(), (modified, std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        files
+    }
+
+    /// Spec section 27: the `.sharp` folder holds the one compile of a tree, written from the analysis without the
+    /// extension hosts whichever command writes it, so with a host that types a call, `mago compile` and the compile a
+    /// whole `mago analyze` runs each leave what the other wrote, in either order.
+    #[test]
+    fn a_compile_and_a_whole_analyze_s_compile_of_a_tree_the_other_left_current_write_nothing() {
+        if !php_sdk() {
+            return;
+        }
+        let (_directory, root, _) = project();
+        write(
+            &root,
+            "app/Box.php",
+            "<?php\n\nnamespace App;\n\nfinal class Box\n{\n    public function value()\n    {\n        return 1;\n    }\n}\n",
+        );
+        write(
+            &root,
+            "app/Reader.php",
+            "<?php\n\nnamespace App;\n\nfunction read_value(Box $box): string\n{\n    return $box->value();\n}\n",
+        );
+        write(&root, "tools/host.php", BOX_HOST);
+        write(
+            &root,
+            "mago.toml",
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.boxes]\nfile = \"tools/host.php\"\n",
+        );
+        let configuration = Configuration::load(CliOverrides {
+            workspace: Some(root.clone()),
+            config: Some(root.join("mago.toml")),
+            no_version_check: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let folder = root.join(unit::COMPILED_FOLDER);
+        let mago_compile = || {
+            compile(&configuration, ColorChoice::Never).unwrap();
+        };
+        let whole_analyze = || {
+            compile_with_hosts(&configuration, ColorChoice::Never, true).unwrap();
+        };
+        // Each file under the `.sharp` folder that `run` wrote, added or deleted.
+        let written_by = |run: &dyn Fn()| -> BTreeSet<PathBuf> {
+            let before = files_as_written(&folder);
+            run();
+            let after = files_as_written(&folder);
+
+            before.keys().chain(after.keys()).filter(|path| before.get(*path) != after.get(*path)).cloned().collect()
+        };
+
+        mago_compile();
+        assert_eq!(written_by(&whole_analyze), BTreeSet::<PathBuf>::new(), "the whole analyze after the compile");
+        assert_eq!(written_by(&mago_compile), BTreeSet::<PathBuf>::new(), "the compile after the whole analyze");
+    }
+
     /// A `vendor/` file a PHP# file calls is no input of its compiled file, which `composer.lock` stands for, so the
     /// record of the hosts' compile's source files is what sees an edit of it.
     #[test]
@@ -2906,17 +3124,17 @@ mod tests {
     fn only_a_setting_that_changes_what_a_compile_writes_changes_the_configuration_hash() {
         let base = Configuration::from_workspace(PathBuf::from("/project"));
         type Change = fn(&mut Configuration);
-        let written: [(&str, Change); 6] = [
+        let written: [(&str, Change); 5] = [
             ("php-version", |changed| changed.php_version = PHPVersion::PHP80),
             ("source", |changed| changed.source.excludes.push("legacy".to_owned())),
-            ("extension-hosts", |changed| {
-                changed.extension_hosts.insert("acme".to_owned(), ExtensionHostConfiguration::default());
-            }),
             ("parser", |changed| changed.parser.enable_short_tags ^= true),
             ("analyzer", |changed| changed.analyzer.find_unused_definitions ^= true),
             ("analyzer.perform-heuristic-checks", |changed| changed.analyzer.perform_heuristic_checks = Some(false)),
         ];
-        let unwritten: [(&str, Change); 12] = [
+        let unwritten: [(&str, Change); 13] = [
+            ("extension-hosts", |changed| {
+                changed.extension_hosts.insert("acme".to_owned(), ExtensionHostConfiguration::default());
+            }),
             ("version", |changed| changed.version = Some("0.6".to_owned())),
             ("threads", |changed| changed.threads += 1),
             ("stack-size", |changed| changed.stack_size += 1),

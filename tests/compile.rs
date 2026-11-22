@@ -1889,7 +1889,8 @@ fn a_watch_starts_the_hosts_again_when_another_run_compiled_an_edit_while_it_wai
 /// A host that types the project's code, as one that gives a plain PHP helper its return type does, can load the
 /// classes only its typing makes correct: the hosts' compile lowers every file that lowers, whatever the analysis
 /// without the hosts says of it, as Roslyn hands an analyzer a compilation with errors and `tsc` emits despite them.
-/// The host here fails its hook unless the compiled file of `app/Greeting.sharp` is there.
+/// The host here fails its hook unless the compiled file of `app/Greeting.sharp` is there. The `.sharp` folder holds
+/// the compile without the hosts (spec section 27), which refuses `app/Greeting.sharp` for the type the hosts give.
 #[test]
 fn a_typing_host_loads_a_class_only_its_typing_makes_correct_on_a_fresh_tree() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1915,9 +1916,14 @@ fn a_typing_host_loads_a_class_only_its_typing_makes_correct_on_a_fresh_tree() {
         "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.typing]\nfile = \"tools/host.php\"\n",
     );
 
-    compile_succeeds(root);
-    compile_succeeds(root);
-    assert!(compiled(root, "app/Greeting.sharp").exists());
+    for run in ["fresh", "again"] {
+        let output = printed(&compile(root));
+        assert!(output.contains("app/Greeting.sharp:9:37: error[mixed-return-statement]"), "{run}: {output}");
+        assert!(output.contains("1 PHP# file was refused"), "{run}: {output}");
+        assert!(!output.contains("isn't compiled for the hosts"), "{run}: {output}");
+    }
+    assert!(!compiled(root, "app/Greeting.sharp").exists());
+    assert!(compiled(root, "app/Order.sharp").exists());
 }
 
 /// An extension host whose one plugin types `App\Box::value()` as a string and declines every other method of
@@ -2011,8 +2017,8 @@ fn a_whole_analyze_with_a_return_type_host_reports_what_an_analysis_of_every_fil
 }
 
 /// With `MAGO_LOG=debug`, a whole `mago analyze` with a host logs how long each phase of its compile and its report took,
-/// as "Phase scan took 0.12 s.", from the inputs it finds to the report it prints, a `mago compile` logs the compile of
-/// the hosts' folder that runs before it as `hosts`, and at the default level neither logs a phase.
+/// as "Phase scan took 0.12 s.", from the inputs it finds to the report it prints, a `mago analyze` of named files logs
+/// the compile of the hosts' folder that runs before it as `hosts`, and at the default level neither logs a phase.
 #[test]
 fn analyze_logs_each_phase_s_time_at_the_debug_level() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -2049,16 +2055,16 @@ fn analyze_logs_each_phase_s_time_at_the_debug_level() {
             log.lines().filter_map(|line| line.split_once(&prefix)?.1.strip_suffix(" s.")?.parse::<f64>().ok()).count();
         assert!(took > 0, "no `Phase {phase} took … s.` line: {log}");
     }
-    let compile = process::output(
+    let named = process::output(
         Command::new(env!("CARGO_BIN_EXE_mago"))
-            .args(["--no-version-check", "--colors", "never", "compile"])
+            .args(["--no-version-check", "--colors", "never", "analyze", "app"])
             .env("MAGO_LOG", "debug")
             .env("XDG_CACHE_HOME", cache.path())
             .current_dir(root),
     )
     .unwrap();
-    assert!(compile.status.success(), "{}", printed(&compile));
-    assert!(printed(&compile).contains("Phase hosts took "), "the hosts' compile logs its time: {}", printed(&compile));
+    assert!(named.status.success(), "{}", printed(&named));
+    assert!(printed(&named).contains("Phase hosts took "), "the hosts' compile logs its time: {}", printed(&named));
 
     let info = analyze("info");
 
@@ -2301,8 +2307,8 @@ fn compile_runs_the_node_hooks_only_in_the_php_sharp_files_it_lowers() {
 }
 
 /// A host's rule reports only on the project's own files, never on a Composer package's `.sharp` file the compile checks
-/// beside them: its error there is left out, so the package file compiles, while its error on a project file refuses
-/// that file.
+/// beside them: its error there is left out, while its error on a project file fails the run. The hosts' rules only
+/// report (spec section 27), so both files compile.
 #[test]
 fn compile_reports_a_hosts_issue_only_on_the_projects_own_files() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -2330,11 +2336,11 @@ fn compile_reports_a_hosts_issue_only_on_the_projects_own_files() {
     assert!(printed(&output).contains("app/Marked.sharp"), "{}", printed(&output));
     assert!(!printed(&output).contains("Money.sharp"), "{}", printed(&output));
     assert!(compiled(root, MONEY_PATH).exists(), "{}", printed(&output));
-    assert!(!compiled(root, "app/Marked.sharp").exists(), "{}", printed(&output));
+    assert!(compiled(root, "app/Marked.sharp").exists(), "{}", printed(&output));
 }
 
 /// A host's rule reports on each file of `includes` outside a Composer package, as on a file under `paths`: the compile
-/// lowers the project's `lib/Shop/Report.sharp` too, so its error there refuses that file.
+/// lowers the project's `lib/Shop/Report.sharp` too, so its error there fails the run, and the file compiles.
 #[test]
 fn compile_reports_a_hosts_issue_on_a_file_of_an_includes_folder_outside_vendor() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -2360,7 +2366,7 @@ fn compile_reports_a_hosts_issue_on_a_file_of_an_includes_folder_outside_vendor(
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert_eq!(printed(&output).matches("acme/no-marker").count(), 1, "{}", printed(&output));
     assert!(printed(&output).contains("lib/Shop/Report.sharp"), "{}", printed(&output));
-    assert!(!compiled(root, "lib/Shop/Report.sharp").exists(), "{}", printed(&output));
+    assert!(compiled(root, "lib/Shop/Report.sharp").exists(), "{}", printed(&output));
     assert!(compiled(root, "app/Order.sharp").exists(), "{}", printed(&output));
 }
 
