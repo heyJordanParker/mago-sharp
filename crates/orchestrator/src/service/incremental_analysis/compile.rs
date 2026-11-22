@@ -2147,6 +2147,7 @@ mod tests {
     use mago_codex::signature::FileSignature;
     use mago_database::Database;
     use mago_database::DatabaseConfiguration;
+    use mago_database::file::FolderNamespace;
     use mago_prelude::Prelude;
     use mago_sharp_bridge::unit::header;
     use mago_sharp_bridge::unit::sharp_unit_header;
@@ -2173,7 +2174,8 @@ mod tests {
 
     /// A project of files, each a workspace-relative name and its contents. A PHP file under `vendor/` is vendored, and
     /// every other file is a host file, as `mago compile` loads every `.sharp` file. A file under the standard
-    /// library's package is the library's, as the loader marks it from the package's `composer.json`.
+    /// library's package is the library's, as the loader marks it from the package's `composer.json`, and a file under
+    /// `tests/` is a test file, as the loader marks a file of a folder `composer.json` lists under `autoload-dev`.
     fn project(files: &[(&str, &str)]) -> Database<'static> {
         let mut database =
             Database::new(DatabaseConfiguration::new(Path::new("/project"), vec![], vec![], vec![], vec![]));
@@ -2192,6 +2194,9 @@ mod tests {
                 Cow::Owned(contents.as_bytes().to_vec()),
             );
             file.is_standard_library = name.starts_with("vendor/heyjordanparker/php-sharp-composer/");
+            if name.starts_with("tests/") {
+                file.folder_namespace = Some(FolderNamespace::Test);
+            }
             database.add(file);
         }
 
