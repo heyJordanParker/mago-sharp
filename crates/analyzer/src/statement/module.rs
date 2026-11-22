@@ -457,8 +457,8 @@ impl<'ctx> Services<'ctx> {
     }
 
     /// The set of services `module` belongs to: the base set for a base module, the base set under every module of
-    /// its environment for an environment module, as the container reads each `Module.<SHARP_ENV>.sharp` on a class's
-    /// folders, and the base set under its own bindings for a test module.
+    /// its environment for an environment module, as the container reads each `Module.<SHARP_ENV>.sharp` of the class's
+    /// namespace and each one above it, and the base set under its own bindings for a test module.
     fn new(codebase: &'ctx CodebaseMetadata, module: &'ctx ModuleMetadata) -> Self {
         let overrides = match module.kind {
             ModuleKind::Base => Vec::new(),
