@@ -6002,7 +6002,8 @@ const MARK: &str = "namespace App.Runs;\n\npublic struct Mark\n{\n    public Mar
 const CURSOR: &str = "namespace App.Runs;\n\npublic struct Cursor\n{\n    public Cursor(public int? step { get; }, public Map<string, int> arguments { get; }, public List<Mark> marks { get; }) { }\n}\n";
 
 /// `App.Runs.Trail`, a struct whose one field is a `List<Mark>`, so its `==` compares the lists.
-const TRAIL: &str = "namespace App.Runs;\n\npublic struct Trail\n{\n    public Trail(public List<Mark> marks { get; }) { }\n}\n";
+const TRAIL: &str =
+    "namespace App.Runs;\n\npublic struct Trail\n{\n    public Trail(public List<Mark> marks { get; }) { }\n}\n";
 
 /// `App.Runs.RunStatus`, whose cases hold a `Cursor`, with laws that build one with `[:]`, take one as a parameter and
 /// read its other properties, ask its `Map` `isEmpty()` and `isNotEmpty()`, and compare a `List<Mark>`, and a `Trail`
