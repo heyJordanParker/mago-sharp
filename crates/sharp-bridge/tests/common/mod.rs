@@ -24,6 +24,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::r#extern::extern_namespace_classes;
 use mago_codex::scanner::scan_program;
 use mago_database::file::File;
+use mago_database::file::FolderNamespace;
 use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::ExternNamespaces;
 use mago_names::resolver::NameResolver;
@@ -166,10 +167,19 @@ pub fn checked_inlining<R>(
     forms: &InlineForms,
     then: impl FnOnce(&CheckedProgram<'_>) -> R,
 ) -> Result<R, Vec<String>> {
+    checked_file(&fixture_file(path, code), library, forms, then)
+}
+
+/// The file `path` holding `code`, as the loader marks it: the standard library's under its folder, and a test file, one
+/// an `autoload-dev` folder holds, under `tests/`.
+fn fixture_file(path: &str, code: &str) -> File {
     let mut file = File::ephemeral(Cow::Owned(path.as_bytes().to_vec()), Cow::Owned(code.as_bytes().to_vec()));
     file.is_standard_library = path.starts_with(STANDARD_LIBRARY);
+    if path.starts_with("tests/") {
+        file.folder_namespace = Some(FolderNamespace::Test);
+    }
 
-    checked_file(&file, library, forms, then)
+    file
 }
 
 /// [`checked_inlining`] of `file` as the test builds it, such as a file a workspace root holds. Panics when an issue of
@@ -190,9 +200,7 @@ pub fn checked_with_effects<R>(
     library: &[(&str, &str)],
     then: impl FnOnce(&CheckedProgram<'_>, &CodebaseMetadata, &Effects) -> R,
 ) -> Result<R, Vec<String>> {
-    let file = File::ephemeral(Cow::Owned(path.as_bytes().to_vec()), Cow::Owned(code.as_bytes().to_vec()));
-
-    checked_file_with_effects(&file, library, &COLLECTION_MEMBER_FORMS, then)
+    checked_file_with_effects(&fixture_file(path, code), library, &COLLECTION_MEMBER_FORMS, then)
 }
 
 /// [`checked_file`], which also passes `then` the codebase and the effects the check solved.
@@ -210,13 +218,7 @@ fn checked_file_with_effects<R>(
         .iter()
         .chain(&effect_classes::EFFECT_CLASSES)
         .filter(|(path, _)| path.as_bytes() != &*file.name)
-        .map(|(path, code)| {
-            let mut library_file =
-                File::ephemeral(Cow::Owned(path.as_bytes().to_vec()), Cow::Owned(code.as_bytes().to_vec()));
-            library_file.is_standard_library = path.starts_with(STANDARD_LIBRARY);
-
-            library_file
-        })
+        .map(|(path, code)| fixture_file(path, code))
         .collect();
     let library: Vec<(&File, &Program)> = library
         .iter()

@@ -29,6 +29,7 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::union::TUnion;
+use mago_database::file::FolderNamespace;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -78,6 +79,20 @@ pub(crate) fn analyze_bindings<'ctx, 'arena, A>(
 where
     A: Arena,
 {
+    // Only a test start turns a test module on, so one outside a test file, which an `autoload-dev` folder holds, would
+    // never run.
+    if metadata.kind == ModuleKind::Test && context.source_file.folder_namespace != Some(FolderNamespace::Test) {
+        context.collector.report_with_code(
+            IssueCode::InvalidBinding,
+            Issue::error("A test module belongs in the test file that uses it.")
+                .with_annotation(Annotation::primary(metadata.span).with_message("Declared here."))
+                .with_note("Only a test start turns a test module on, so outside a test file it never runs.")
+                .with_help(
+                    "Move the module into the test file of the tests it serves, in a folder `composer.json` lists under `autoload-dev`.",
+                ),
+        );
+    }
+
     let written = module.members.iter().filter_map(|member| match member {
         ModuleMember::Binding(binding) => Some(binding),
         ModuleMember::Imports(_) | ModuleMember::Law(_) => None,
@@ -252,8 +267,21 @@ where
     check_class_services(context, &services, class, Builds::Listener(class.original_name, event));
 }
 
-/// Spec section 32: PHP# creates the classes a module binds and the classes of listeners through their main
-/// constructors, so each parameter needs a binding in the module of the class's namespace or of a namespace above it.
+/// Spec sections 27 and 32: PHP# also creates the class of a program, the class that declares `main`, before it calls
+/// `main`, so each parameter of its main constructor needs a binding as a bound class's does, in the base modules. A
+/// problem is reported at the parameter.
+pub(crate) fn check_program_services<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    let services = Services { codebase: context.codebase, overrides: Vec::new() };
+
+    check_class_services(context, &services, class, Builds::Program(class.original_name));
+}
+
+/// Spec section 32: PHP# creates the classes a module binds, the classes of listeners and the class of a program
+/// through their main constructors, so each parameter needs a binding in the module of the class's namespace or of a
+/// namespace above it.
 /// Reports each parameter of `class`'s main constructor that `services` can't fill, as `builds` names the class: a
 /// bound class's at the binding's class value, with a note at the parameter.
 fn check_class_services<A>(
@@ -277,13 +305,14 @@ fn check_class_services<A>(
 }
 
 /// What the container builds when it fills a parameter: a class a binding binds, with that binding and the span of
-/// the class in its value, the service of a binding's expression, or a listener's class, with the first event it
-/// listens to.
+/// the class in its value, the service of a binding's expression, a listener's class, with the first event it
+/// listens to, or a program's class.
 #[derive(Clone, Copy)]
 enum Builds<'ctx> {
     Bound(Word, &'ctx BindingMetadata, Span),
     Binding(&'ctx TUnion),
     Listener(Word, Word),
+    Program(Word),
 }
 
 /// A parameter the container can't fill: a service no module binds, or a type that is no service, `None` when the
@@ -304,7 +333,7 @@ fn report_missing_service<A>(
     A: Arena,
 {
     let (name, subject) = match builds {
-        Builds::Bound(class, ..) => {
+        Builds::Bound(class, ..) | Builds::Program(class) => {
             let name = display_class_like_name(context, class).to_string();
             (name.clone(), format!("`{name}`"))
         }
@@ -327,7 +356,7 @@ fn report_missing_service<A>(
             };
             let place = match builds {
                 Builds::Binding(_) => "this namespace".to_owned(),
-                Builds::Bound(..) | Builds::Listener(..) => format!("`{name}`'s namespace"),
+                Builds::Bound(..) | Builds::Listener(..) | Builds::Program(_) => format!("`{name}`'s namespace"),
             };
             Issue::error(format!(
                 "{subject} needs {} `{service_name}`, and no module binds one: the container can't build `{name}`.",
@@ -352,7 +381,7 @@ fn report_missing_service<A>(
                         binding_expression(context, binding)
                     )
                 }
-                Builds::Binding(_) | Builds::Listener(..) => {
+                Builds::Binding(_) | Builds::Listener(..) | Builds::Program(_) => {
                     "Take a service that gives the value, such as `Environment`, and read the value from it.".to_owned()
                 }
             };
@@ -366,7 +395,7 @@ fn report_missing_service<A>(
         Builds::Bound(_, _, bound) => issue
             .with_annotation(Annotation::primary(bound).with_message("Bound here."))
             .with_annotation(Annotation::secondary(parameter.span).with_message("Needed here.")),
-        Builds::Binding(_) | Builds::Listener(..) => {
+        Builds::Binding(_) | Builds::Listener(..) | Builds::Program(_) => {
             issue.with_annotation(Annotation::primary(parameter.span).with_message("Needed here."))
         }
     };

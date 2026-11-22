@@ -52,6 +52,7 @@ use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::visibility::Visibility;
+use mago_names::PROGRAM_ENTRY;
 use mago_names::TypeParametersNamed;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
@@ -114,6 +115,7 @@ use crate::statement::function_like::report_undefined_bound_types;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::function_like::report_union_for_a_class_bound;
 use crate::statement::function_like::written_type;
+use crate::statement::module::check_program_services;
 use crate::utils::missing_type_hints;
 use crate::utils::names::and_list;
 use crate::utils::names::article;
@@ -728,6 +730,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
 
         override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
         listener::check_listener(class_like_metadata, self.members.as_slice(), context);
+        // Spec section 27: a class that declares `main` runs as a program, which the engine builds as it builds a
+        // bound class.
+        if context.dialect.is_sharp()
+            && self.members.iter().any(|member| {
+                matches!(member, ClassLikeMember::Method(method) if method.name.value == PROGRAM_ENTRY.as_bytes())
+            })
+        {
+            check_program_services(context, class_like_metadata);
+        }
 
         let should_check_unused = 'check_unused: {
             if !context.settings.find_unused_definitions {

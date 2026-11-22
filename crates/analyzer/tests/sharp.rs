@@ -58,6 +58,7 @@ use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_database::file::FolderNamespace;
 use mago_names::ResolvedNames;
 use mago_names::STANDARD_ROOT_CLASSES;
 use mago_names::default_root_classes;
@@ -213,6 +214,18 @@ fn analyze_with_references(
     analyze_refined(registry, settings, analyzed, others, library, |_| {})
 }
 
+/// The file `name` holding `code`, as the loader marks it: the standard library's under its folder, and a test file, one
+/// an `autoload-dev` folder holds, under `tests/`.
+fn fixture_file(name: &'static str, code: &'static str) -> File {
+    let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
+    file.is_standard_library = name.starts_with(STANDARD_LIBRARY);
+    if name.starts_with("tests/") {
+        file.folder_namespace = Some(FolderNamespace::Test);
+    }
+
+    file
+}
+
 /// [`analyze_with_references`], with `refine` run on the scanned codebase before population, where an external
 /// analyzer's metadata reaches it, as the PHP SDK's metadata codec sets a flag no source sets, such as `UNCHECKED`.
 fn analyze_refined(
@@ -229,8 +242,7 @@ fn analyze_refined(
         .chain(others)
         .chain(library)
         .map(|(name, code)| {
-            let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
-            file.is_standard_library = name.starts_with(STANDARD_LIBRARY);
+            let mut file = fixture_file(name, code);
             if name.starts_with("vendor/") {
                 file.file_type = FileType::Vendored;
             }
@@ -339,8 +351,7 @@ fn analyze_package(
         .iter()
         .chain(&EFFECT_CLASSES)
         .map(|(name, code)| {
-            let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
-            file.is_standard_library = name.starts_with(STANDARD_LIBRARY);
+            let mut file = fixture_file(name, code);
             file.is_project = !file.is_standard_library && !name.starts_with("library/");
 
             database.add(file)
@@ -28391,16 +28402,8 @@ fn an_extern_namespace_line_gives_its_namespace_to_the_root_names_of_its_folder(
 /// codebase and the effect summaries of every body `files` declare.
 fn summarized(files: &[(&'static str, &'static str)]) -> (CodebaseMetadata, Vec<EffectSummary>) {
     let Prelude { mut database, mut metadata, mut symbol_references } = PRELUDE.clone();
-    let file_ids: Vec<_> = files
-        .iter()
-        .chain(&EFFECT_CLASSES)
-        .map(|(name, code)| {
-            let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
-            file.is_standard_library = name.starts_with(STANDARD_LIBRARY);
-
-            database.add(file)
-        })
-        .collect();
+    let file_ids: Vec<_> =
+        files.iter().chain(&EFFECT_CLASSES).map(|(name, code)| database.add(fixture_file(name, code))).collect();
 
     let arena = LocalArena::new();
     let mut programs = Vec::new();
@@ -35365,6 +35368,63 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
     let send_receipt = BOUND_SERVICES[9];
     let others: Vec<_> = BOUND_SERVICES.iter().filter(|file| file.0 != send_receipt.0).copied().collect();
     assert!(refusals(send_receipt, &others).iter().all(|refusal| !refusal.contains(" missing-service ")));
+}
+
+/// Spec sections 27 and 32: the engine builds a program's class as it builds a bound class, so each parameter of its
+/// main constructor needs a binding in the module of its namespace or of a namespace above it. A program in
+/// `Tests.Lib` never reaches `App`'s bindings, and one under `App`, or beside a `Tests.Lib` module that binds the
+/// service, compiles.
+#[test]
+fn a_program_s_constructor_needs_a_binding_for_each_service_it_takes() {
+    let application = ("app/Application.sharp", "namespace App;\n\npublic class Application\n{\n}\n");
+    let app = ("app/Module.sharp", "namespace App;\n\nmodule\n{\n    singleton Application = Application;\n}\n");
+    let lib = (
+        "tests/Lib/Module.sharp",
+        "namespace Tests.Lib;\n\nimport App.Application;\n\nmodule\n{\n    singleton Application = Application;\n}\n",
+    );
+    let probe = |path: &'static str, namespace: &str| {
+        (
+            path,
+            leak(format!(
+                "namespace {namespace};\n\nimport App.Application;\n\npublic class MainProbe\n{{\n    public MainProbe(private Application application) {{ }}\n\n    public void main() {{ }}\n}}\n"
+            )),
+        )
+    };
+    let unbound = "7:22 missing-service `MainProbe` needs an `Application`, and no module binds one: the container can't build `MainProbe`. | Bind `Application` in a module of `MainProbe`'s namespace or one above it, as in `transient Application = Application;`.";
+
+    for (program, others, expected) in [
+        (probe("tests/Lib/MainProbe.sharp", "Tests.Lib"), vec![application, app], vec![unbound]),
+        (probe("tests/Lib/MainProbe.sharp", "Tests.Lib"), vec![application, app, lib], vec![]),
+        (probe("app/Main/MainProbe.sharp", "App.Main"), vec![application, app], vec![]),
+    ] {
+        let refused: Vec<String> =
+            refusals(program, &others).into_iter().filter(|refusal| refusal.contains(" missing-service ")).collect();
+        assert_eq!(refused, expected, "{}", program.0);
+    }
+}
+
+/// Spec section 32: only a test start turns a test module on, so a test module belongs in a test file, one an
+/// `autoload-dev` folder holds. In a program's file it would do nothing, and it is refused. In a test file it compiles.
+#[test]
+fn a_test_module_outside_a_test_file_is_refused() {
+    let app = ("app/Module.sharp", "namespace App;\n\nmodule\n{\n}\n");
+    let file = |path: &'static str, class: &str| {
+        (
+            path,
+            leak(format!(
+                "namespace App;\n\nmodule : App\n{{\n}}\n\npublic class {class}\n{{\n    public void main() {{ }}\n}}\n"
+            )),
+        )
+    };
+    let misplaced = "3:1 invalid-binding A test module belongs in the test file that uses it. | Move the module into the test file of the tests it serves, in a folder `composer.json` lists under `autoload-dev`.";
+
+    for (written, expected) in
+        [(file("app/Main.sharp", "Main"), vec![misplaced]), (file("tests/MainTest.sharp", "MainTest"), vec![])]
+    {
+        let refused: Vec<String> =
+            refusals(written, &[app]).into_iter().filter(|refusal| refusal.contains("A test module")).collect();
+        assert_eq!(refused, expected, "{}", written.0);
+    }
 }
 
 /// Spec section 32, as .NET's scope validation and Dagger's graph check refuse them: a service that needs itself, at
