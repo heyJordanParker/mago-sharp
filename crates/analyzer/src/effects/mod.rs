@@ -94,8 +94,10 @@ pub(crate) type Roots = BTreeSet<Changed>;
 /// A PHP# body: a method by its lowercase class and method names, an accessor by its lowercase class, its
 /// property's PHP name (`$total`) and `get` or `set`, a lambda by the name its function value's `source` gives it, an
 /// initial value that is not constant, which runs in the constructor, or a static's on the first use of its class's
-/// statics, by its lowercase class and its property's PHP name, or a parameter's default that is not constant, which
-/// runs each time a call leaves the argument out, by its method's lowercase class and method names and its PHP name.
+/// statics, by its lowercase class and its property's PHP name, a parameter's default that is not constant, which
+/// runs each time a call leaves the argument out, by its method's lowercase class and method names and its PHP name, a
+/// module binding's expression, by the name of the lambda it is scanned as, or a class constant's value, by its
+/// lowercase class and its name. No call reaches a binding or a constant: the container runs one, and a read the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Body {
     Method(Word, Word),
@@ -103,6 +105,8 @@ pub(crate) enum Body {
     Lambda(Word),
     InitialValue(Word, Word),
     Default(Word, Word, Word),
+    Binding(Word),
+    Constant(Word, Word),
 }
 
 /// What a function value runs.
@@ -423,8 +427,9 @@ impl Effects {
                     Body::Method(class, _)
                     | Body::Accessor(class, _, _)
                     | Body::InitialValue(class, _)
-                    | Body::Default(class, _, _) => (class, summary.member),
-                    Body::Lambda(_) => (empty_word(), summary.member),
+                    | Body::Default(class, _, _)
+                    | Body::Constant(class, _) => (class, summary.member),
+                    Body::Lambda(_) | Body::Binding(_) => (empty_word(), summary.member),
                 })
                 .collect(),
             standard_library: summaries
@@ -433,10 +438,11 @@ impl Effects {
                     Body::Method(class, _)
                     | Body::Accessor(class, _, _)
                     | Body::InitialValue(class, _)
-                    | Body::Default(class, _, _) => codebase
+                    | Body::Default(class, _, _)
+                    | Body::Constant(class, _) => codebase
                         .get_class_like(class)
                         .is_some_and(|metadata| codebase.is_standard_library_file(metadata.span.file_id)),
-                    Body::Lambda(_) => false,
+                    Body::Lambda(_) | Body::Binding(_) => false,
                 })
                 .collect(),
             imports: summaries.iter().map(|summary| Arc::clone(&summary.imports)).collect(),
@@ -478,7 +484,9 @@ impl Effects {
             Body::Accessor(class, _, _) | Body::InitialValue(class, _) => {
                 codebase.get_class_like(class).map(|class| class.span.file_id)
             }
-            Body::Lambda(_) => unreachable!("a call reaches a method, an accessor, an initial value or a default"),
+            Body::Lambda(_) | Body::Binding(_) | Body::Constant(..) => {
+                unreachable!("a call reaches a method, an accessor, an initial value or a default")
+            }
         };
 
         let mut files: HashMap<FileId, HashSet<FileId>> = HashMap::default();

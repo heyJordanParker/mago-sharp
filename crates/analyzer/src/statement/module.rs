@@ -49,6 +49,8 @@ use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects;
+use crate::effects::Body;
 use crate::error::AnalysisError;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::analyze_function_like;
@@ -137,11 +139,11 @@ where
                     }
                 }
             }
-            BindingValueMetadata::Expression(lambda) => {
+            BindingValueMetadata::Expression(name) => {
                 let BindingValue::Expression(expression) = binding.value else {
                     unreachable!("the scanner records an expression binding only for an expression value");
                 };
-                let Some(lambda) = context.codebase.get_closure(lambda) else {
+                let Some(lambda) = context.codebase.get_closure(name) else {
                     unreachable!("the scanner registers the lambda of each expression binding");
                 };
                 let empty;
@@ -160,6 +162,7 @@ where
                 scope.set_function_like(Some(lambda));
                 scope.set_static(true);
                 let mut block_context = BlockContext::new(scope, context.settings.register_super_globals);
+                let body = FunctionLikeBody::Expression(expression);
                 analyze_function_like(
                     context,
                     artifacts,
@@ -167,9 +170,19 @@ where
                     lambda,
                     parameter_list,
                     None,
-                    FunctionLikeBody::Expression(expression),
+                    body,
                     None,
                 )?;
+                effects::summary::record(
+                    context,
+                    artifacts,
+                    Body::Binding(*name),
+                    empty_word(),
+                    parameter_list.parameters.iter().map(|parameter| parameter.variable.span).collect(),
+                    None,
+                    body,
+                );
+                effects::check::report_escaping_functions(context, artifacts, lambda, parameter_list, body);
 
                 let namespace = metadata.namespace.as_bytes();
                 for parameter in &lambda.parameters {

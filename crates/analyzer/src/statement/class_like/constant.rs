@@ -19,12 +19,17 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects;
+use crate::effects::Body;
+use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::array::get_set_literal_type;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
+use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::int_refused_for_float;
 use crate::utils::names::display_member;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::report_int_for_float;
@@ -112,7 +117,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
                 let value_type =
                     &get_set_literal_type(context, artifacts, self.value, &declared_type, None).unwrap_or(value_type);
                 let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
-                if !union_comparator::is_contained_by(
+                if union_comparator::is_contained_by(
                     context.codebase,
                     value_type,
                     &declared_type,
@@ -121,12 +126,18 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
                     false,
                     &mut comparison_result,
                 ) {
-                    if let Some(value) = int_refused_for_float(&comparison_result, artifacts, self.value) {
-                        report_int_for_float(context, IssueCode::InvalidConstantValue, value, &declared_type);
-
-                        return Ok(());
-                    }
-
+                    record_function_values(
+                        context,
+                        artifacts,
+                        value_type,
+                        &declared_type,
+                        display_sharp_type,
+                        self.value.span(),
+                        IssueCode::InvalidConstantValue,
+                    );
+                } else if let Some(value) = int_refused_for_float(&comparison_result, artifacts, self.value) {
+                    report_int_for_float(context, IssueCode::InvalidConstantValue, value, &declared_type);
+                } else {
                     let value_type_str = display_value_type(context, value_type, &declared_type);
                     let declared_type_str = display_type(context, &declared_type);
 
@@ -149,6 +160,19 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
                     context.collector.report_with_code(IssueCode::InvalidConstantValue, issue);
                 }
             }
+        }
+
+        if is_sharp && let Some(class_metadata) = block_context.scope.get_class_like() {
+            let name = word(self.name.value);
+            effects::summary::record(
+                context,
+                artifacts,
+                Body::Constant(class_metadata.name, name),
+                name,
+                Vec::new(),
+                None,
+                FunctionLikeBody::Expression(self.value),
+            );
         }
 
         Ok(())

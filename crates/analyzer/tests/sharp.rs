@@ -31050,6 +31050,57 @@ fn a_lambda_with_an_effect_as_the_initial_value_of_a_pure_function_type_is_refus
     assert_eq!(effect_issues(&[listed, FETCH, FETCH_STUB]), Vec::<String>::new());
 }
 
+/// Spec section 29: a module binding's expression and a class constant's value are bodies as a method's is, so a lambda
+/// or a function value either gives a function type is held to that type's effects, and plain PHP either reaches needs
+/// its `extern` line. Each is refused with the message the same code gets in a method.
+#[test]
+fn a_module_binding_or_a_class_constant_is_checked_for_effects_as_a_method_is() {
+    let holder = (
+        "app/Shop/Holder.sharp",
+        "namespace App.Shop;\n\npublic class Holder\n{\n    public Holder(private Function<int(int) uses Clock> read) { }\n}\n",
+    );
+    let lambda = "This lambda calls `Remote.fetch`, which has the effect `Http`, so a `Function<int(int) uses Clock>` cannot hold it.";
+    let value = "`Remote.fetch` has the effect `Http`, so a `Function<int(int) uses Clock>` cannot hold it.";
+    let undeclared = "`Remote.fetch` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Remote.fetch uses any;`, and name its effects in place of `any` when you know them.";
+    let messages = |files: &[(&'static str, &'static str)]| -> Vec<String> {
+        effect_issues(files).iter().map(|issue| issue.split_once(": ").expect("a code").1.to_owned()).collect()
+    };
+
+    for (code, plain, expected) in [
+        ("new Holder((int id) => Remote.fetch(id))", &[FETCH, FETCH_STUB][..], lambda),
+        ("new Holder(Remote.fetch)", &[FETCH, FETCH_STUB][..], value),
+        ("new Holder((int id) => Remote.fetch(id))", &[FETCH][..], undeclared),
+    ] {
+        let module = (
+            "app/Shop/Module.sharp",
+            leak(format!(
+                "namespace App.Shop;\n\nimport Acme.Remote;\n\nmodule\n{{\n    singleton Holder = {code};\n}}\n"
+            )),
+        );
+        let method = (
+            "app/Shop/Maker.sharp",
+            leak(format!(
+                "namespace App.Shop;\n\nimport Acme.Remote;\n\npublic class Maker\n{{\n    public static Holder make() => {code};\n}}\n"
+            )),
+        );
+        for written in [module, method] {
+            assert_eq!(messages(&[&[written, holder][..], plain].concat()), [expected], "{}: {code}", written.0);
+        }
+    }
+
+    let constant = (
+        "app/Shop/Rates.sharp",
+        "namespace App.Shop;\n\nimport Acme.Remote;\n\npublic class Rates\n{\n    public const Function<int(int) uses Clock> RATE = (int id) => Remote.fetch(id);\n}\n",
+    );
+    let method = (
+        "app/Shop/Rates.sharp",
+        "namespace App.Shop;\n\nimport Acme.Remote;\n\npublic class Rates\n{\n    public static Function<int(int) uses Clock> rate() => (int id) => Remote.fetch(id);\n}\n",
+    );
+    for written in [constant, method] {
+        assert_eq!(messages(&[written, FETCH, FETCH_STUB]), [lambda], "{}", written.1);
+    }
+}
+
 /// A lambda of the wrong type is refused once, for its type: whether its effects fit a type it does not have is moot.
 #[test]
 fn a_lambda_argument_of_the_wrong_type_is_refused_once() {

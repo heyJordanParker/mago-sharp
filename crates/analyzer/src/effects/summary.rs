@@ -79,9 +79,10 @@ use crate::utils::names::display_function_holder;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_prelude_stub;
 
-/// Records the summary of the method, accessor, initial value or default `body`, which messages name by `member`, and
-/// whose parameters are declared at `parameters`, into `artifacts`, with the summary of each lambda written in it, and
-/// with the function values the analysis gave places since the last body. A constructor's `initializer` runs before `code`.
+/// Records the summary of the method, accessor, initial value, default, binding or constant `body`, which messages name
+/// by `member`, and whose parameters are declared at `parameters`, into `artifacts`, with the summary of each lambda
+/// written in it, and with the function values the analysis gave places since the last body. A constructor's
+/// `initializer` runs before `code`.
 pub(crate) fn record<'ast, 'arena, A>(
     context: &Context<'_, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -97,8 +98,9 @@ pub(crate) fn record<'ast, 'arena, A>(
         Body::Method(class, _)
         | Body::Accessor(class, _, _)
         | Body::InitialValue(class, _)
-        | Body::Default(class, _, _) => class,
-        Body::Lambda(_) => empty_word(),
+        | Body::Default(class, _, _)
+        | Body::Constant(class, _) => class,
+        Body::Lambda(_) | Body::Binding(_) => empty_word(),
     };
 
     let function_values = std::mem::take(&mut artifacts.function_values);
