@@ -69,28 +69,20 @@ impl Translator<'_, '_> {
             return;
         }
 
-        let machine = Machine { r#enum, metadata: machine, full, lean, short };
         for (law, _) in &invariants {
             self.claim(full, lean, short, law);
         }
+        let machine = Machine { r#enum, metadata: machine, invariants, full, lean, short };
         let shown = self.shown(&machine);
         let moves = self.moves(&machine);
-        let file = self.translation.file;
-        let use_of = |key: &str, place: String| Use {
-            key: key.to_owned(),
-            file: Some(file),
-            place,
-            smaller: None,
-            names_only: false,
-        };
 
-        for (law, case) in &invariants {
+        for (law, case) in &machine.invariants {
             let name = String::from_utf8_lossy(law.name.value).into_owned();
             let key = names::member(lean, law.name.value);
             let claim = claim_of(&key);
             let place = format!("{short}.{name}");
             let mut body = Body::new(self.checked, self.reach, full, place.clone());
-            let mut uses = vec![use_of(&claim, place.clone())];
+            let mut uses = vec![self.own_use(&claim, place.clone())];
             let given = machine.pattern(case.as_bytes());
             let check = |call: &str| {
                 [
@@ -110,16 +102,18 @@ impl Translator<'_, '_> {
                     continue;
                 };
                 let entry_key = names::member(lean, method.name.value);
-                uses.push(use_of(&entry_key, format!("{short}.{}", String::from_utf8_lossy(method.name.value))));
+                uses.push(self.own_use(&entry_key, format!("{short}.{}", String::from_utf8_lossy(method.name.value))));
                 let binders: Vec<String> =
                     method.parameter_list.parameters.iter().map(|parameter| binder(&mut body, parameter)).collect();
                 let mut premises = Vec::new();
                 for parameter in method.parameter_list.parameters.iter() {
                     let value = parameter_name(parameter);
                     let cases = self.held_cases(&machine, parameter.hint.as_ref());
-                    for (held, held_case) in invariants.iter().filter(|(_, held_case)| cases.contains(held_case)) {
+                    for (held, held_case) in
+                        machine.invariants.iter().filter(|(_, held_case)| cases.contains(held_case))
+                    {
                         let held_claim = claim_of(&names::member(lean, held.name.value));
-                        uses.push(use_of(&held_claim, place.clone()));
+                        uses.push(self.own_use(&held_claim, place.clone()));
                         premises.push(format!(
                             "holds (match {value} with | {} => {held_claim} {value} | _ => pure true) → ",
                             machine.pattern(held_case.as_bytes())
@@ -140,7 +134,7 @@ impl Translator<'_, '_> {
                     if !r#move.to.contains(case) {
                         continue;
                     }
-                    uses.push(use_of(&move_key, place_of(&move_key)));
+                    uses.push(self.own_use(&move_key, place_of(&move_key)));
                     let (fields, value) = machine.held(from);
                     let mut binders: Vec<String> = fields
                         .iter()
@@ -149,9 +143,11 @@ impl Translator<'_, '_> {
                     binders
                         .extend(method.parameter_list.parameters.iter().map(|parameter| binder(&mut body, parameter)));
                     let mut premises = Vec::new();
-                    for (held, _) in invariants.iter().filter(|(_, held)| held.as_bytes() == from.item.name().value) {
+                    for (held, _) in
+                        machine.invariants.iter().filter(|(_, held)| held.as_bytes() == from.item.name().value)
+                    {
                         let held_claim = claim_of(&names::member(lean, held.name.value));
-                        uses.push(use_of(&held_claim, place.clone()));
+                        uses.push(self.own_use(&held_claim, place.clone()));
                         premises.push(format!("holds ({held_claim} {value}) → "));
                     }
                     let premises = premises.concat();
@@ -173,11 +169,14 @@ impl Translator<'_, '_> {
                 "(fun «$given» => match «$given» with | {given} => Sharp.Machine.breaks ({claim} «$given») | _ => false)"
             );
             let trace_text = format!(
-                "def {trace} : Option (List String) :=\n  Sharp.Machine.search {moves} {shown} {broken} {DEPTH}\n    (Sharp.Machine.next {shown} [] [{}])",
-                self.entry_steps(&machine, &mut uses).join(", ")
+                "def {trace} : Option (List String) :=\n  Sharp.Machine.search {moves} {shown} {broken} {DEPTH}\n    (Sharp.Machine.next {shown} [] ({}))",
+                self.entry_steps(&machine, &mut uses)
             );
-            let trace_uses =
-                [use_of(&moves, place.clone()), use_of(&shown, place.clone()), use_of(&claim, place.clone())];
+            let trace_uses = [
+                self.own_use(&moves, place.clone()),
+                self.own_use(&shown, place.clone()),
+                self.own_use(&claim, place.clone()),
+            ];
             self.translation.declarations.push(Declaration {
                 key: trace.clone(),
                 span: law.name.span,
@@ -188,7 +187,7 @@ impl Translator<'_, '_> {
                 measure: None,
                 opaque: None,
             });
-            uses.push(use_of(&trace, place.clone()));
+            uses.push(self.own_use(&trace, place.clone()));
 
             let text = format!("@[law] def {key} : Prop :=\n  {}", parts.join(" ∧\n  "));
             let (_, body_uses, unmodeled) = body.finish();
@@ -302,19 +301,14 @@ impl Translator<'_, '_> {
         for case in machine.cases() {
             let mut steps = Vec::new();
             for (_, method, move_key) in machine.moves_from(case) {
-                for (written, arguments) in self.candidate_calls(machine, method) {
-                    steps.push(format!("({}, {move_key} this{arguments})", lean_string(&written)));
+                for call in self.candidate_calls(machine, method) {
+                    steps.push(call.steps(method, &format!("{move_key} this{}", call.arguments)));
+                    uses.extend(call.kept.iter().map(|(law, _)| self.own_use(&claim_of(law), place_of(law))));
                 }
-                uses.push(Use {
-                    key: move_key.clone(),
-                    file: Some(self.translation.file),
-                    place: place_of(&move_key),
-                    smaller: None,
-                    names_only: false,
-                });
+                uses.push(self.own_use(&move_key, place_of(&move_key)));
             }
             if !steps.is_empty() {
-                lines.push(format!("  | {} => [{}]", machine.pattern(case.item.name().value), steps.join(", ")));
+                lines.push(format!("  | {} => {}", machine.pattern(case.item.name().value), steps.join(" ++ ")));
             }
         }
         lines.push("  | _ => []".to_owned());
@@ -333,59 +327,60 @@ impl Translator<'_, '_> {
         key
     }
 
-    /// The first steps of a trace through `machine`, spec section 20.2: each entry point on each list of candidate
-    /// values of its parameters, as written with them and as the step it runs. Each entry point it calls is among
-    /// `uses`.
-    fn entry_steps(&self, machine: &Machine<'_, '_, '_>, uses: &mut Vec<Use>) -> Vec<String> {
+    /// The first steps of a trace through `machine`, spec section 20.2, as one Lean list: each entry point on each list
+    /// of candidate values of its parameters, as written with them and as the step it runs. Each entry point it calls,
+    /// and each invariant a value it passes keeps, is among `uses`.
+    fn entry_steps(&self, machine: &Machine<'_, '_, '_>, uses: &mut Vec<Use>) -> String {
         let mut steps = Vec::new();
         for entry in &machine.metadata.entry_points {
             let Some(method) = machine.entry_point(entry.name) else {
                 continue;
             };
             let entry_key = names::member(machine.lean, method.name.value);
-            for (written, arguments) in self.candidate_calls(machine, method) {
-                steps.push(format!("({}, {entry_key}{arguments})", lean_string(&written)));
+            for call in self.candidate_calls(machine, method) {
+                steps.push(call.steps(method, &format!("{entry_key}{}", call.arguments)));
+                uses.extend(call.kept.iter().map(|(law, _)| self.own_use(&claim_of(law), place_of(law))));
             }
-            uses.push(Use {
-                key: entry_key.clone(),
-                file: Some(self.translation.file),
-                place: place_of(&entry_key),
-                smaller: None,
-                names_only: false,
-            });
+            uses.push(self.own_use(&entry_key, place_of(&entry_key)));
+        }
+        if steps.is_empty() {
+            return "[]".to_owned();
         }
 
-        steps
+        steps.join(" ++ ")
     }
 
-    /// Each call of `method` a trace through `machine` makes, spec section 20.2, as written and as its Lean arguments,
-    /// each after a space: one for each list of candidate values of its parameters, in order, the first parameter's
-    /// values varying slowest. None when a parameter's type has no candidate value.
-    fn candidate_calls(&self, machine: &Machine<'_, '_, '_>, method: &Method) -> Vec<(String, String)> {
-        let mut calls: Vec<(Vec<String>, String)> = vec![(Vec::new(), String::new())];
+    /// Each call of `method` a trace through `machine` makes, spec section 20.2: one for each list of candidate values
+    /// of its parameters, in order, the first parameter's values varying slowest. None when a parameter's type has no
+    /// candidate value.
+    fn candidate_calls(&self, machine: &Machine<'_, '_, '_>, method: &Method) -> Vec<Call> {
+        let mut calls = vec![Call::default()];
         for parameter in method.parameter_list.parameters.iter() {
             let name =
                 String::from_utf8_lossy(parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name));
             let candidates = self.candidates(machine, parameter.hint.as_ref());
             let mut extended = Vec::new();
-            for (written, arguments) in &calls {
-                for (term, value) in &candidates {
-                    let mut written = written.clone();
-                    written.push(format!("{name}: {value}"));
-                    extended.push((written, format!("{arguments} {term}")));
+            for call in &calls {
+                for (term, value, invariants) in &candidates {
+                    let mut call = call.clone();
+                    call.written.push(format!("{name}: {value}"));
+                    call.arguments = format!("{} {term}", call.arguments);
+                    call.kept.extend(invariants.iter().map(|law| (law.clone(), term.clone())));
+                    extended.push(call);
                 }
             }
             calls = extended;
         }
-        let name = String::from_utf8_lossy(method.name.value);
 
-        calls.into_iter().map(|(written, arguments)| (format!("{name}({})", written.join(", ")), arguments)).collect()
+        calls
     }
 
     /// The values a trace through `machine` passes for a parameter of the type `hint`, spec section 20.2, each as its
-    /// Lean term and as PHP# writes it: the ints `0`, `1` and `-1`, the strings `""` and `"a"`, both bools, and each case
-    /// of the machine a parameter of its type takes, with the first candidate of each field. None for any other type.
-    fn candidates(&self, machine: &Machine<'_, '_, '_>, hint: Option<&Hint>) -> Vec<(String, String)> {
+    /// Lean term, as PHP# writes it, and with the Lean name of each invariant it keeps: the ints `0`, `1` and `-1`, the
+    /// strings `""` and `"a"`, both bools, and each case of the machine a parameter of its type takes, with the first
+    /// candidate of each field, which keeps the invariants of its case, since a program holds no other value of the
+    /// machine. None for any other type.
+    fn candidates(&self, machine: &Machine<'_, '_, '_>, hint: Option<&Hint>) -> Vec<(String, String, Vec<String>)> {
         let scalars = |hint: Option<&Hint>| -> Vec<(String, String)> {
             match hint {
                 Some(Hint::Integer(_)) => {
@@ -399,7 +394,7 @@ impl Translator<'_, '_> {
             }
         };
         let Some(Hint::Identifier(identifier)) = hint else {
-            return scalars(hint);
+            return scalars(hint).into_iter().map(|(term, value)| (term, value, Vec::new())).collect();
         };
         let class = self.checked.names().get(identifier);
         let machine_short = names::short_name(machine.full);
@@ -409,9 +404,19 @@ impl Translator<'_, '_> {
             .filter(|case| class == machine.full || class == case_class(machine.full, case.item.name().value))
             .filter_map(|case| {
                 let name = String::from_utf8_lossy(case.item.name().value);
+                let kept: Vec<String> = machine
+                    .invariants
+                    .iter()
+                    .filter(|(_, held)| held.as_bytes() == case.item.name().value)
+                    .map(|(law, _)| names::member(machine.lean, law.name.value))
+                    .collect();
                 let fields = case_fields(case);
                 if fields.is_empty() {
-                    return Some((machine.constructor(case.item.name().value), format!("{machine_short}.{name}")));
+                    return Some((
+                        machine.constructor(case.item.name().value),
+                        format!("{machine_short}.{name}"),
+                        kept,
+                    ));
                 }
                 let values: Vec<(String, String)> =
                     fields.iter().map(|(_, hint)| scalars(*hint).into_iter().next()).collect::<Option<_>>()?;
@@ -425,9 +430,15 @@ impl Translator<'_, '_> {
                 Some((
                     format!("({} {})", machine.constructor(case.item.name().value), terms.join(" ")),
                     format!("{machine_short}.{name}({})", written.join(", ")),
+                    kept,
                 ))
             })
             .collect()
+    }
+
+    /// A use of the declaration `key` of this file, which a message names as `place`.
+    fn own_use(&self, key: &str, place: String) -> Use {
+        Use { key: key.to_owned(), file: Some(self.translation.file), place, smaller: None, names_only: false }
     }
 
     /// The cases of `machine` a parameter of the type `hint` may hold, spec section 20.2: each of them for the machine
@@ -463,11 +474,37 @@ impl Translator<'_, '_> {
 /// How many moves after its entry point a trace through a machine takes at most, spec section 20.2.
 const DEPTH: usize = 3;
 
-/// A machine whose invariants a translation proves, spec section 20.2: its declaration, its graph, and its fully
-/// qualified PHP name, Lean name and short name.
+/// A call a trace through a machine makes, spec section 20.2: each argument as written, `cents: 0`, its Lean arguments,
+/// each after a space, and the Lean name of each invariant a value of the machine among them keeps, with that value.
+#[derive(Clone, Default)]
+struct Call {
+    written: Vec<String>,
+    arguments: String,
+    kept: Vec<(String, String)>,
+}
+
+impl Call {
+    /// The steps of a trace this call of `method` takes, as a Lean list: `run`, as written, when each value of the
+    /// machine it passes keeps the invariants of its case, and none when one breaks them.
+    fn steps(&self, method: &Method, run: &str) -> String {
+        let written = format!("{}({})", String::from_utf8_lossy(method.name.value), self.written.join(", "));
+        let step = format!("[({}, {run})]", lean_string(&written));
+        if self.kept.is_empty() {
+            return step;
+        }
+        let kept: Vec<String> =
+            self.kept.iter().map(|(law, value)| format!("!Sharp.Machine.breaks ({} {value})", claim_of(law))).collect();
+
+        format!("(if {} then {step} else [])", kept.join(" && "))
+    }
+}
+
+/// A machine whose invariants a translation proves, spec section 20.2: its declaration, its graph, each invariant with
+/// the case it is about, and its fully qualified PHP name, Lean name and short name.
 struct Machine<'machine, 'ast, 'arena> {
     r#enum: &'ast Enum<'arena>,
     metadata: &'machine MachineMetadata,
+    invariants: Vec<(&'ast LawNode<'arena>, Word)>,
     full: &'machine [u8],
     lean: &'machine str,
     short: &'machine str,

@@ -4331,6 +4331,44 @@ fn an_entry_point_keeps_a_machine_s_invariant_from_the_value_it_takes() {
     );
 }
 
+/// `App.Count`, a machine whose `Counting` case holds a count its invariant keeps positive, which `start` builds as
+/// `Counting(1)` and `at` takes and gives back, with the moves `moves` in `Counting`'s block beside `stop`.
+fn count(moves: &str) -> String {
+    format!(
+        "namespace App;\n\npublic machine Count\n{{\n    case Counting(int n)\n    {{\n        public Count.Done stop() => Count.Done;\n{moves}    }}\n\n    final case Done;\n\n    public static Count.Counting start() => Count.Counting(1);\n\n    public static Count at(Count c) => c;\n\n    law positive(Count.Counting counting) => counting.n > 0;\n}}\n"
+    )
+}
+
+/// Spec section 20.2: a program holds only values of a machine that keep its invariants, so the search for the moves
+/// that break one starts an entry point or a move that takes a value of the machine only from such a value, as `at`
+/// here never from `Counting(n: 0)`. A move that breaks the invariant from a value that keeps it is still refused with
+/// the moves that break it.
+#[test]
+fn a_trace_takes_only_values_of_a_machine_that_keep_its_invariants() {
+    let directory = lawful_project(&[("app/Count.sharp", &count(""))]);
+
+    let output = compile(directory.path());
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(directory.path(), "app/Count.sharp").exists());
+
+    let directory = lawful_project(&[(
+        "app/Count.sharp",
+        &count("        public Count.Counting down() => Count.Counting(this.n - 1);\n"),
+    )]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: `positive` breaks after `start() → Counting(n: 1)`, `down() → Counting(n: 0)`\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// A machine whose second law names a parameter `until` and whose `Going` case holds a field `while`, two of Lean's
 /// own words.
 const SUBSCRIPTION_STATUS: &str = "namespace App.Repro;\n\nimport Sharp.Time.Instant;\n\npublic machine SubscriptionStatus\n{\n    case Waiting\n    {\n        public SubscriptionStatus.Going go(Instant at) => SubscriptionStatus.Going(at, 0);\n    }\n\n    case Going(Instant at, int @while)\n    {\n        public SubscriptionStatus.Paused pause() => SubscriptionStatus.Paused;\n        public SubscriptionStatus.Done finish() => SubscriptionStatus.Done;\n    }\n\n    case Paused\n    {\n        public SubscriptionStatus.Done end() => SubscriptionStatus.Done;\n    }\n\n    final case Done;\n\n    public static SubscriptionStatus.Waiting enter() => SubscriptionStatus.Waiting;\n\n    law goingHoldsTheTime(Instant at) => SubscriptionStatus.enter().go(at).at == at;\n    law pausingHoldsTheResume(Instant at, Instant until) => SubscriptionStatus.enter().go(at).pause() is SubscriptionStatus.Paused;\n}\n";
