@@ -702,6 +702,119 @@ fn analyze_compiles_the_sharp_folder_and_the_hosts_folder_from_one_lowering() {
     }
 }
 
+/// An extension host of two rules: `ReturnsAtOnce`, registered first, and `SleepsOnEachFile`, which sleeps 40 ms on
+/// each file it sees.
+const HOST_OF_A_SLOW_RULE_AND_A_QUICK_ONE: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\AfterFileAnalysisContext;
+use Mago\Sdk\Analyzer\AfterFileAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+final class ReturnsAtOnce implements Plugin, AfterFileAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('returns-at-once', 'Returns at once', 'Does nothing on each file.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerAfterFileAnalysisHook($this);
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function afterFileAnalysis(AfterFileAnalysisContext $context): void {}
+}
+
+final class SleepsOnEachFile implements Plugin, AfterFileAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('sleeps-on-each-file', 'Sleeps on each file', 'Sleeps 40 ms on each file.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerAfterFileAnalysisHook($this);
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function afterFileAnalysis(AfterFileAnalysisContext $context): void
+    {
+        usleep(40_000);
+    }
+}
+
+(new Worker(new Extension('timed', 'Timed', '0.0.0', analyzerPlugins: [new ReturnsAtOnce(), new SleepsOnEachFile()])))->run();
+"#;
+
+/// With `MAGO_LOG=debug`, `mago analyze` logs how long each host rule took in the round, slowest first, then the
+/// slowest rule's slowest files, so a project finds a slow rule without a profiler. At `info`, the level a release
+/// build logs at by default, it logs none of it.
+#[test]
+fn analyze_logs_each_host_rule_s_time_slowest_first_at_the_debug_level() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the host rule times test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "tools/host.php", HOST_OF_A_SLOW_RULE_AND_A_QUICK_ONE);
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.timed]\nfile = \"tools/host.php\"\n",
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let analyze = |level: &str| {
+        process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", "analyze"])
+                .env("MAGO_LOG", level)
+                .env("XDG_CACHE_HOME", cache.path())
+                .current_dir(root),
+        )
+        .unwrap()
+    };
+
+    let debug = analyze("debug");
+
+    assert!(debug.status.success(), "{}", printed(&debug));
+    let log = printed(&debug);
+    let rules: Vec<&str> = log.lines().filter_map(|line| line.split_once("Host rule ").map(|(_, rule)| rule)).collect();
+    let sleeping = rules.iter().position(|rule| rule.starts_with("SleepsOnEachFile::afterFileAnalysis took "));
+    let quick = rules.iter().position(|rule| rule.starts_with("ReturnsAtOnce::afterFileAnalysis took "));
+    assert!(sleeping.is_some() && sleeping < quick, "{log}");
+    let took = rules[sleeping.unwrap()].strip_prefix("SleepsOnEachFile::afterFileAnalysis took ").unwrap();
+    let (seconds, files) = took.split_once(" s over ").unwrap_or_else(|| panic!("{log}"));
+    let seconds: f64 = seconds.parse().unwrap();
+    let files: u32 = files.split_once(' ').unwrap().0.parse().unwrap();
+    assert!(files > 0 && seconds >= 0.04 * f64::from(files), "{log}");
+    let slowest_files = rules
+        .iter()
+        .filter(|rule| rule.starts_with("SleepsOnEachFile::afterFileAnalysis took ") && rule.contains(" s on "));
+    assert_eq!(slowest_files.count(), files.min(5) as usize, "{log}");
+
+    let info = analyze("info");
+
+    assert!(info.status.success(), "{}", printed(&info));
+    assert!(!printed(&info).contains("Host rule"), "{}", printed(&info));
+}
+
 /// An editor's `mago analyze` and a terminal's start together after an edit, and each compiles the project into the one
 /// hosts' folder. One compiles while the others wait and then reuse its tree, so each run passes and each host reads
 /// the file compiled from the current source. Each round edits every source first, so every run finds the folder

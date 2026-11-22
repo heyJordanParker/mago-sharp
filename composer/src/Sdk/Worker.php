@@ -54,6 +54,7 @@ use Mago\Sdk\Internal\Analyzer\Protocol as AnalyzerProtocol;
 use Mago\Sdk\Internal\Analyzer\RegisteredPlugin;
 use Mago\Sdk\Internal\Analyzer\RegisteredTargetedCallback;
 use Mago\Sdk\Internal\Analyzer\ReportedIssue;
+use Mago\Sdk\Internal\Analyzer\RuleTimes;
 use Mago\Sdk\Internal\Analyzer\SentReads;
 use Mago\Sdk\Internal\ClassLoads;
 use Mago\Sdk\Internal\HostClient;
@@ -1126,6 +1127,7 @@ final class Worker
         $contributedReferences = [];
         $recordedReads = [];
         $analyses = is_array($request->analysis) ? $request->analysis : [$request->analysis];
+        $ruleTimes = $request->timed ? new RuleTimes() : null;
         $projectHooks = match ($kind) {
             AnalyzerProtocol::BEFORE_ANALYSIS_REQUEST => 'before-analysis',
             AnalyzerProtocol::AFTER_ANALYSIS_REQUEST => 'after-analysis',
@@ -1207,21 +1209,27 @@ final class Worker
 
                     if ($context instanceof BeforeAnalysisContext) {
                         foreach ($registered->beforeAnalysisHooks as $hook) {
+                            $ruleTimes?->start();
                             $hook->beforeAnalysis($context);
+                            $ruleTimes?->stop($hook, 'beforeAnalysis', null);
                         }
                     }
 
                     if ($context instanceof AfterFileAnalysisContext) {
                         foreach ($registered->afterFileAnalysisHooks as $hook) {
+                            $ruleTimes?->start();
                             $hook->afterFileAnalysis($context);
+                            $ruleTimes?->stop($hook, 'afterFileAnalysis', $context->analysis->file);
                         }
 
-                        $this->runNodeAnalysisHooks($registered, $context, $pluginIndex, $reportedIssues);
+                        $this->runNodeAnalysisHooks($registered, $context, $pluginIndex, $reportedIssues, $ruleTimes);
                     }
 
                     if ($context instanceof AfterAnalysisContext) {
                         foreach ($registered->afterAnalysisHooks as $hook) {
+                            $ruleTimes?->start();
                             $hook->afterAnalysis($context);
+                            $ruleTimes?->stop($hook, 'afterAnalysis', null);
                         }
                     }
                 } catch (Throwable $throwable) {
@@ -1271,6 +1279,7 @@ final class Worker
             $reportedIssues,
             $contributedReferences,
             $recordedReads,
+            $ruleTimes,
         );
     }
 
@@ -1283,6 +1292,7 @@ final class Worker
         AfterFileAnalysisContext $context,
         int $pluginIndex,
         array &$reportedIssues,
+        ?RuleTimes $ruleTimes,
     ): void {
         if (
             $registered->nodeAnalysisHooks === []
@@ -1316,7 +1326,9 @@ final class Worker
 
             $nodeContext = new NodeAnalysisContext($context, $source, $node, $data);
             foreach ($hooks as $hook) {
+                $ruleTimes?->start();
                 $hook->callback->analyze($nodeContext);
+                $ruleTimes?->stop($hook->callback, 'analyze', $context->analysis->file);
                 foreach ($nodeContext->takeReportedIssues() as $issue) {
                     $reportedIssues[] = $pluginIndex;
                     $reportedIssues[] = $issue;
@@ -1342,7 +1354,9 @@ final class Worker
                     continue;
                 }
 
+                $ruleTimes?->start();
                 $hook->callback->analyze($nodeContext);
+                $ruleTimes?->stop($hook->callback, 'analyze', $context->analysis->file);
                 foreach ($nodeContext->takeReportedIssues() as $issue) {
                     $reportedIssues[] = $pluginIndex;
                     $reportedIssues[] = $issue;

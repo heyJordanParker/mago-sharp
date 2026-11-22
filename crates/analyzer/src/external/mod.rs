@@ -59,6 +59,8 @@ pub use reads::Listing;
 use reads::RecordedReads;
 use reads::ResponseReads;
 pub use reads::SessionReads;
+use rule_times::RuleCalls;
+use rule_times::RuleTimes;
 
 mod error;
 mod lifecycle;
@@ -66,6 +68,7 @@ mod metadata;
 pub mod protocol;
 mod reads;
 mod refinement;
+mod rule_times;
 mod scan;
 
 pub use refinement::DeclarationRefinement;
@@ -132,13 +135,15 @@ pub(crate) struct ForwardedCall {
 /// generation on the request, instead of on the worker pool, makes PHP-side
 /// metadata caches safe when a pool is reused by watch mode or by concurrent
 /// analysis services. The session also collects what each file's hooks and
-/// providers read from the codebase during the run.
+/// providers read from the codebase during the run, and, when Mago logs at the
+/// DEBUG level, how long each host rule took, which it logs when the run ends.
 #[derive(Debug)]
 pub struct ExternalAnalysisSession {
     generation: u64,
     sources: foldhash::HashMap<FileId, Arc<File>>,
     reads: Mutex<RecordedReads>,
     member_reads: MemberReads,
+    rule_times: Option<Mutex<RuleTimes>>,
 }
 
 /// What the metadata a session writes resolves a PHP# member read in an attribute argument against, spec section 23.
@@ -160,17 +165,23 @@ impl ExternalAnalysisSession {
         let generation = NEXT_ANALYSIS_GENERATION.fetch_add(1, Ordering::Relaxed);
         let sources = files.into_iter().map(|file| (file.id, file)).collect();
 
-        Self { generation, sources, reads: Mutex::default(), member_reads: MemberReads::Codebase }
+        Self {
+            generation,
+            sources,
+            reads: Mutex::default(),
+            member_reads: MemberReads::Codebase,
+            rule_times: tracing::enabled!(tracing::Level::DEBUG).then(Mutex::default),
+        }
     }
 
     /// The session that writes the codebase-scan payload of `file`, whose member reads resolve against `scan`, the
     /// merged scan, or are left for it when there is none yet.
     fn for_scan(file: &Arc<File>, scan: Option<&Arc<CodebaseMetadata>>) -> Self {
-        Self {
-            member_reads: scan
-                .map_or_else(|| MemberReads::Later(AtomicBool::new(false)), |scan| MemberReads::Scan(Arc::clone(scan))),
-            ..Self::from_files([Arc::clone(file)])
-        }
+        let mut session = Self::from_files([Arc::clone(file)]);
+        session.member_reads =
+            scan.map_or_else(|| MemberReads::Later(AtomicBool::new(false)), |scan| MemberReads::Scan(Arc::clone(scan)));
+
+        session
     }
 
     /// The codebase a PHP# member read written with `codebase` resolves against, or None when it waits for the merged
@@ -205,6 +216,17 @@ impl ExternalAnalysisSession {
     /// class loads their worker reported with them.
     fn record_reads(&self, file_id: Option<FileId>, reads: ResponseReads) -> Result<(), ExternalAnalyzerError> {
         self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record(file_id, reads)
+    }
+
+    /// Whether this session asks each worker how long its rules took.
+    fn times_rules(&self) -> bool {
+        self.rule_times.is_some()
+    }
+
+    fn record_rule_times(&self, calls: Vec<RuleCalls>) {
+        if let Some(rule_times) = &self.rule_times {
+            rule_times.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record(calls);
+        }
     }
 
     /// Records the codebase reads a provider or issue filter made while Mago analyzed `file_id`, which lead its
@@ -244,6 +266,15 @@ impl ExternalAnalysisSession {
     /// code sees it. A file outside this run is plain PHP, as every file but a `.sharp` file is.
     fn dialect(&self, span: Span) -> Dialect {
         self.source_file(span.file_id).map_or(Dialect::Php, Dialect::of)
+    }
+}
+
+impl Drop for ExternalAnalysisSession {
+    /// Logs how long each host rule took in the run, which ends with its session.
+    fn drop(&mut self) {
+        if let Some(rule_times) = &mut self.rule_times {
+            rule_times.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).log();
+        }
     }
 }
 
@@ -1974,7 +2005,7 @@ where
             }
             let lifecycle_start = self.trace_enabled.then(Instant::now);
             let encode_start = self.trace_enabled.then(Instant::now);
-            let request = lifecycle::encode_before_analysis_request(session.generation(), plugins)
+            let request = lifecycle::encode_before_analysis_request(session, plugins)
                 .inspect_err(|_| self.record_lifecycle_error())?;
 
             if let Some(start) = encode_start {
@@ -2044,7 +2075,7 @@ where
             let lifecycle_start = self.trace_enabled.then(Instant::now);
             let encode_start = self.trace_enabled.then(Instant::now);
             let request = lifecycle::encode_after_file_analysis_request(
-                session.generation(),
+                session,
                 &plugins,
                 file,
                 program,
@@ -2132,12 +2163,11 @@ where
             let lifecycle_start = self.trace_enabled.then(Instant::now);
             let encode_start = self.trace_enabled.then(Instant::now);
             let request = lifecycle::encode_after_file_analysis_batch_request(
-                session.generation(),
+                session,
                 &plugins,
                 files,
                 include_expression_types,
                 backend_node_requirements.as_ref(),
-                session,
                 u16::try_from(backend_index)
                     .map_err(|_| error::protocol("external analyzer backend exceeds u16::MAX"))?,
             )
@@ -2200,9 +2230,8 @@ where
 
             let lifecycle_start = self.trace_enabled.then(Instant::now);
             let encode_start = self.trace_enabled.then(Instant::now);
-            let request =
-                lifecycle::encode_after_analysis_request(session.generation(), plugins, analysis_result, files)
-                    .inspect_err(|_| self.record_lifecycle_error())?;
+            let request = lifecycle::encode_after_analysis_request(session, plugins, analysis_result, files)
+                .inspect_err(|_| self.record_lifecycle_error())?;
             if let Some(start) = encode_start {
                 self.telemetry.lifecycle_encode_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
             }

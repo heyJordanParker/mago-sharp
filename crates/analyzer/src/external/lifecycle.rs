@@ -63,6 +63,7 @@ use super::error::ExternalAnalyzerError;
 use super::error::protocol;
 use super::protocol;
 use super::reads::ResponseReads;
+use super::rule_times::RuleTimes;
 
 pub(super) const BEFORE_ANALYSIS_REQUEST: u16 = 5;
 pub(super) const AFTER_FILE_ANALYSIS_REQUEST: u16 = 6;
@@ -1091,15 +1092,15 @@ fn write_expression_type_records(
 }
 
 pub(super) fn encode_before_analysis_request(
-    generation: u64,
+    session: &ExternalAnalysisSession,
     plugins: &[u16],
 ) -> Result<Vec<Value>, ExternalAnalyzerError> {
-    let writer = lifecycle_writer(BEFORE_ANALYSIS_REQUEST, generation, plugins)?;
+    let writer = lifecycle_writer(BEFORE_ANALYSIS_REQUEST, session, plugins)?;
     Ok(writer.finish())
 }
 
 pub(super) fn encode_after_file_analysis_request(
-    generation: u64,
+    session: &ExternalAnalysisSession,
     plugins: &[u16],
     file: &File,
     program: &Program<'_>,
@@ -1110,7 +1111,7 @@ pub(super) fn encode_after_file_analysis_request(
     node_analysis_requirements: Option<&NodeAnalysisRequirements>,
     backend: u16,
 ) -> Result<Vec<Value>, ExternalAnalyzerError> {
-    let mut writer = lifecycle_writer(AFTER_FILE_ANALYSIS_REQUEST, generation, plugins)?;
+    let mut writer = lifecycle_writer(AFTER_FILE_ANALYSIS_REQUEST, session, plugins)?;
     let node_analysis_plan = node_analysis_requirements
         .map(|requirements| build_node_analysis_plan(program, artifacts, resolved_names, codebase, requirements));
     write_file_summary(
@@ -1135,15 +1136,14 @@ pub(super) fn encode_after_file_analysis_request(
 }
 
 pub(super) fn encode_after_file_analysis_batch_request(
-    generation: u64,
+    session: &ExternalAnalysisSession,
     plugins: &[u16],
     files: &[Arc<FileAnalysisSnapshot>],
     include_expression_types: bool,
     node_analysis_requirements: Option<&NodeAnalysisRequirements>,
-    session: &ExternalAnalysisSession,
     backend: u16,
 ) -> Result<Vec<Value>, ExternalAnalyzerError> {
-    let mut writer = lifecycle_writer(AFTER_FILE_ANALYSIS_BATCH_REQUEST, generation, plugins)?;
+    let mut writer = lifecycle_writer(AFTER_FILE_ANALYSIS_BATCH_REQUEST, session, plugins)?;
     writer.write_u32(u32::try_from(files.len()).map_err(|_| protocol("after-file batch exceeds u32::MAX files"))?);
     for file in files {
         let file_node_analysis_requirements = node_analysis_requirements.filter(|_| file.has_node_analysis_targets());
@@ -1180,12 +1180,12 @@ pub(super) fn encode_after_file_analysis_batch_request(
 }
 
 pub(super) fn encode_after_analysis_request(
-    generation: u64,
+    session: &ExternalAnalysisSession,
     plugins: &[u16],
     result: &AnalysisResult,
     files: &[Arc<FileAnalysisSnapshot>],
 ) -> Result<Vec<Value>, ExternalAnalyzerError> {
-    let mut writer = lifecycle_writer(AFTER_ANALYSIS_REQUEST, generation, plugins)?;
+    let mut writer = lifecycle_writer(AFTER_ANALYSIS_REQUEST, session, plugins)?;
     writer
         .write_u32(u32::try_from(result.issues.len()).map_err(|_| protocol("analysis has more than u32::MAX issues"))?);
     write_reference_summary(&mut writer, &result.symbol_references);
@@ -1197,14 +1197,21 @@ pub(super) fn encode_after_analysis_request(
     Ok(writer.finish())
 }
 
-fn lifecycle_writer(kind: u16, generation: u64, plugins: &[u16]) -> Result<ValueWriter, ExternalAnalyzerError> {
+/// A lifecycle request's header: the session's generation, the plugins whose hooks run, and whether the worker times
+/// each rule's calls.
+fn lifecycle_writer(
+    kind: u16,
+    session: &ExternalAnalysisSession,
+    plugins: &[u16],
+) -> Result<ValueWriter, ExternalAnalyzerError> {
     let mut writer = protocol::message_writer(kind);
-    writer.write_u64(generation);
+    writer.write_u64(session.generation());
     writer
         .write_u16(u16::try_from(plugins.len()).map_err(|_| protocol("more than u16::MAX lifecycle plugins matched"))?);
     for plugin in plugins {
         writer.write_u16(*plugin);
     }
+    writer.write_bool(session.times_rules());
 
     Ok(writer)
 }
@@ -1501,10 +1508,12 @@ pub(super) fn decode_lifecycle_response(
         reads.push((file_id, ResponseReads::decode(&mut reader)?));
     }
 
+    let rule_times = RuleTimes::decode(&mut reader)?;
     reader.finish()?;
     for (file_id, file_reads) in reads {
         session.record_reads(file_id, file_reads)?;
     }
+    session.record_rule_times(rule_times);
 
     Ok(LifecycleEffects { issues, issues_by_file, references, references_by_file })
 }
@@ -2015,7 +2024,7 @@ mod tests {
             // An after-file request with the expression types alone, then with the node-analysis targets alone.
             let after_file = [(true, None), (false, Some(&requirements))].map(|(expression_types, requirements)| {
                 encode_after_file_analysis_request(
-                    1,
+                    &ExternalAnalysisSession::from_files(analysis.files.iter().cloned()),
                     &[0],
                     analysis.file(),
                     analysis.program,
@@ -2227,10 +2236,10 @@ mod tests {
         assert!(write_reference_origin(&mut writer, ReferenceOrigin::File(empty_word())).is_err());
     }
 
-    /// A lifecycle response of `kind` with no issue and no reference, and a read entry for each of `files`: the file
-    /// it names, if any, then an issue read of the class `Issue` and a code read of the class `Code`, sent as lists 0
-    /// and 1 the first time and by their numbers after, then the entries `loads` from the start of worker 1's class
-    /// log.
+    /// A lifecycle response of `kind` with no issue, no reference and no rule time, and a read entry for each of
+    /// `files`: the file it names, if any, then an issue read of the class `Issue` and a code read of the class `Code`,
+    /// sent as lists 0 and 1 the first time and by their numbers after, then the entries `loads` from the start of
+    /// worker 1's class log.
     fn response_with_reads(kind: u16, files: &[Option<&[u8]>], loads: &[&[u8]]) -> Vec<Value> {
         let mut writer = protocol::message_writer(kind);
         writer.write_u32(0);
@@ -2257,6 +2266,7 @@ mod tests {
                 writer.write_bytes(class).expect("the class should fit in a frame");
             }
         }
+        writer.write_u32(0);
 
         writer.finish()
     }

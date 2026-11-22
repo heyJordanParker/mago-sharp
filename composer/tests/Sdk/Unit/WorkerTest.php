@@ -431,6 +431,8 @@ final class WorkerTest extends TestCase
         $message->writeU64(self::GENERATION);
         $message->writeU16(1);
         $message->writeU16(0);
+        // Mago asks for no rule times.
+        $message->writeBoolean(false);
         $message->writeLength(1);
         $message->writeBytes($file);
         // The file's size, then its expression, inferred-return, yield-key, and yield-value counts.
@@ -493,6 +495,8 @@ final class WorkerTest extends TestCase
         $message->writeU16(2);
         $message->writeU16(0);
         $message->writeU16(1);
+        // Mago asks for no rule times.
+        $message->writeBoolean(false);
         if ($kind === Protocol::AFTER_ANALYSIS_REQUEST) {
             $message->writeU32(0);
             // The project's reference summary.

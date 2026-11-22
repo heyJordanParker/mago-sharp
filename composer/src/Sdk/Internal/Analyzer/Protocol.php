@@ -774,6 +774,7 @@ final class Protocol
         for ($index = 0; $index < $pluginCount; ++$index) {
             $plugins[] = $reader->readU16();
         }
+        $timed = $reader->readBoolean();
 
         $analysis = match ($kind) {
             self::BEFORE_ANALYSIS_REQUEST => null,
@@ -803,7 +804,7 @@ final class Protocol
 
         $reader->finish();
 
-        return new LifecycleRequest($generation, $plugins, $analysis);
+        return new LifecycleRequest($generation, $plugins, $timed, $analysis);
     }
 
     /** @param list<null|bool|int|float|string|list<mixed>> $payload */
@@ -856,6 +857,7 @@ final class Protocol
      *   or the before-analysis hooks', which name no file: the reads of plugins with no provider, then those of plugins
      *   with one, then the end of `$classLoads` when the hooks finished, each list written through `$sentReads` for
      *   `$generation`
+     * @param RuleTimes|null $ruleTimes how long each rule's calls took, when mago asked
      *
      * @return list<null|bool|int|float|string|list<mixed>>
      */
@@ -867,6 +869,7 @@ final class Protocol
         array $reportedIssues,
         array $contributedReferences = [],
         array $recordedReads = [],
+        ?RuleTimes $ruleTimes = null,
     ): array {
         $responseKind = match ($requestKind) {
             self::BEFORE_ANALYSIS_REQUEST => self::BEFORE_ANALYSIS_RESPONSE,
@@ -964,6 +967,8 @@ final class Protocol
 
             self::writeCodebaseReads($writer, $sentReads, $generation, $issueReads, $codeReads, $classLoads, $end);
         }
+
+        ($ruleTimes ?? new RuleTimes())->write($writer);
 
         return $writer->finish();
     }
