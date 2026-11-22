@@ -931,7 +931,8 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
                 )
                 .with_help(format!("Assign a `{local_type_str}` value, or change the type `{name}` is declared with."));
             let issue = with_set_conversion_help(context, source_expression, (&local_type, &assigned_type), issue);
-            let issue = with_function_fit_message(context, source_expression, (&local_type, &assigned_type), issue);
+            let issue =
+                with_function_fit_message(context, artifacts, source_expression, (&local_type, &assigned_type), issue);
 
             let (code, mut issue) = explain_blocked_substitution(
                 context,

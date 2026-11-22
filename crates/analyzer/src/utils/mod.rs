@@ -28,6 +28,9 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::expression::call::function_call::Given;
+use crate::expression::call::function_call::returned_by;
+use crate::expression::call::function_call::stated_type_line;
 
 pub mod availability;
 pub mod casing;
@@ -151,9 +154,11 @@ where
 /// - too few parameters, as in C#, Kotlin and Swift: "`Function<int(int, int)>` takes 2 parameters, and this lambda
 ///   takes 1.",
 /// - a function plain PHP returns with no types declared, as an untyped `\Closure`, which arrives as `Any?` arrives,
+///   and fits only once an `extern` line states its type, which the message names, spec section 21,
 /// - a plain PHP `callable`, which may be a function's name or an array.
 pub fn with_function_fit_message<A>(
     context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
     value: Option<&Expression<'_>>,
     (declared, given): (&TUnion, &TUnion),
     mut issue: Issue,
@@ -206,9 +211,16 @@ where
                 parameter.is_variadic() && parameter.get_type_signature().is_some_and(TUnion::is_mixed)
             }) =>
         {
+            let given_by = returned_by(context, artifacts, value);
+            let given = match value.unparenthesized() {
+                Expression::Access(Access::Property(_) | Access::NullSafeProperty(_)) => Given::Property,
+                _ => given_by.as_deref().map_or(Given::Other, Given::Call),
+            };
+
             (
                 format!(
-                    "`{written}` gives a function whose types plain PHP doesn't declare, so it is no `{function_type}`: hold it with `const`, and check what each call gives."
+                    "`{written}` gives a function whose types plain PHP doesn't declare, so it is no `{function_type}`: state its type on {}.",
+                    stated_type_line(&given, &function_type)
                 ),
                 "Its types are not declared.".to_owned(),
             )

@@ -910,7 +910,8 @@ where
         issue = issue.with_note(type_diff);
     }
     let issue = with_set_conversion_help(context, Some(input_expression), (parameter_type, input_type), issue);
-    let issue = with_function_fit_message(context, Some(input_expression), (parameter_type, input_type), issue);
+    let issue =
+        with_function_fit_message(context, artifacts, Some(input_expression), (parameter_type, input_type), issue);
 
     let (kind, mut issue) =
         explain_blocked_substitution(context, input_type, parameter_type, IssueCode::InvalidArgument, (kind, issue));

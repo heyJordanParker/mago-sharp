@@ -8171,7 +8171,7 @@ fn a_function_value_crosses_plain_php_callbacks_that_declare_no_types() {
         ],
         &[
             "19:36 invalid-local-assignment-value: `Callbacks.named()` gives a plain PHP `callable`, which may be a function's name or an array, so it is no `Function<int(int)>`.",
-            "20:38 invalid-local-assignment-value: `Callbacks.untyped()` gives a function whose types plain PHP doesn't declare, so it is no `Function<int(int)>`: hold it with `const`, and check what each call gives.",
+            "20:38 invalid-local-assignment-value: `Callbacks.untyped()` gives a function whose types plain PHP doesn't declare, so it is no `Function<int(int)>`: state its type on the `extern` line of `Callbacks.untyped`, as in `extern Function<int(int)> Callbacks.untyped() uses none;`.",
         ],
     );
 }
@@ -25044,6 +25044,38 @@ fn a_call_of_a_function_of_unknown_type_is_refused_and_names_the_extern_line_tha
         ]
     );
     assert_eq!(refusals(stubs, &[legacy]), Vec::<String>::new());
+}
+
+/// Spec section 21: a function plain PHP gives fits no `Function<…>` slot until an `extern` line states its type, so
+/// the refusal of one in a result or an argument names the line of the method that returns it, as the refusal of its
+/// call does. A property has no line of its own, so the refusal of a property's function names the line of a plain
+/// PHP method that returns it.
+#[test]
+fn a_plain_php_closure_in_a_typed_slot_names_the_extern_line_to_write() {
+    let legacy = (
+        "src/Lib/Legacy.php",
+        "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    public \\Closure $run;\n\n    public static function doubler(): \\Closure\n    {\n        return fn($x) => $x * 2;\n    }\n}\n",
+    );
+    let stubs = ("src/App/Stubs.sharp", "namespace App;\n\nimport Lib.Legacy;\n\nextern Legacy uses none;\n");
+    let holds = (
+        "src/App/Holds.sharp",
+        "namespace App;\n\nimport Lib.Legacy;\n\npublic class Holds\n{\n    public Function<int(int)> held() => Legacy.doubler();\n\n    public int applied() => Holds.apply(Legacy.doubler());\n\n    public Function<int(int)> run(Legacy legacy) => legacy.run;\n\n    static int apply(Function<int(int)> f) => f(2);\n}\n",
+    );
+    let refused = |at: &str, code: &str, written: &str, line: &str| {
+        format!(
+            "{at} {code}: `{written}` gives a function whose types plain PHP doesn't declare, so it is no `Function<int(int)>`: state its type on {line}."
+        )
+    };
+    let doubler =
+        "the `extern` line of `Legacy.doubler`, as in `extern Function<int(int)> Legacy.doubler() uses none;`";
+    let property = "the `extern` line of a plain PHP method that returns it, as `extern Function<int(int)> Legacy.doubler() uses none;` states a method's";
+    let expected = [
+        refused("7:41", "less-specific-nested-return-statement", "Legacy.doubler()", doubler),
+        refused("9:41", "less-specific-nested-argument-type", "Legacy.doubler()", doubler),
+        refused("11:53", "less-specific-nested-return-statement", "legacy.run", property),
+    ];
+
+    assert_messages(holds, &[legacy, stubs], &expected.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// Spec section 11: a plain PHP class's objects carry no type arguments while the code runs, so a type test that gives

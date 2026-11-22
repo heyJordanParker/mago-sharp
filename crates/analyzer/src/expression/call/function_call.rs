@@ -372,7 +372,7 @@ where
 
 /// The method or function whose result `expression` is, as code names it, `Legacy.doubler` for `Legacy.doubler()`,
 /// when the analysis resolved the call to one.
-pub(super) fn returned_by<A>(
+pub(crate) fn returned_by<A>(
     context: &Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
     expression: &Expression<'_>,
@@ -404,13 +404,30 @@ fn check_function_use<A>(
 
 /// What gives a called function value, which decides whether PHP# knows the effects of a function plain PHP gives,
 /// spec section 21.
-pub(super) enum Given<'name> {
+pub(crate) enum Given<'name> {
     /// A property, whose class's `extern` line states the effects of each of its members when plain PHP declares it.
     Property,
     /// The result of the method or function code names, as `Legacy.doubler`, whose `extern` line states its type.
     Call(&'name str),
     /// Any other value, as a local's or a parameter's.
     Other,
+}
+
+/// The `extern` line that states the type of a function plain PHP gives, spec section 21, written with
+/// `function_type`: the line of the method or function `given` names, of a plain PHP method that returns a property's
+/// function, since a property has no line of its own, or of the plain PHP that gives any other value.
+pub(crate) fn stated_type_line(given: &Given<'_>, function_type: &str) -> String {
+    match given {
+        Given::Call(given_by) => {
+            format!("the `extern` line of `{given_by}`, as in `extern {function_type} {given_by}() uses none;`")
+        }
+        Given::Property => format!(
+            "the `extern` line of a plain PHP method that returns it, as `extern {function_type} Legacy.doubler() uses none;` states a method's"
+        ),
+        Given::Other => format!(
+            "the `extern` line of the plain PHP that gives it, as `extern {function_type} Legacy.doubler() uses none;` states a method's"
+        ),
+    }
 }
 
 /// The targets a call of a value of `expression_type` runs: the function a closure or a callable names, or the
@@ -548,12 +565,7 @@ where
     A: Arena,
 {
     let written = quoted_source(context, span);
-    let line = match given {
-        Given::Call(given_by) => format!(
-            "the `extern` line of `{given_by}`, as in `extern Function<int(int) uses none> {given_by}() uses none;`"
-        ),
-        Given::Property | Given::Other => "the `extern` line of the plain PHP that gives it, as `extern Function<int(int) uses none> Legacy.doubler() uses none;` states a method's".to_owned(),
-    };
+    let line = stated_type_line(given, "Function<int(int) uses none>");
 
     context.collector.report_with_code(
         IssueCode::InvalidCallable,

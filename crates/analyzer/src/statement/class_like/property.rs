@@ -332,7 +332,8 @@ where
                     )
                     .with_note("A property's default value must be assignable to the property's declared type.")
                     .with_help("Change the default value to match the declared type, or update the property type to accept the default.");
-                let issue = with_function_fit_message(context, Some(value), (&declared_type, &value_type), issue);
+                let issue =
+                    with_function_fit_message(context, artifacts, Some(value), (&declared_type, &value_type), issue);
 
                 context.collector.report_with_code(IssueCode::InvalidPropertyDefaultValue, issue);
             }

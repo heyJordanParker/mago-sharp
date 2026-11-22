@@ -673,6 +673,7 @@ pub fn handle_return_value<'ctx, A>(
         );
         let issue = with_function_fit_message(
             context,
+            artifacts,
             Some(return_value),
             (&expected_return_type, &inferred_return_type),
             issue,

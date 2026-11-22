@@ -365,6 +365,7 @@ where
                 );
                 let issue = with_function_fit_message(
                     context,
+                    artifacts,
                     assigned_value,
                     (&resolved_property.property_type, assigned_value_type),
                     issue,
