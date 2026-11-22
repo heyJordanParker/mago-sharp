@@ -2270,9 +2270,10 @@ fn listener_inputs(
 /// the files whose lines do, which the engine compiles when reflection reads its attributes, spec section 29. A class
 /// is keyed by its full name, a method as `class::method`, and a function as `function()`, each in lowercase. Its
 /// `effects` are, keyed the same way, the effects the first `extern` line of each plain PHP class and method declares,
-/// the standard library's included, by their dotted full names, which `Method.createDelegate` holds a plain PHP method
-/// to, spec section 25. Its `tags` are, for each family, spec section 10, under its full name, the key its
-/// `[Tag]` names and each variant's class under the variant's name, which a family's `parse` and `withTag` read.
+/// the standard library's included, by their dotted full names, or `null` for a line that says `uses any`, which
+/// `Method.createDelegate` holds a plain PHP method to, spec section 25. Its `tags` are, for each family, spec section
+/// 10, under its full name, the key its `[Tag]` names and each variant's class under the variant's name, which a
+/// family's `parse` and `withTag` read.
 fn listener_table(
     inputs: &[unit::Input],
     listeners: &[&Listener],
@@ -2338,8 +2339,12 @@ fn listener_table(
     for declared in effects {
         table.extend_from_slice(b"        ");
         quoted(&mut table, declared.declaration.as_bytes());
+        let Some(listed) = &declared.effects else {
+            table.extend_from_slice(b" => null,\n");
+            continue;
+        };
         table.extend_from_slice(b" => [");
-        for (index, effect) in declared.effects.iter().enumerate() {
+        for (index, effect) in listed.iter().enumerate() {
             if index > 0 {
                 table.extend_from_slice(b", ");
             }

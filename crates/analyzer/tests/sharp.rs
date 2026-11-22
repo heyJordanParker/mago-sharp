@@ -29315,7 +29315,7 @@ fn a_function_or_extension_method_value_has_its_effects_where_it_runs() {
     assert_eq!(
         effect_issues(&[&[pricing][..], &others].concat()),
         [
-            "app/Shop/Pricing.sharp:18:42 incompatible-effects: `Letters.whisper` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Letters.whisper uses any;`, and name its effects in place of `any` when you know them.",
+            "app/Shop/Pricing.sharp:18:42 missing-extern: `Letters.whisper` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Letters.whisper uses any;`, and name its effects in place of `any` when you know them.",
             "app/Shop/Pricing.sharp:20:39 impure-law: Law `parameter` reaches `Pricing.viaParameter`, which calls `Letters.shout` with the effect `Clock`. Laws hold only over pure code.",
             "app/Shop/Pricing.sharp:22:35 impure-law: Law `plain` reaches `Pricing.viaPlain`, which calls `Letters.shout` with the effect `Clock`. Laws hold only over pure code.",
             "app/Shop/Pricing.sharp:24:40 impure-law: Law `collection` reaches `Stamps.stamped`, which calls `Chrono.now` with the effect `Clock`. Laws hold only over pure code.",
@@ -29705,7 +29705,7 @@ fn a_law_reading_a_getter_that_calls_a_function_of_any_effect_is_refused_and_nam
 /// Spec sections 23 and 29: an `extern` names a plain PHP function a library declares in PHP's root namespace through
 /// the namespace an `extern namespace` line gives it, as `extern Foundation.now uses Clock;` after
 /// `extern namespace Foundation for now;`, and the effects it lists reach each call of `Foundation.now()`. A bare
-/// `extern now uses Clock;` names no function, as a misspelled name does.
+/// `extern now uses Clock;` names a class, as a one-part target does, and no class `now` exists.
 #[test]
 fn an_extern_declares_a_library_s_root_function_through_its_library_s_namespace() {
     let helpers = ("vendor/laravel/Foundation/helpers.php", "<?php\n\nfunction now(): int\n{\n    return time();\n}\n");
@@ -29732,14 +29732,14 @@ fn an_extern_declares_a_library_s_root_function_through_its_library_s_namespace(
     );
     assert_eq!(
         refusals(bare, &[helpers, application]),
-        ["3:8 non-existent-function Function `now` does not exist. | "]
+        ["3:8 non-existent-class-like Cannot find class, interface, enum, or type alias `now`. | "]
     );
 }
 
 /// Spec section 23 names a plain PHP function through its namespace in an `extern` as in a call: `Pdf.render` after
 /// `import Vendor.Pdf;`. The effects it lists reach each call of the function, a function with no `extern` line names
-/// the one to write, and a bare `extern trim uses none;` of PHP's own function names no function, as a misspelled name
-/// does.
+/// the one to write, and a bare `extern trim uses none;` names a class, as a one-part target does, and no class `trim`
+/// exists.
 #[test]
 fn an_extern_declares_a_plain_php_function_through_its_namespace() {
     let pdf = (
@@ -29762,10 +29762,13 @@ fn an_extern_declares_a_plain_php_function_through_its_namespace() {
     assert_eq!(
         effect_issues(&[page, pdf]),
         [
-            "app/Shop/Page.sharp:9:30 incompatible-effects: `Pdf.render` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Pdf.render uses any;`, and name its effects in place of `any` when you know them."
+            "app/Shop/Page.sharp:9:30 missing-extern: `Pdf.render` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Pdf.render uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
-    assert_eq!(refusals(bare, &[]), ["3:8 non-existent-function Function `trim` does not exist. | "]);
+    assert_eq!(
+        refusals(bare, &[]),
+        ["3:8 non-existent-class-like Cannot find class, interface, enum, or type alias `trim`. | "]
+    );
 }
 
 const MAGIC: (&str, &str) = (
@@ -29795,8 +29798,8 @@ fn a_call_of_a_method_a_magic_method_serves_has_the_effects_of_the_magic_method(
     assert_eq!(
         effect_issues(&[SHELF, MAGIC]),
         [
-            "app/Shop/Shelf.sharp:10:25 incompatible-effects: `Bag` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Bag uses any;`, and name its effects in place of `any` when you know them.",
-            "app/Shop/Shelf.sharp:12:24 incompatible-effects: `Codes` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Codes uses any;`, and name its effects in place of `any` when you know them.",
+            "app/Shop/Shelf.sharp:10:25 missing-extern: `Bag` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Bag uses any;`, and name its effects in place of `any` when you know them.",
+            "app/Shop/Shelf.sharp:12:24 missing-extern: `Codes` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Codes uses any;`, and name its effects in place of `any` when you know them.",
         ]
     );
     assert_eq!(issues(pure, &[MAGIC]), Vec::<String>::new());
@@ -29932,7 +29935,7 @@ fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write(
     assert_eq!(
         effect_issues(&[mailchimp, sync, METER]),
         [
-            "app/Shop/MailchimpSync.sharp:9:37 incompatible-effects: `Meter` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Meter uses any;`, and name its effects in place of `any` when you know them."
+            "app/Shop/MailchimpSync.sharp:9:37 missing-extern: `Meter` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Meter uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
 
@@ -29950,7 +29953,7 @@ fn an_implementation_calling_plain_php_with_no_extern_names_the_extern_to_write(
     assert_eq!(
         effect_issues(&[implementation, rates, gauge, METER]),
         [
-            "app/Shop/MeterRates.sharp:7:32 incompatible-effects: `Meter` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Meter uses any;`, and name its effects in place of `any` when you know them. Add `import Lib.Meter;` to the file."
+            "app/Shop/MeterRates.sharp:7:32 missing-extern: `Meter` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Meter uses any;`, and name its effects in place of `any` when you know them. Add `import Lib.Meter;` to the file."
         ]
     );
 }
@@ -30016,12 +30019,12 @@ fn a_call_through_a_returned_object_takes_the_line_of_the_returned_class() {
     assert_eq!(
         with("extern Client uses Http;\nextern Desk uses Http;\n"),
         [
-            format!("app/Shop/ClientSender.sharp:10:27 incompatible-effects: `Session`{missing}"),
-            format!("app/Shop/ClientSender.sharp:15:9 incompatible-effects: `Session`{missing}"),
-            format!("app/Shop/ClientSender.sharp:18:27 incompatible-effects: `Session`{missing}"),
-            format!("app/Shop/ClientSender.sharp:20:26 incompatible-effects: `Session`{missing}"),
+            format!("app/Shop/ClientSender.sharp:10:27 missing-extern: `Session`{missing}"),
+            format!("app/Shop/ClientSender.sharp:15:9 missing-extern: `Session`{missing}"),
+            format!("app/Shop/ClientSender.sharp:18:27 missing-extern: `Session`{missing}"),
+            format!("app/Shop/ClientSender.sharp:20:26 missing-extern: `Session`{missing}"),
             format!(
-                "app/Shop/DeskSender.sharp:7:26 incompatible-effects: `Session`{missing} Add `import Lib.Session;` to the file."
+                "app/Shop/DeskSender.sharp:7:26 missing-extern: `Session`{missing} Add `import Lib.Session;` to the file."
             ),
         ]
     );
@@ -30081,7 +30084,7 @@ fn every_extern_line_states_its_effects_and_undeclared_plain_php_is_refused() {
     assert_eq!(
         effect_issues(&[sync, mailchimp, stubs, formatter, container, STRIPE]),
         [
-            "app/Shop/Sync.sharp:7:26 incompatible-effects: `Mailchimp` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Mailchimp uses any;`, and name its effects in place of `any` when you know them."
+            "app/Shop/Sync.sharp:7:26 missing-extern: `Mailchimp` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Mailchimp uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
 }
@@ -30110,7 +30113,7 @@ fn a_struct_calls_only_plain_php_declared_uses_none() {
     assert_eq!(
         effect_issues(&[sku, validator]),
         [
-            "app/Shop/Sku.sharp:9:30 incompatible-effects: `Validator` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Validator uses any;`, and name its effects in place of `any` when you know them."
+            "app/Shop/Sku.sharp:9:30 missing-extern: `Validator` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Validator uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
     assert_eq!(
@@ -30261,9 +30264,9 @@ fn creating_a_built_in_exception_is_pure() {
     assert_eq!(
         effect_issues(&[gauge, seeds]),
         [
-            "app/Shop/Gauge.sharp:5:82 incompatible-effects: `ValueError` has no `extern` line. Help: Declare it in a .sharp file, such as `extern ValueError uses any;`, and name its effects in place of `any` when you know them.",
-            "app/Shop/Gauge.sharp:7:62 incompatible-effects: `JsonException` has no `extern` line. Help: Declare it in a .sharp file, such as `extern JsonException uses any;`, and name its effects in place of `any` when you know them.",
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Seeds.sharp:7:60 incompatible-effects: `RandomException` has no `extern` line. Help: Declare it in a .sharp file, such as `extern RandomException uses any;`, and name its effects in place of `any` when you know them.",
+            "app/Shop/Gauge.sharp:5:82 missing-extern: `ValueError` has no `extern` line. Help: Declare it in a .sharp file, such as `extern ValueError uses any;`, and name its effects in place of `any` when you know them.",
+            "app/Shop/Gauge.sharp:7:62 missing-extern: `JsonException` has no `extern` line. Help: Declare it in a .sharp file, such as `extern JsonException uses any;`, and name its effects in place of `any` when you know them.",
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Seeds.sharp:7:60 missing-extern: `RandomException` has no `extern` line. Help: Declare it in a .sharp file, such as `extern RandomException uses any;`, and name its effects in place of `any` when you know them.",
         ]
     );
 }
@@ -30941,7 +30944,7 @@ fn a_uses_in_a_file_that_imports_a_class_named_like_the_effect_lists_the_effect_
         assert_eq!(
             effect_issues(&files),
             [
-                "app/Shop/Checkout.sharp:16:26 incompatible-effects: `Store` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Store uses any;`, and name its effects in place of `any` when you know them.",
+                "app/Shop/Checkout.sharp:16:26 missing-extern: `Store` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Store uses any;`, and name its effects in place of `any` when you know them.",
                 "app/Shop/Checkout.sharp:25:36 impure-law: Law `positive` calls `Client.get`, which has the effect `Effect`. Laws hold only over pure code.",
             ],
             "{name}"
@@ -30975,7 +30978,7 @@ fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
     assert_eq!(
         effect_issues(&[pricing, SERVICES, SERVICES_STUB]),
         [
-            "app/Shop/Pricing.sharp:16:104 incompatible-effects: `Store` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Store uses any;`, and name its effects in place of `any` when you know them.",
+            "app/Shop/Pricing.sharp:16:104 missing-extern: `Store` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Store uses any;`, and name its effects in place of `any` when you know them.",
             "app/Shop/Pricing.sharp:16:39 invalid-argument: `Client.get` has the effect `Http`, so a `Function<int(int) uses Mail>` cannot hold it.",
             "app/Shop/Pricing.sharp:18:43 invalid-argument: `Environment.variable` has the effect `Environment`, so a `Function<string?(string) uses Mail>` cannot hold it.",
         ]
@@ -31162,7 +31165,7 @@ fn a_call_of_a_plain_php_property_holding_a_function_has_its_class_line_effects(
         ("app/Stubs/Holder.sharp", "namespace App.Stubs;\n\nimport Lib.Holder;\n\nextern Holder uses Database;\n");
     let missing = |class: &str, at: &str, import: &str| {
         format!(
-            "app/Shop/Till.sharp:{at} incompatible-effects: `{class}` has no `extern` line. Help: Declare it in a .sharp file, such as `extern {class} uses any;`, and name its effects in place of `any` when you know them.{import}"
+            "app/Shop/Till.sharp:{at} missing-extern: `{class}` has no `extern` line. Help: Declare it in a .sharp file, such as `extern {class} uses any;`, and name its effects in place of `any` when you know them.{import}"
         )
     };
     let formatter = missing("Formatter", "13:29", " Add `import Lib.Formatter;` to the file.");
@@ -33113,7 +33116,7 @@ fn a_law_calling_plain_php_with_no_extern_names_the_missing_declaration() {
     assert_eq!(
         effect_issues(&[refund, GATEWAY]),
         [
-            "app/Shop/Refund.sharp:7:38 incompatible-effects: `Gateway` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Gateway uses any;`, and name its effects in place of `any` when you know them."
+            "app/Shop/Refund.sharp:7:38 missing-extern: `Gateway` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Gateway uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
 }
@@ -33146,7 +33149,7 @@ fn a_call_of_a_method_of_a_class_that_shares_its_short_name_names_the_class_in_f
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:7:27 incompatible-effects: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Clock uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock;` to the file."
+            "app/Shop/Timer.sharp:7:27 missing-extern: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Clock uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
@@ -33162,7 +33165,7 @@ fn a_call_of_a_plain_php_property_of_a_class_that_shares_its_short_name_names_th
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:7:26 incompatible-effects: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Clock uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock;` to the file."
+            "app/Shop/Timer.sharp:7:26 missing-extern: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Clock uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
@@ -33178,7 +33181,7 @@ fn a_call_of_a_method_of_a_class_imported_under_another_name_names_the_class_by_
     assert_eq!(
         effect_issues(&[timer, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:27 incompatible-effects: `VendorClock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them."
+            "app/Shop/Timer.sharp:9:27 missing-extern: `VendorClock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
 }
@@ -33220,7 +33223,7 @@ fn a_law_reaching_a_call_in_another_file_names_the_class_as_the_law_file_does() 
     assert_eq!(
         effect_issues(&[cart, order, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Order.sharp:9:27 incompatible-effects: `VendorClock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them."
+            "app/Shop/Order.sharp:9:27 missing-extern: `VendorClock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
 }
@@ -33246,15 +33249,16 @@ fn a_call_of_a_class_its_file_does_not_import_names_the_import_the_extern_needs(
     assert_eq!(
         effect_issues(&[panel, gauge, METER]),
         [
-            "app/Shop/Panel.sharp:7:25 incompatible-effects: `Meter` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Meter uses any;`, and name its effects in place of `any` when you know them. Add `import Lib.Meter;` to the file."
+            "app/Shop/Panel.sharp:7:25 missing-extern: `Meter` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Meter uses any;`, and name its effects in place of `any` when you know them. Add `import Lib.Meter;` to the file."
         ]
     );
 }
 
-/// A class of the file's own namespace is bound without an import, but a bare name in an `extern` line that no import
-/// binds is a function, so the help names the class through an alias, and the line it gives declares the class.
+/// Spec section 29: a one-part `extern` target with no member is a class, as a class of the file's own namespace is
+/// bound without an import, so `extern Printer uses none;` in `App.Shop` declares `App.Shop.Printer`, and the help for
+/// a call of the undeclared class gives that line.
 #[test]
-fn a_call_of_a_class_of_its_own_namespace_names_it_through_an_alias() {
+fn a_same_namespace_extern_line_names_the_class() {
     let printer = (
         "src/App/Shop/Printer.php",
         "<?php\n\nnamespace App\\Shop;\n\nfinal class Printer\n{\n    public function print(): int\n    {\n        return 0;\n    }\n}\n",
@@ -33263,17 +33267,15 @@ fn a_call_of_a_class_of_its_own_namespace_names_it_through_an_alias() {
         "app/Shop/Kiosk.sharp",
         "namespace App.Shop;\n\npublic class Kiosk\n{\n    public Kiosk(private Printer printer) { }\n\n    public int printed => this.printer.print();\n\n    law prints(Kiosk kiosk) => kiosk.printed > 0;\n}\n",
     );
+    let line = ("app/Shop/Printers.sharp", "namespace App.Shop;\n\nextern Printer uses none;\n");
 
     assert_eq!(
         effect_issues(&[kiosk, printer]),
         [
-            "app/Shop/Kiosk.sharp:7:27 incompatible-effects: `Printer` has no `extern` line. Help: Declare it in a .sharp file, such as `extern ShopPrinter uses any;`, and name its effects in place of `any` when you know them. Add `import App.Shop.Printer as ShopPrinter;` to the file."
+            "app/Shop/Kiosk.sharp:7:27 missing-extern: `Printer` has no `extern` line. Help: Declare it in a .sharp file, such as `extern Printer uses any;`, and name its effects in place of `any` when you know them."
         ]
     );
-    let line = (
-        "app/Shop/Printers.sharp",
-        "namespace App.Shop;\n\nimport App.Shop.Printer as ShopPrinter;\n\nextern ShopPrinter uses none;\n",
-    );
+    assert_eq!(issues(line, &[printer]), Vec::<String>::new());
     assert_eq!(effect_issues(&[kiosk, printer, line]), Vec::<String>::new());
 }
 
@@ -33294,7 +33296,7 @@ fn a_call_of_a_class_whose_short_name_its_file_imports_names_an_aliased_import()
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:27 incompatible-effects: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Timer.sharp:9:27 missing-extern: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock as VendorClock;` to the file."
         ]
     );
     assert_eq!(effect_issues(&[declared, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]), Vec::<String>::new());
@@ -33320,7 +33322,7 @@ fn an_aliased_import_capitalizes_each_part_of_a_lowercase_namespace() {
     assert_eq!(
         effect_issues(&[timer, source, clock, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:27 incompatible-effects: `vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them. Add `import vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Timer.sharp:9:27 missing-extern: `vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock uses any;`, and name its effects in place of `any` when you know them. Add `import vendor.Clock as VendorClock;` to the file."
         ]
     );
 }
@@ -33337,7 +33339,7 @@ fn an_aliased_import_whose_alias_the_file_binds_takes_the_first_free_number() {
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:10:27 incompatible-effects: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock1 uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock as VendorClock1;` to the file."
+            "app/Shop/Timer.sharp:10:27 missing-extern: `Vendor.Clock` has no `extern` line. Help: Declare it in a .sharp file, such as `extern VendorClock1 uses any;`, and name its effects in place of `any` when you know them. Add `import Vendor.Clock as VendorClock1;` to the file."
         ]
     );
 }

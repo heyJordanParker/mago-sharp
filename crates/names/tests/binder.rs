@@ -754,15 +754,16 @@ fn a_named_constructor_binds_its_parameters_as_its_own_locals_and_this() {
     assert_eq!(names.binding_errors(), []);
 }
 
-/// A bare `extern` target that the file does not import is a global function, since PHP# has no functions of its own.
+/// A bare `extern` target the file does not import names a class of the file's namespace, as any name where a class
+/// goes does, spec section 29.
 #[test]
-fn a_bare_extern_target_that_is_not_imported_is_a_global_function() {
-    const CODE: &str = "namespace App.Stubs;\n\nextern trim;\n";
+fn a_bare_extern_target_that_is_not_imported_is_a_class_of_the_files_namespace() {
+    const CODE: &str = "namespace App.Stubs;\n\nextern Helper uses none;\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
-    assert_eq!(binding(&names, CODE, "trim", 0), None);
-    assert_eq!(resolved(&names, CODE, "trim", 0), b"trim");
+    assert_eq!(binding(&names, CODE, "Helper", 0), Some(Binding::Class));
+    assert_eq!(resolved(&names, CODE, "Helper", 0), b"App\\Stubs\\Helper");
 }
 
 /// An effect name binds as a class name, so a standard effect is its class in the namespace of its domain, with no

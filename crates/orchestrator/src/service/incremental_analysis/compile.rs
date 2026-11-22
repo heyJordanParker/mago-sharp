@@ -341,8 +341,9 @@ pub struct ExternAttributes {
 pub struct ExternEffects {
     /// What the line declares, keyed as [`ExternAttributes::declaration`] is.
     pub declaration: Word,
-    /// The dotted full name of each effect its `uses` lists, none for a line that declares its target pure.
-    pub effects: Vec<String>,
+    /// The dotted full name of each effect its `uses` lists, none for a line that declares its target pure, and `None`
+    /// for a line that says `uses any`, whose target may have every effect.
+    pub effects: Option<Vec<String>>,
 }
 
 /// A family, spec section 10: a sealed interface, abstract class or enum marked `[Tag]`, whose `parse` and `withTag`
@@ -408,9 +409,9 @@ impl IncrementalAnalysisService {
     }
 
     /// The effects of each plain PHP class and method an `extern` line of the last analysis declares, by what it
-    /// declares: the first line's, as a call's effects take them, spec section 29. A function's are left out, since
-    /// reflection gives no function a `Method`, and so is a line's that says `uses any`, which the engine reads as
-    /// a method no line declares, one that may have every effect.
+    /// declares: the first line's, as a call's effects take them, spec section 29, `uses any` included, so a method's
+    /// own `uses any` line overrides its class's line at run time as it does in the checker. A function's are left out,
+    /// since reflection gives no function a `Method`.
     #[must_use]
     pub fn extern_effects(&self) -> Vec<ExternEffects> {
         let mut declared: Vec<ExternEffects> = self
@@ -418,18 +419,20 @@ impl IncrementalAnalysisService {
             .externs
             .values()
             .filter_map(|lines| {
-                let line = lines.first().filter(|line| !line.uses_any)?;
+                let line = lines.first()?;
                 let target = self.codebase.extern_declaration(line).filter(|(class, _)| !class.is_empty())?;
                 let declaration = extern_key(target);
-                let effects = line
-                    .effects
-                    .iter()
-                    .map(|effect| {
-                        let name = self.codebase.get_class_like(*effect).map_or(*effect, |class| class.original_name);
+                let effects = (!line.uses_any).then(|| {
+                    line.effects
+                        .iter()
+                        .map(|effect| {
+                            let name =
+                                self.codebase.get_class_like(*effect).map_or(*effect, |class| class.original_name);
 
-                        name.as_str_lossy().trim_start_matches('\\').replace('\\', ".")
-                    })
-                    .collect();
+                            name.as_str_lossy().trim_start_matches('\\').replace('\\', ".")
+                        })
+                        .collect()
+                });
 
                 Some(ExternEffects { declaration, effects })
             })

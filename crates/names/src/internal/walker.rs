@@ -730,10 +730,10 @@ where
         }
     }
 
-    /// An `extern` target is a class when it is `Class.member` or the file imports, declares or names it by default,
-    /// and a global function otherwise, since PHP# declares no functions. `Class.member` resolves its class and keeps the
-    /// member as written. `Pdf.render` binds as a class whose member the analysis finds as a function when the import
-    /// names a namespace. A stated signature's parameters are its own, and the type parameters written after its class,
+    /// An `extern` target names a class, as any name where a class goes does, so `extern Helper` in the namespace that
+    /// declares `Helper` names that class, spec section 29. `Class.member` resolves its class and keeps the member as
+    /// written. `Pdf.render` binds as a class whose member the analysis finds as a function when the import names a
+    /// namespace. A stated signature's parameters are its own, and the type parameters written after its class,
     /// as `TModel` in `Builder<TModel>.where`, are in scope until the line ends.
     fn walk_in_extern(&mut self, r#extern: &'ast Extern<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         if r#extern.parameter_list.is_some() {
@@ -756,19 +756,6 @@ where
         let written = target.value();
         let class = written.split(|byte| *byte == b'.').next().unwrap_or(written);
         let (fqn, imported) = self.resolve_class(context, class);
-        // An `extern event` always names a class, spec section 15.
-        if r#extern.event.is_none()
-            && r#extern.member.is_none()
-            && !target.is_dotted()
-            && !imported
-            && !self.declared_classes.contains(class)
-            && default_class(class) != Some(fqn)
-        {
-            self.resolved_names.insert_at(target.span(), written, false);
-
-            return;
-        }
-
         self.resolved_names.insert_at(target.span(), fqn, imported);
         self.resolved_names.bind(target.span(), Binding::Class);
     }

@@ -384,6 +384,7 @@ final class AnalyzerCodeModuleGenerator
         'effect-object-in-static',
         'effect-object-outside-module',
         'incompatible-effects',
+        'missing-extern',
         'invalid-binding',
         'missing-service',
         'service-cycle',

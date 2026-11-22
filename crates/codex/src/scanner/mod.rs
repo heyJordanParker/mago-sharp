@@ -5,7 +5,6 @@ use mago_allocator::Arena;
 use mago_database::file::File;
 use mago_database::file::FolderNamespace;
 use mago_names::ResolvedNames;
-use mago_names::binding::Binding;
 use mago_names::binding::MethodParts;
 use mago_names::scope::NamespaceScope;
 use mago_names::scope::php_name;
@@ -741,12 +740,9 @@ where
         } else {
             None
         };
-        let target = if let Some(function) = root_function {
-            (empty_word(), ascii_lowercase_word(function))
-        } else if context.resolved_names.binding(target) == Some(Binding::Class) {
-            (name, r#extern.member_name().map_or_else(empty_word, ascii_lowercase_word))
-        } else {
-            (empty_word(), name)
+        let target = match root_function {
+            Some(function) => (empty_word(), ascii_lowercase_word(function)),
+            None => (name, r#extern.member_name().map_or_else(empty_word, ascii_lowercase_word)),
         };
         // `uses none` and `uses any` name no effect: the first declares the target pure, the second that it may have any
         // effect, spec section 29.

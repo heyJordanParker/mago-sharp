@@ -31,7 +31,6 @@ use mago_names::binding::Binding;
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
-use mago_names::scope::NamespaceScope;
 use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -63,7 +62,6 @@ use mago_syntax::cst::Return;
 use mago_syntax::cst::Uses;
 use mago_syntax::walker::Walker;
 use mago_word::Word;
-use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
@@ -527,15 +525,13 @@ pub(crate) fn plain_php_has_extern_lines(effects: &Effects, codebase: &CodebaseM
                 let (target, namespace) = written_function(function, &code_class_name);
 
                 (written_function(function, &class_name).0, target, namespace.and_then(missing_import))
-            } else if let Some(alias) = namespace_mate_alias(codebase, imports, scope, class) {
-                (class_name(class), alias.1, Some(alias.0))
             } else {
                 (class_name(class), code_class_name(class), missing_import(class))
             };
             let import = import.map(|import| format!(" {import}")).unwrap_or_default();
 
             Issue::error(format!("`{shown}` has no `extern` line."))
-                .with_code(IssueCode::IncompatibleEffects.as_str())
+                .with_code(IssueCode::MissingExtern.as_str())
                 .with_annotation(Annotation::primary(span).with_message("Plain PHP is reached here."))
                 .with_note("Every plain PHP class and function PHP# code reaches states its effects on an `extern` line.")
                 .with_help(format!(
@@ -543,28 +539,6 @@ pub(crate) fn plain_php_has_extern_lines(effects: &Effects, codebase: &CodebaseM
                 ))
         })
         .collect()
-}
-
-/// The import and the name an `extern` line takes for `class`, a plain PHP class of the file's own namespace that the
-/// file names without an import, spec section 23: a bare name in an `extern` line that no import binds is a function,
-/// so the line names the class through an alias of its namespace's last part and its name, as `DemoCell` for
-/// `Demo.Cell`.
-fn namespace_mate_alias(
-    codebase: &CodebaseMetadata,
-    imports: &WordMap<Word>,
-    scope: &NamespaceScope,
-    class: Word,
-) -> Option<(String, String)> {
-    let name = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
-    let full = String::from_utf8_lossy(name.as_bytes().strip_prefix(b"\\").unwrap_or(name.as_bytes())).into_owned();
-    let (namespace, short) = full.rsplit_once('\\')?;
-    let own = scope.namespace_name().is_some_and(|own| own.eq_ignore_ascii_case(namespace.as_bytes()));
-    if !own || imports.contains_key(&ascii_lowercase_word(full.as_bytes())) {
-        return None;
-    }
-    let alias = format!("{}{short}", namespace.rsplit('\\').next().unwrap_or(namespace));
-
-    Some((format!("Add `import {} as {alias};` to the file.", full.replace('\\', ".")), alias))
 }
 
 /// The plain PHP function `function`, as the cause of a call of it names it, written as the code names it through its
@@ -656,12 +630,10 @@ where
     let target = r#extern.target.span();
     let (class, member) = own.target;
     if class.is_empty() {
-        // Spec section 23 names a plain PHP function through its namespace, in an `extern` as in a call, and the
-        // standard library alone names one of PHP's root namespace through `global`, as `extern global.now`.
-        let declared = context.source_file.is_standard_library
-            && written.starts_with("global.")
-            && context.codebase.function_exists(member);
-        if !declared {
+        // Spec section 23 names a plain PHP function through its namespace, in an `extern` as in a call, so a target
+        // without a class is one of PHP's root namespace the standard library alone names through `global`, as
+        // `extern global.now`.
+        if !context.codebase.function_exists(member) {
             context.collector.report_with_code(
                 IssueCode::NonExistentFunction,
                 Issue::error(format!("Function `{written}` does not exist."))

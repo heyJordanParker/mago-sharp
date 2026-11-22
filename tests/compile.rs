@@ -3000,15 +3000,15 @@ fn compile_lists_the_files_whose_extern_lines_give_a_declaration_attributes() {
 }
 
 /// Spec section 29: the listener table gives, for each plain PHP class and method an `extern` line declares, the
-/// effects its `uses` lists by their dotted full names, none for a line that declares it pure, keyed as its attributes
-/// are, which `Method.createDelegate` holds a plain PHP method to, spec section 25. A function is left out, since
-/// reflection gives it no `Method`.
+/// effects its `uses` lists by their dotted full names, none for a line that declares it pure and `null` for one that
+/// says `uses any`, keyed as its attributes are, which `Method.createDelegate` holds a plain PHP method to, spec section
+/// 25. A function is left out, since reflection gives it no `Method`.
 #[test]
 fn compile_lists_the_effects_each_extern_line_declares_for_a_class_and_a_method() {
     let mailer = "<?php\n\nnamespace Lib;\n\nfinal class Mailer\n{\n    public function send(): void {}\n\n    public function count(): int\n    {\n        return 0;\n    }\n}\n";
     let functions = "<?php\n\nnamespace Lib;\n\nfunction sentAt(): int\n{\n    return 1;\n}\n";
     let smtp = "namespace App.Mail;\n\npublic effect abstract class Smtp\n{\n}\n";
-    let stubs = "namespace App.Stubs;\n\nimport App.Mail.Smtp;\nimport Lib;\nimport Lib.Mailer;\n\nextern Mailer uses none;\nextern Mailer.send uses Smtp;\nextern Lib.sentAt uses Smtp;\n\npublic class Stubs\n{\n}\n";
+    let stubs = "namespace App.Stubs;\n\nimport App.Mail.Smtp;\nimport Lib;\nimport Lib.Mailer;\n\nextern Mailer uses none;\nextern Mailer.send uses Smtp;\nextern Mailer.count uses any;\nextern Lib.sentAt uses Smtp;\n\npublic class Stubs\n{\n}\n";
     let directory = lawful_project(&[
         ("vendor/acme/lib/Mailer.php", mailer),
         ("vendor/acme/lib/functions.php", functions),
@@ -3020,7 +3020,7 @@ fn compile_lists_the_effects_each_extern_line_declares_for_a_class_and_a_method(
     compile_succeeds(root);
     assert!(
         read(root, ".sharp/listeners.php").ends_with(
-            "    'effects' => [\n        'lib\\\\mailer' => [],\n        'lib\\\\mailer::send' => ['App.Mail.Smtp'],\n    ],\n    'tags' => [\n    ],\n];\n"
+            "    'effects' => [\n        'lib\\\\mailer' => [],\n        'lib\\\\mailer::count' => null,\n        'lib\\\\mailer::send' => ['App.Mail.Smtp'],\n    ],\n    'tags' => [\n    ],\n];\n"
         ),
         "{}",
         read(root, ".sharp/listeners.php")
@@ -5026,6 +5026,83 @@ fn compile_proves_a_law_that_orders_two_instants_through_their_own_comparison() 
         "{}",
         printed(&output)
     );
+}
+
+/// `App.Shared.Later`, a class of `laws` over an `Instant` the law takes.
+fn later(laws: &str) -> String {
+    format!(
+        "namespace App.Shared;\n\nimport Sharp.Time.Duration;\nimport Sharp.Time.Instant;\n\npublic final class Later\n{{\n    {laws}\n}}\n"
+    )
+}
+
+/// Spec section 28: a constructor's checks are a precondition of the value, so every `Instant` a law takes has a
+/// nanosecond in `Instant`'s range, and five minutes after it is later than it. At a nanosecond the constructor
+/// refuses, the law would be false.
+#[test]
+fn a_law_over_an_instant_it_takes_reads_the_checks_of_instant_s_constructor() {
+    let directory = library_project(&[(
+        "app/Shared/Later.sharp",
+        &later("law laterIsAfter(Instant at) => at.plus(Duration.ofMinutes(5)) > at;"),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Later.sharp").exists());
+}
+
+/// A law over an `Instant` that is false for an `Instant` the constructor builds is refused with its claim, though
+/// every `Instant` it takes keeps the constructor's checks.
+#[test]
+fn a_false_law_over_an_instant_its_constructor_builds_is_not_proven() {
+    let directory = library_project(&[(
+        "app/Shared/Later.sharp",
+        &later("law laterIsTheSame(Instant at) => at.plus(Duration.ofMinutes(5)) == at;"),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law laterIsTheSame is not proven\n = still to show: new Instant(at.epochSeconds + new Duration(5 * 60000000000).nanoseconds.floorDiv(1000000000) + "),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Shared/Later.sharp").exists());
+}
+
+/// A struct's precondition holds what each value its fields hold keeps, so a law over a `Slot` reads that the
+/// `Instant` it holds has a nanosecond in range.
+#[test]
+fn a_law_over_a_struct_reads_the_checks_of_the_instant_its_field_holds() {
+    let directory = library_project(&[(
+        "app/Shared/Slot.sharp",
+        "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic struct Slot\n{\n    public Slot(public Instant at { get; }) { }\n\n    law nanosecondInRange(Slot slot) => slot.at.nanosecond <= 999_999_999;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Slot.sharp").exists());
+}
+
+/// A move starts from a case whose `Instant`s keep `Instant`'s checks, so an invariant that a clock's time never
+/// falls behind its start holds after a move that adds a second to it.
+#[test]
+fn a_machine_s_invariant_over_its_case_s_instants_holds_after_a_move_that_adds_a_duration() {
+    let directory = library_project(&[(
+        "app/Shared/Clock.sharp",
+        "namespace App.Shared;\n\nimport Sharp.Time.Duration;\nimport Sharp.Time.Instant;\n\npublic machine Clock\n{\n    case Ticking(Instant start, Instant now)\n    {\n        public Clock.Ticking tick() => Clock.Ticking(this.start, this.now.plus(Duration.ofSeconds(1)));\n    }\n\n    public static Clock.Ticking begin(Instant at) => Clock.Ticking(at, at);\n\n    law nowNeverBeforeStart(Clock.Ticking clock) => clock.now >= clock.start;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Clock.sharp").exists());
 }
 
 /// `App.Shared.Stamp`, whose laws build an `Instant`: one reads what it built, and one holds only because the
