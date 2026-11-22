@@ -102,6 +102,28 @@ def search {S : Type} (moves : S → List (String × M S)) (shown : S → String
 
 end Machine
 
+/-!
+The search for the small values that break a law whose proof stays open (spec section 28), which the law checker's
+runner evaluates. It runs the law's claim on them, so what it finds is a run of the code, and it proves nothing.
+-/
+
+namespace Law
+
+/-- The first value of the parameter `name` among `values`, each as PHP# writes it with the computation that gives it,
+for which `rest` finds values of the later parameters that break the law, as written: `name = value`, then those, as
+`a = new Account(0), amount = -1`. A value whose computation throws is left out, and the search stops at the first. -/
+def first {α : Type} (name : String) (values : List (String × M α)) (rest : α → Option String) : Option String :=
+  values.findSome? fun (written, value) => match value.run with
+    | some (.ok held) => (rest held).map fun later =>
+      if later.isEmpty then s!"{name} = {written}" else s!"{name} = {written}, {later}"
+    | _ => none
+
+/-- `""` when `claim`, the law's claim on the values its parameters hold, finishes with `false`, and else none. -/
+def broken (claim : M Bool) : Option String :=
+  if Machine.breaks claim then some "" else none
+
+end Law
+
 end Sharp
 
 deriving instance DecidableEq for Except

@@ -10,6 +10,7 @@ mod machine;
 pub(crate) mod names;
 mod pattern;
 pub(crate) mod proof;
+mod search;
 
 use std::borrow::Cow;
 
@@ -89,6 +90,9 @@ pub(crate) struct Law {
     pub(crate) span: Span,
     /// Its theorem, `<statement>.proof`.
     pub(crate) proof: Proof,
+    /// The Lean name of the search for the small values that break it, spec section 28, `<statement>.«$breaking»`,
+    /// which the runner runs when its proof stays open. None for a law with no search.
+    pub(crate) breaking: Option<String>,
 }
 
 /// One Lean declaration: a structure, an inductive, a definition or a law's statement.
@@ -1210,7 +1214,8 @@ impl Translator<'_, '_> {
         uses.append(&mut proof.uses);
         unmodeled.append(&mut proof.unmodeled);
         let span = Span::between(law.law.span(), law.name.span);
-        self.translation.laws.push(Law { name, statement: key.clone(), span, proof });
+        let breaking = self.breaking(full, lean, short, law);
+        self.translation.laws.push(Law { name, statement: key.clone(), span, proof, breaking });
         self.translation.declarations.push(Declaration {
             key,
             span,

@@ -7592,7 +7592,10 @@ fn a_law_whose_proof_runs_out_of_time_is_not_proven_and_its_other_cases_still_ru
         format!(
             "error[law-unproven]: law bits is not proven\n = when slow, still to show: {claim}\n = the proof ran out of time before it finished\n"
         ),
-        "error[law-unproven]: law bits is not proven\n = when !slow, still to show: a < a\nerror".to_owned(),
+        format!(
+            "error[law-unproven]: law bits is not proven\n = when !slow, still to show: a < a\n = fails for: slow = false, {}\nerror",
+            names.map(|name| format!("{name} = 0")).join(", ")
+        ),
     ] {
         assert!(printed(&output).contains(&refused), "{}", printed(&output));
     }
@@ -7874,6 +7877,55 @@ fn a_claim_true_only_because_its_own_arithmetic_overflows_is_not_proven() {
     );
 }
 
+/// A law whose goal stays open runs on small values, and a false law prints the first values that break it, each
+/// parameter as PHP# writes its value.
+#[test]
+fn a_false_law_prints_the_small_values_that_break_it() {
+    let directory = lawful_project(&[(
+        "app/Shared/Account.sharp",
+        "namespace App.Shared;\n\npublic final class Account\n{\n    public Account(public int balance { get; }) { }\n\n    public Account deposit(int amount) => new Account(this.balance + amount);\n\n    law depositNeverShrinks(Account a, int amount) => a.deposit(amount).balance >= a.balance;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law depositNeverShrinks is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+    assert!(printed(&output).contains(" = fails for: a = new Account(0), amount = -1\n"), "{}", printed(&output));
+}
+
+/// A law no small value breaks is still not proven, and says it may be true and needs a proof body.
+#[test]
+fn a_law_no_small_value_breaks_is_refused_as_needing_a_proof_body() {
+    let directory = lawful_project(&[(
+        "app/Shared/Money.sharp",
+        &with_twin(
+            SUMMED_MONEY,
+            "law totalJoinsAgain(List<Money> a, List<Money> b) => Money.total([...a, ...b]) == Money.total(a) + Money.total(b);",
+        ),
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law totalJoinsAgain is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+    assert!(
+        printed(&output).contains(" = no small value breaks it, so it may be true: write a proof body that shows it\n"),
+        "{}",
+        printed(&output)
+    );
+    assert!(!printed(&output).contains("fails for"), "{}", printed(&output));
+}
+
 /// A nullable int is a value or null, so a claim compares it as code does, with no exact `Int` to read.
 #[test]
 fn compile_proves_a_law_that_compares_nullable_ints() {
@@ -8068,7 +8120,7 @@ fn a_case_a_law_s_body_leaves_open_names_its_conditions_and_its_goal_in_php_shar
     for (source, expected) in [
         (
             without_sum_calls.as_str(),
-            "app/Shared/Money.sharp:24:5: error[law-unproven]: law sumKeepsCurrency is not proven\n = when items is [Money first, ...List<Money> rest], still to show: Money.sum(total.add(first), rest).currency == total.currency\n = Help: the law for a smaller items is the call Money.sumKeepsCurrency(total, rest)\n",
+            "app/Shared/Money.sharp:24:5: error[law-unproven]: law sumKeepsCurrency is not proven\n = when items is [Money first, ...List<Money> rest], still to show: Money.sum(total.add(first), rest).currency == total.currency\n = no small value breaks it, so it may be true: its proof body has to show this case\n = Help: the law for a smaller items is the call Money.sumKeepsCurrency(total, rest)\n",
         ),
         (
             with_call.as_str(),
@@ -8076,7 +8128,7 @@ fn a_case_a_law_s_body_leaves_open_names_its_conditions_and_its_goal_in_php_shar
         ),
         (
             without_calls.as_str(),
-            "app/Shared/Money.sharp:19:5: error[law-unproven]: law timesIsZero is not proven\n = when n > 0, still to show: m.add(m.times(n - 1)).amount == 0\n = Help: the law for a smaller n is the call Money.timesIsZero(m, n - 1)\n",
+            "app/Shared/Money.sharp:19:5: error[law-unproven]: law timesIsZero is not proven\n = when n > 0, still to show: m.add(m.times(n - 1)).amount == 0\n = fails for: m = new Money(1, \"\"), n = 1\n = Help: the law for a smaller n is the call Money.timesIsZero(m, n - 1)\n",
         ),
     ] {
         let directory = library_project(&[("app/Shared/Money.sharp", source)]);

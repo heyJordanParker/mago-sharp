@@ -36,6 +36,8 @@ pub(crate) struct ReachedClass {
     /// The full name of the first plain PHP class above it, when that class declares or inherits a constructor, which
     /// its `new` runs.
     pub(crate) plain_constructor: Option<Word>,
+    /// Whether `new` builds its values: a class that is not abstract, and no interface, trait or enum.
+    pub(crate) instantiable: bool,
 }
 
 /// What the analysis knows about a method a law reaches, or a computed property, from outside its class's file.
@@ -184,6 +186,10 @@ impl Reach {
                         .and_then(|parent| codebase.get_class_like(parent))
                         .map(|parent| parent.original_name),
                     plain_constructor: plain_constructor(codebase, metadata),
+                    instantiable: !metadata.kind.is_interface()
+                        && !metadata.kind.is_trait()
+                        && !metadata.kind.is_enum()
+                        && !metadata.flags.is_abstract(),
                 });
                 reach.interfaces.entry(class).or_insert_with(|| {
                     let mut interfaces: Vec<Word> = metadata

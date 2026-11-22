@@ -378,11 +378,11 @@ impl Lean {
         };
         package.remove_stale()?;
         let proved: HashSet<FileId> = work.iter().map(|(translation, _)| translation.file).collect();
-        let reached: HashSet<&str> = work
-            .iter()
-            .flat_map(|(_, proving)| proving)
+        let proving = || work.iter().flat_map(|(_, proving)| proving);
+        let reached: HashSet<&str> = proving()
             .flat_map(|law| laws.closure(law))
             .flat_map(|position| program.reached(&laws.ordered[position].1.statement))
+            .chain(proving().flat_map(|law| &law.breaking).flat_map(|breaking| program.reached(breaking)))
             .collect();
         let modules = program.modules(&proved, &reached);
         let scripts: HashMap<&str, String> = laws
@@ -427,9 +427,9 @@ impl Lean {
 }
 
 /// The key a law's proof ends once for: the hash of this checker build, the Lean version, and the statement and
-/// theorem of the law and of each law it calls, transitively, with the text of every declaration their statements
-/// reach, as [`Program::reached`] gives them, each in the order of its name. An edit of a declaration a law reaches
-/// changes it, and nothing else does.
+/// theorem of the law and of each law it calls, transitively, with the text of every declaration their statements and
+/// the law's search for the small values that break it reach, as [`Program::reached`] gives them, each in the order of
+/// its name. An edit of a declaration a law reaches changes it, and nothing else does.
 fn proof_key(law: &Law, program: &Program<'_>, laws: &Laws<'_>) -> String {
     let mut hasher = Sha256::new();
     let mut part = |bytes: &[u8]| {
@@ -445,7 +445,8 @@ fn proof_key(law: &Law, program: &Program<'_>, laws: &Laws<'_>) -> String {
         .map(|position| laws.ordered[position].1)
         .map(|called| (called.statement.as_str(), called.proof.text.as_str()))
         .collect();
-    let declarations: BTreeSet<&str> = called.keys().flat_map(|statement| program.reached(statement)).collect();
+    let declarations: BTreeSet<&str> =
+        called.keys().copied().chain(law.breaking.as_deref()).flat_map(|reaching| program.reached(reaching)).collect();
     for (statement, theorem) in called {
         part(statement.as_bytes());
         part(theorem.as_bytes());
@@ -756,7 +757,7 @@ fn judged(law: &Law, judgment: Judgment, names: &Names<'_>) -> Vec<Issue> {
         }
         // Spec section 20.2: an invariant of a machine is broken by the moves its trace search found, and else by each
         // entry point or move whose part of its proof stays open, with the goal still to show.
-        Judgment::Open(steps) if !law.proof.after.is_empty() => {
+        Judgment::Open(steps, _) if !law.proof.after.is_empty() => {
             let found = steps.iter().find(|step| step.index > law.proof.after.len()).and_then(|step| {
                 let Ok(serde_json::Value::Array(trace)) = serde_json::from_str(&step.goal) else {
                     return None;
@@ -781,8 +782,9 @@ fn judged(law: &Law, judgment: Judgment, names: &Names<'_>) -> Vec<Issue> {
             }
         }
         // A case a `match` reaches both where a guard fails and where a pattern does is one case, reported once. A case
-        // of the enums a law without a body splits on is a case of its own.
-        Judgment::Open(steps) => {
+        // of the enums a law without a body splits on is a case of its own. Each says what the search for the small
+        // values that break the law gave.
+        Judgment::Open(steps, search) => {
             let mut reported: Vec<(usize, bool, Vec<String>)> = Vec::new();
             let mut issues = Vec::new();
             for step in &steps {
@@ -800,7 +802,8 @@ fn judged(law: &Law, judgment: Judgment, names: &Names<'_>) -> Vec<Issue> {
                     continue;
                 }
                 reported.push(key);
-                issues.push(if step.out_of_time { issues::out_of_time(issue) } else { issue });
+                let issue = if step.out_of_time { issues::out_of_time(issue) } else { issue };
+                issues.push(issues::searched(law, issue, &search));
             }
 
             issues
@@ -892,6 +895,7 @@ mod tests {
             statement: "App.Shared.Money.addKeepsCurrency".to_owned(),
             span: Span::dummy(0, 0),
             proof: crate::translate::proof::Proof::default(),
+            breaking: None,
         }
     }
 

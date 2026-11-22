@@ -26,6 +26,8 @@ use crate::translate::body::Body;
 use crate::translate::names;
 use crate::translate::parameter_name;
 use crate::translate::proof::Proof;
+use crate::translate::search::claim_of;
+use crate::translate::search::lean_string;
 
 impl Translator<'_, '_> {
     /// The case of the machine `machine` whose invariant `law` is, spec section 20.2: the case its one parameter names.
@@ -214,6 +216,7 @@ impl Translator<'_, '_> {
                 statement: key.clone(),
                 span,
                 proof: Proof::invariant(&key, &trace, after, claim_text),
+                breaking: None,
             });
             self.translation.declarations.push(Declaration {
                 key,
@@ -226,35 +229,6 @@ impl Translator<'_, '_> {
                 opaque: None,
             });
         }
-    }
-
-    /// `<law>.«$claim»`, the claim of the invariant `law` of a machine, spec section 20.2: whether it holds of a value,
-    /// computing ints exactly, as a law's claim does. A value its `when` condition is false of holds it.
-    fn claim(&mut self, full: &[u8], lean: &str, short: &str, law: &LawNode) {
-        let place = format!("{short}.{}", String::from_utf8_lossy(law.name.value));
-        let mut lines = Vec::new();
-        let (mut uses, mut unmodeled) = (Vec::new(), Vec::new());
-        if let Some(condition) = &law.condition {
-            let mut computed = Body::for_law(self.checked, self.reach, full, place.clone(), law);
-            computed.computes_exactly();
-            let (condition_lines, terms, condition_uses, condition_unmodeled) =
-                computed.terms(&[], &[condition.expression]);
-            lines.extend(condition_lines);
-            lines.push(format!("unless {} do return true", terms[0]));
-            uses.extend(condition_uses);
-            unmodeled.extend(condition_unmodeled);
-        }
-        let mut body = Body::for_law(self.checked, self.reach, full, place, law);
-        let binders: Vec<String> =
-            law.parameter_list.parameters.iter().map(|parameter| binder(&mut body, parameter)).collect();
-        body.computes_exactly();
-        let (claim_lines, claim_uses, claim_unmodeled) = body.expression_body(law.claim);
-        lines.extend(claim_lines);
-        uses.extend(claim_uses);
-        unmodeled.extend(claim_unmodeled);
-
-        let key = claim_of(&names::member(lean, law.name.value));
-        self.define(key, law.name.span, &binders, "Bool", (lines, uses, unmodeled), None);
     }
 
     /// `<machine>.«$shown»`, each value of `machine` as a trace writes it, spec section 20.2: its case, and each field
@@ -446,7 +420,7 @@ impl Translator<'_, '_> {
     }
 
     /// A use of the declaration `key` of this file, which a message names as `place`.
-    fn own_use(&self, key: &str, place: String) -> Use {
+    pub(super) fn own_use(&self, key: &str, place: String) -> Use {
         Use { key: key.to_owned(), file: Some(self.translation.file), place, smaller: None, names_only: false }
     }
 
@@ -614,11 +588,6 @@ impl<'machine, 'ast, 'arena> Machine<'machine, 'ast, 'arena> {
     }
 }
 
-/// `<law>.«$claim»`, the claim of the invariant whose Lean name is `law`, spec section 20.2.
-fn claim_of(law: &str) -> String {
-    format!("{law}.«$claim»")
-}
-
 /// The full name of the class the case `case` of the enum `full` runs as, spec section 20: `Shop\OrderStatus\Paid`.
 pub(super) fn case_class(full: &[u8], case: &[u8]) -> Vec<u8> {
     [full, b"\\", case].concat()
@@ -655,9 +624,4 @@ fn written_call(method: &Method) -> String {
 /// `∀ binders, `, or nothing when there are no binders.
 fn quantified(binders: &[String]) -> String {
     if binders.is_empty() { String::new() } else { format!("∀ {}, ", binders.join(" ")) }
-}
-
-/// `text` as a Lean string literal.
-fn lean_string(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }

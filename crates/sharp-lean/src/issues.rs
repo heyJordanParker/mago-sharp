@@ -9,6 +9,7 @@ use crate::library;
 use crate::library::Stop;
 use crate::package::Refusal;
 use crate::package::place_of;
+use crate::runner::Search;
 use crate::translate::Law;
 use crate::translate::Unmodeled;
 use crate::translate::proof::Case;
@@ -172,6 +173,22 @@ pub(crate) fn unshown_condition(law: &Law, call: &LawCall, goal: Option<&str>) -
         .with_code(IssueCode::LawUnproven.as_str())
         .with_annotation(Annotation::primary(call.span).with_message("This call needs its law's `when` condition."))
         .with_note(format!("{}still to show for the call {}: {goal}", when(&call.conditions), call.written))
+}
+
+/// `issue` of `law`, whose proof stays open, with what the search for the small values that break it found, spec section
+/// 28: the values, so a false law shows where it fails, or, when it found none, that the law may be true and needs a
+/// proof, since no small value breaking it proves nothing.
+pub(crate) fn searched(law: &Law, issue: Issue, search: &Search) -> Issue {
+    match search {
+        Search::Skipped => issue,
+        Search::Broken(values) => issue.with_note(format!("fails for: {values}")),
+        Search::Unbroken if law.proof.opening.is_some() => {
+            issue.with_note("no small value breaks it, so it may be true: write a proof body that shows it")
+        }
+        Search::Unbroken => {
+            issue.with_note("no small value breaks it, so it may be true: its proof body has to show this case")
+        }
+    }
 }
 
 /// `issue` with the note that the steps of its case or its call ran out of their time budget before they finished.

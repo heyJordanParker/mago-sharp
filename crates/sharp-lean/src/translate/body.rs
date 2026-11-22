@@ -2157,6 +2157,21 @@ impl<'body, 'program> Body<'body, 'program> {
         self.bind(parts.join(" "))
     }
 
+    /// `Class.__construct` of `class`, which builds a value of its own type from every argument its constructor takes,
+    /// and records that the body uses it. None for a class `new` cannot build, one whose `new` runs plain PHP code, and
+    /// one the law checker does not translate.
+    pub(super) fn constructor(&mut self, class: &[u8]) -> Option<String> {
+        let reached = self.reach.class(class)?;
+        if !reached.sharp || !reached.instantiable || reached.plain_constructor.is_some() || is_collection(class) {
+            return None;
+        }
+        let class_name = self.reached_name(class);
+        let key = names::member(&names::full_name(&class_name), b"__construct");
+        self.uses(class, &key, format!("new {}", names::short_name(&class_name)));
+
+        Some(key)
+    }
+
     /// The terms of a call's arguments, or `None` when one cannot be translated. Each argument is passed by position.
     /// `stepped` is an argument's position and the term that stands for it.
     fn arguments(&mut self, list: &ArgumentList, stepped: Option<(usize, String)>) -> Option<Vec<String>> {

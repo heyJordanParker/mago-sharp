@@ -39,14 +39,28 @@ pub(crate) struct Theorem<'theorem> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Judgment {
     Proved,
-    /// Each case and condition of the proof whose goal stayed open.
-    Open(Vec<Open>),
+    /// Each case and condition of the proof whose goal stayed open, and what the search for the small values that break
+    /// the law gave.
+    Open(Vec<Open>, Search),
     /// The proof holds through the theorem of the law of this statement, which is not proven.
     Through(String),
     /// Lean rejected the theorem, with its first error: a bug of the checker's translation.
     Rejected(String),
     /// The theorem ran out of the time budget the runner gives each one outside the steps of its proof.
     OutOfTime,
+}
+
+/// What the search for the small values that break a law gave, spec section 28, which the runner runs when the law's
+/// proof stays open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Search {
+    /// No search ran: the law has none, or it reaches code whose values Lean's compiled code does not hold.
+    Skipped,
+    /// No small value breaks the law, so it may be true.
+    Unbroken,
+    /// The first small values that break the law, each parameter as PHP# writes its value:
+    /// `a = new Account(0), amount = -1`.
+    Broken(String),
 }
 
 /// A step of a proof whose goal stayed open: the case or the call of its index, whether its steps ran out of their
@@ -350,7 +364,13 @@ fn judgments(reader: &mut PayloadReader<'_>, count: usize) -> Result<Vec<Judgmen
                     let goal = reader.read_string("open step goal").map_err(error)?;
                     open.push(Open { condition, out_of_time, index, goal });
                 }
-                Judgment::Open(open)
+                let search = match reader.read_u8("search").map_err(error)? {
+                    0 => Search::Skipped,
+                    1 => Search::Unbroken,
+                    2 => Search::Broken(reader.read_string("breaking values").map_err(error)?),
+                    code => return Err(format!("the runner answered with the unknown search {code}")),
+                };
+                Judgment::Open(open, search)
             }
             2 => Judgment::Through(reader.read_string("unproven law").map_err(error)?),
             3 => Judgment::Rejected(reader.read_string("Lean error").map_err(error)?),

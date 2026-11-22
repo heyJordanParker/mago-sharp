@@ -395,11 +395,57 @@ def withTheorem (env : Environment) (item : Theorem) (shared : Shared) : IO (Env
   shared.theorems.modify (·.insert item.statement elaborated)
   return (env, elaborated)
 
+/-! The search for the small values that break a law whose proof stays open, spec section 28: `<statement>.«$breaking»`,
+which the translation writes beside the law's statement as `Sharp.Law.breaking` of the law's claim on them. -/
+
+/-- What the search for the small values that break a law gave. -/
+inductive Search where
+  /-- No search ran: the generated modules hold none for the law, or it reaches an `opaque` constant outside Lean's own
+  library, whose value its compiled code does not hold, so a run of it would not be a run of the law's code. -/
+  | skipped
+  /-- No small value breaks the law. -/
+  | unbroken
+  /-- The first small values that break the law, as PHP# writes them. -/
+  | broken (values : String)
+
+/-- Whether `name`'s declaration reaches an `opaque` constant outside Lean's own library, through the constants it uses:
+an interface's values, `Sharp.upcast`, or a reader each implementation of a class gives. -/
+def reachesOpaque (env : Environment) (name : Name) : Bool := Id.run do
+  let mut seen : NameSet := {}
+  let mut pending := #[name]
+  repeat
+    let some next := pending.back? | break
+    pending := pending.pop
+    if seen.contains next then continue
+    seen := seen.insert next
+    if let some index := env.getModuleIdxFor? next then
+      if let some module := env.allImportedModuleNames[index.toNat]? then
+        if [`Init, `Std, `Lean].contains module.getRoot then continue
+    match env.find? next with
+    | some (.opaqueInfo _) => return true
+    | some info => pending := pending ++ info.getUsedConstantsAsSet.toArray
+    | none => pure ()
+  return false
+
+unsafe def evalBreaking (env : Environment) (name : Name) : Except String (Option String) :=
+  env.evalConst (Option String) {} name (checkMeta := false)
+
+/-- Runs the search for the small values that break the law `statement`, when its generated module holds one that runs
+only code Lean compiled. -/
+def search (env : Environment) (statement : Name) : Search :=
+  let name := statement.str "$breaking"
+  if !env.contains name || reachesOpaque env name then .skipped
+  else match unsafe evalBreaking env name with
+    | .ok (some values) => .broken values
+    | .ok none => .unbroken
+    | .error _ => .skipped
+
 /-- Takes each theorem in order, each with the theorems before it in scope, as [`withTheorem`] gives it, and appends to
-`b` the count of judged ones and the answer for each: `0` when it is proven; `1` and each step whose goal stays open, as
-its kind, its index and its goal; `2` and the statement of the law not proven that it holds through; `3` and Lean's first
-error, when Lean rejected the theorem, or the axioms it rests on, when it has a gap no law it holds through explains; or
-`4` when it ran out of its heartbeats outside the steps of its proof. -/
+`b` the count of judged ones and the answer for each: `0` when it is proven; `1`, each step whose goal stays open, as
+its kind, its index and its goal, then what the search for the small values that break the law gave: `0` when none ran,
+`1` when it found none, or `2` and the values it found; `2` and the statement of the law not proven that it holds
+through; `3` and Lean's first error, when Lean rejected the theorem, or the axioms it rests on, when it has a gap no law
+it holds through explains; or `4` when it ran out of its heartbeats outside the steps of its proof. -/
 def answer (env : Environment) (request : Check) (b : ByteArray) (shared : Shared) : IO ByteArray := do
   let mut env := env
   let mut gaps : Array Name := #[]
@@ -421,6 +467,10 @@ def answer (env : Environment) (request : Check) (b : ByteArray) (shared : Share
       b := putU32 (putU8 b 1) elaborated.steps.size.toUInt32
       for (kind, index, goal) in elaborated.steps do
         b := putString (putU32 (putU8 b kind) index.toUInt32) goal
+      b := match search env item.statement with
+        | .skipped => putU8 b 0
+        | .unbroken => putU8 b 1
+        | .broken values => putString (putU8 b 2) values
     else if gap then
       b := match reachedOf env name gaps with
         | some law => putString (putU8 b 2) law.getPrefix.toString
