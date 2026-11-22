@@ -3494,6 +3494,23 @@ fn compile_records_each_module_under_the_namespace_it_serves() {
     );
 }
 
+/// Spec section 32: in a project that is the standard library's own package, as on a fresh clone of it, only the
+/// library's `Sharp` module serves the root namespace, which the library's autoloader reads itself. Each other module
+/// serves its own namespace, as in any project, so the listener table records it.
+#[test]
+fn compile_records_a_module_of_the_standard_library_s_package_under_its_own_namespace() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "composer.json", "{\"name\": \"heyjordanparker/php-sharp-composer\"}\n");
+    write(root, "mago.toml", "[source]\npaths = [\"src\", \"library\"]\nextensions = [\"sharp\"]\n");
+    write(root, "library/Sharp/Module.sharp", "namespace Sharp;\n\nmodule\n{\n}\n");
+    write(root, "src/App/Module.sharp", "namespace App;\n\nmodule\n{\n}\n");
+
+    compile_succeeds(root);
+    let table = read(root, ".sharp/listeners.php");
+    assert!(table.ends_with("    'modules' => [\n        'app' => ['src/App/Module.sharp'],\n    ],\n];\n"), "{table}");
+}
+
 /// Spec section 32: a program's services come from the modules of its namespace and of each namespace above it,
 /// wherever its file is, so an edit to `app/Module.sharp` writes again the compiled program of `App.Testing.Lib` under
 /// `tests/lib`, and a file added beside the module writes no other compiled file again.
