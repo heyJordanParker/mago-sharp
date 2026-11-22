@@ -36892,6 +36892,24 @@ fn a_constructor_starts_a_machine_property_with_an_entry_point() {
     );
 }
 
+/// Spec section 20.2: the `private set` rule is about a property that stores a machine, so a computed property of the
+/// machine's type is public, since it stores nothing a write could change, and a stored property with a public `set`
+/// beside it is still refused.
+#[test]
+fn a_computed_property_of_a_machine_type_is_public() {
+    let order = (
+        "src/Shop/Order.sharp",
+        "namespace Shop;\n\npublic class Order\n{\n    public OrderStatus status { get; private set; } = OrderStatus.open();\n    public OrderStatus progress => this.status;\n    public OrderStatus copied { get; set; } = OrderStatus.open();\n}\n",
+    );
+
+    assert_eq!(
+        refusals(order, &[ORDER_STATUS]),
+        [
+            "7:24 invalid-machine `Order.copied` holds the machine `OrderStatus`, so its `set` is `private`. | Write `{ get; private set; }`, and change it only by a move: `if (this.copied is OrderStatus.Draft draft) { this.copied = draft.pay(…); }`."
+        ]
+    );
+}
+
 /// Spec section 20.2: a move belongs to the case it moves from, so a call of `pay` through the machine's type is refused
 /// with the test to write, and a holder changes its machine by a move of the case a type pattern bound from it, after
 /// `is`, after an `is not` that leaves, and in a `match` arm. A name bound from another place is no move of its own.

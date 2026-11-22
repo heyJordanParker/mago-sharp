@@ -105,7 +105,8 @@ fn reachable(graph: &MachineMetadata, start: impl IntoIterator<Item = Word>) -> 
 /// initial value, when it has one, calls an entry point of the machine. A struct's property is `{ get; init; }`, and
 /// a `with` that sets it is checked as a write. A property its constructor takes has the caller's value, which no
 /// entry point gave, so it is refused there. An interface's property has no storage and no `set`, so nothing writes
-/// it, and each implementer's own property is checked instead.
+/// it, and each implementer's own property is checked instead. A computed property stores nothing, so it holds no
+/// machine a write could change, and the stored properties it reads are checked instead.
 pub(crate) fn check_machine_properties<A>(
     context: &mut Context<'_, '_, A>,
     class: &ClassLikeMetadata,
@@ -116,7 +117,8 @@ pub(crate) fn check_machine_properties<A>(
     if class.kind.is_interface() {
         return;
     }
-    let mut properties: Vec<_> = class.properties.values().collect();
+    let mut properties: Vec<_> =
+        class.properties.values().filter(|property| !property.flags.is_virtual_property()).collect();
     properties.sort_by_key(|property| property.name_span.map(|span| span.start.offset));
     for property in properties {
         let (Some(name_span), Some(type_metadata)) = (property.name_span, &property.type_metadata) else {
