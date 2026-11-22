@@ -813,8 +813,19 @@ impl IncrementalAnalysisService {
             rayon::join(self.prelude, || scan_files(source_files));
         let (mut per_file_results, reached): (Vec<FileScan>, Vec<WordSet>) = scans?.into_iter().unzip();
         if let Some(autoloader) = &autoloader {
-            self.autoloaded =
-                autoload(autoloader, &self.database, &merged_codebase, &mut per_file_results, reached, scan_files)?;
+            // A vendor file another analysis of the run served is the one this one serves, as the file it scanned.
+            let held = |file_id: FileId| {
+                given.lock().unwrap_or_else(PoisonError::into_inner).get(&file_id).map(|scan| Arc::clone(&scan.file))
+            };
+            self.autoloaded = autoload(
+                autoloader,
+                &self.database,
+                &merged_codebase,
+                &mut per_file_results,
+                reached,
+                held,
+                scan_files,
+            )?;
             self.database.extend(self.autoloaded.iter().cloned());
         }
         if let Some(compiling_bar) = compiling_bar {
@@ -1181,7 +1192,9 @@ impl IncrementalAnalysisService {
         if let Some(autoloader) = &self.autoloader {
             for name in reached.iter().flatten() {
                 if !self.codebase.class_like_exists(*name)
-                    && autoloader.load(name.as_bytes())?.is_some_and(|file| self.database.get(&file.id).is_err())
+                    && autoloader
+                        .load(name.as_bytes(), |_| None)?
+                        .is_some_and(|file| self.database.get(&file.id).is_err())
                 {
                     return self.analyze();
                 }
@@ -2643,13 +2656,15 @@ struct Scan {
 /// Serves `scans`, round by round through `autoloader`, the files Composer loads up front and the plain PHP vendor file
 /// of each class-like a scan reaches, as `reached` holds the first round's, that neither `prelude` nor a scan declares,
 /// scanning them with `scan_files`, until no scan reaches another, as PHP's autoloader reads a class's file once the
-/// code first names the class. Returns the files it served, which `database` doesn't hold.
+/// code first names the class. A file `held` gives is the one another analysis of the run read, which it serves
+/// instead of reading the file again. Returns the files it served, which `database` doesn't hold.
 fn autoload(
     autoloader: &Autoloader,
     database: &ReadDatabase,
     prelude: &CodebaseMetadata,
     scans: &mut Vec<FileScan>,
     mut reached: Vec<WordSet>,
+    held: impl Fn(FileId) -> Option<Arc<File>> + Sync,
     scan_files: impl Fn(Vec<Arc<File>>) -> Result<Vec<(FileScan, WordSet)>, ExternalAnalyzerError>,
 ) -> Result<Vec<Arc<File>>, OrchestratorError> {
     let mut declared = prelude.symbols.clone();
@@ -2660,7 +2675,7 @@ fn autoload(
     let mut tried = WordSet::default();
     let mut served_ids: HashSet<FileId> = HashSet::default();
     let mut served = Vec::new();
-    let mut read = autoloader.files()?;
+    let mut read = autoloader.files(&held)?;
     loop {
         let names: Vec<Word> = reached
             .iter()
@@ -2674,13 +2689,12 @@ fn autoload(
         read.extend(
             names
                 .par_iter()
-                .filter_map(|name| autoloader.load(name.as_bytes()).transpose())
+                .filter_map(|name| autoloader.load(name.as_bytes(), &held).transpose())
                 .collect::<Result<Vec<_>, _>>()?,
         );
         let files: Vec<Arc<File>> = std::mem::take(&mut read)
             .into_iter()
             .filter(|file| database.get(&file.id).is_err() && served_ids.insert(file.id))
-            .map(Arc::new)
             .collect();
         if files.is_empty() {
             break;

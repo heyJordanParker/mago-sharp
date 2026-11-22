@@ -54,6 +54,7 @@ use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use mago_database::exclusion::Exclusion;
 use mago_database::file::File;
+use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_database::loader::DatabaseLoader;
 use mago_database::loader::Listing;
@@ -134,37 +135,57 @@ impl Autoloader {
     }
 
     /// The plain PHP file the maps place `class` in, as the database would hold it, or `None` when no map places it in
-    /// a file the database would hold among the vendor folder's.
+    /// a file the database would hold among the vendor folder's. `held` gives the file when another analysis of the run
+    /// already read it, as [`Self::read`] takes it.
     ///
     /// # Errors
     ///
     /// Returns a [`DatabaseError`] when the file can't be read.
-    pub(crate) fn load(&self, class: &[u8]) -> Result<Option<File>, DatabaseError> {
-        self.autoload.locate(class).map_or(Ok(None), |path| self.read(&path))
+    pub(crate) fn load(
+        &self,
+        class: &[u8],
+        held: impl Fn(FileId) -> Option<Arc<File>>,
+    ) -> Result<Option<Arc<File>>, DatabaseError> {
+        self.autoload.locate(class).map_or(Ok(None), |path| self.read(&path, held))
     }
 
     /// The files Composer loads on every request, `autoload_files.php`'s, among those the database would hold among the
-    /// vendor folder's.
+    /// vendor folder's, each from `held` when another analysis of the run already read it.
     ///
     /// # Errors
     ///
     /// Returns a [`DatabaseError`] when a file can't be read.
-    pub(crate) fn files(&self) -> Result<Vec<File>, DatabaseError> {
-        self.autoload.files().iter().filter_map(|path| self.read(path).transpose()).collect()
+    pub(crate) fn files(&self, held: impl Fn(FileId) -> Option<Arc<File>>) -> Result<Vec<Arc<File>>, DatabaseError> {
+        self.autoload.files().iter().filter_map(|path| self.read(path, &held).transpose()).collect()
     }
 
     /// The file at `path` as the database would hold it among the vendor folder's, or `None` when the database would
-    /// leave it out or no file is there.
-    fn read(&self, path: &Path) -> Result<Option<File>, DatabaseError> {
+    /// leave it out or no file is there. A file `held` gives for its ID is taken when it is this vendored file at this
+    /// path, which another analysis of the run read, so the run reads each served file once.
+    fn read(
+        &self,
+        path: &Path,
+        held: impl Fn(FileId) -> Option<Arc<File>>,
+    ) -> Result<Option<Arc<File>>, DatabaseError> {
         if self.matcher.classify(path) != Some(FileType::Vendored) {
             return Ok(None);
+        }
+        let name = File::logical_name(&self.workspace, path);
+        if let Some(file) = held(FileId::new(&name))
+            .filter(|file| file.file_type == FileType::Vendored && file.path.as_deref() == Some(path))
+        {
+            return Ok(Some(file));
         }
         let Some(contents) = read_listed(path)? else {
             return Ok(None);
         };
-        let name = File::logical_name(&self.workspace, path);
 
-        Ok(Some(File::new(Cow::Owned(name), FileType::Vendored, Some(path.to_path_buf()), Cow::Owned(contents))))
+        Ok(Some(Arc::new(File::new(
+            Cow::Owned(name),
+            FileType::Vendored,
+            Some(path.to_path_buf()),
+            Cow::Owned(contents),
+        ))))
     }
 
     /// The patterns that keep the database from reading the plain PHP files the maps serve: those of the configured
