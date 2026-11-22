@@ -73,6 +73,7 @@ use mago_word::word;
 
 use super::IncrementalAnalysisService;
 use crate::error::OrchestratorError;
+use crate::service::phase::Phase;
 
 /// The folder Composer installs packages into. `composer.lock` stands for every file in it.
 const VENDOR: &[u8] = b"vendor/";
@@ -657,6 +658,7 @@ impl IncrementalAnalysisService {
             return Err(OrchestratorError::General("analyze() must be called before compile()".to_string()));
         }
 
+        let lowering = Phase::start("lowering");
         let files = self.sharp_files();
         let (errors, unrefused) = self.errors(refusing);
         let errored: HashSet<FileId> = errors.keys().chain(unrefused.keys()).copied().collect();
@@ -702,7 +704,9 @@ impl IncrementalAnalysisService {
             let hosts_forms: InlineForms = hosts_forms.into_iter().collect();
             self.lower_into(hosts, &rest, lowered, &hosts_forms, &reach, &effects, session.as_ref(), &mut lowerings)?;
         }
+        lowering.end();
 
+        let laws = Phase::start("laws");
         // The laws of a file are checked again when it or a file they reach was lowered again, with each file they reach
         // that kept its compiled file translated beside them.
         let lowered_again: HashSet<FileId> = first.lowered.keys().copied().collect();
@@ -760,11 +764,11 @@ impl IncrementalAnalysisService {
         translations.extend(translated.into_iter().filter_map(Result::ok));
         let refused = check(translations, &reach, &errored)
             .map_err(|error| OrchestratorError::General(format!("The laws could not be checked: {error}.")))?;
+        laws.end();
 
+        let inputs = Phase::start("inputs");
         let read_by_every_file: HashSet<FileId> =
             self.database.files().filter(|file| file.file_type.is_patch()).map(|file| file.id).collect();
-
-        let inputs_start = std::time::Instant::now();
         let mut dependencies = Dependencies::new(self);
         // A method whose return comes from its body can return another such method's return, and a body has the
         // effects of each body it calls, so a file's inputs close over the files whose bodies it reads.
@@ -807,9 +811,8 @@ impl IncrementalAnalysisService {
         let mut counts: Vec<usize> = first.input_paths.values().map(Vec::len).collect();
         counts.sort_unstable();
         tracing::debug!(
-            "Found the inputs of {} PHP# files in {:?}: a median of {} inputs, and {} at most.",
+            "Found the inputs of {} PHP# files: a median of {} inputs, and {} at most.",
             counts.len(),
-            inputs_start.elapsed(),
             counts.get(counts.len() / 2).copied().unwrap_or_default(),
             counts.last().copied().unwrap_or_default(),
         );
@@ -843,11 +846,14 @@ impl IncrementalAnalysisService {
             });
             stamps.insert(path, input);
         }
+        inputs.end();
+        let write = Phase::start("write");
         let compiled = self.compiled(first, &files, &lowerings, &reads, &stamps, standard_library)?;
         let hosts = match hosts {
             Some(hosts) => Some(self.compiled(hosts, &files, &lowerings, &reads, &stamps, standard_library)?),
             None => None,
         };
+        write.end();
 
         Ok((compiled, hosts))
     }

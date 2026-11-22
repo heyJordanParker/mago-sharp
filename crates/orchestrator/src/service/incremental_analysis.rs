@@ -94,6 +94,7 @@ use crate::progress::ProgressBarTheme;
 use crate::progress::create_progress_bar;
 use crate::progress::remove_progress_bar;
 use crate::service::body_return::resolve_body_returns;
+use crate::service::phase::Phase;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::service::telemetry::HangWatcher;
 #[cfg(not(target_arch = "wasm32"))]
@@ -511,6 +512,7 @@ impl IncrementalAnalysisService {
         let selected = self.codebase_scan_plan.as_ref().map_or_else(Vec::new, |plan| {
             self.database.files().filter(|file| plan.selects(file)).map(|file| file.id).collect()
         });
+        let hosts = Phase::start("hosts");
         let answered: Vec<FileId> = match self.plugin_registry.create_external_analysis_session(self.database.files()) {
             Some(session) => {
                 let files: Vec<FileId> = requests.files().collect();
@@ -535,6 +537,7 @@ impl IncrementalAnalysisService {
             }
             None => Vec::new(),
         };
+        hosts.end();
         let again: Vec<FileId> = answered.into_iter().chain(selected).collect();
         for file_id in &again {
             if let Some(state) = self.file_states.get_mut(file_id) {
@@ -780,6 +783,7 @@ impl IncrementalAnalysisService {
     /// Returns [`OrchestratorError`] when source scanning, codebase population, or per-file
     /// analysis fails.
     pub fn analyze(&mut self) -> Result<AnalysisResult, OrchestratorError> {
+        let scan = Phase::start("scan");
         self.codebase_scan_plan = self
             .plugin_registry
             .external_codebase_scan_plan()
@@ -972,7 +976,9 @@ impl IncrementalAnalysisService {
             per_file_results.iter_mut().map(|(file, _, metadata, _, _)| (file.id, metadata)),
         )
         .map_err(mago_analyzer::error::AnalysisError::from)?;
+        scan.end();
 
+        let populate = Phase::start("populate");
         let staged: Vec<(FileId, u64, CodebaseEntryKeys)> = per_file_results
             .into_iter()
             .map(|(file, content_hash, metadata, _, _)| {
@@ -1008,6 +1014,7 @@ impl IncrementalAnalysisService {
             );
         }
         self.declare_body_returns(&mut merged_codebase, |_| true, &HashSet::default());
+        populate.end();
 
         let SelectiveAnalysisOutput {
             result: mut analysis_result,
@@ -1103,6 +1110,7 @@ impl IncrementalAnalysisService {
                 "analyze() must be called before analyze_incremental()".to_string(),
             ));
         }
+        let scan_phase = Phase::start("scan");
         // What the last analysis gave the lowering holds for the files it saw, and this one may change any of them.
         for state in self.file_states.values_mut() {
             state.lowering_input = None;
@@ -1205,6 +1213,7 @@ impl IncrementalAnalysisService {
         }
 
         if changed_files.is_empty() && deleted_count == 0 {
+            scan_phase.end();
             tracing::debug!("No files changed, reconstructing cached issues");
             let mut result = AnalysisResult::new(SymbolReferences::new());
             result.issues = self.collect_all_issues();
@@ -1354,6 +1363,8 @@ impl IncrementalAnalysisService {
             apply_refinements(refinements, new_file_scans.iter_mut().map(|(file_id, metadata)| (*file_id, metadata)))
                 .map_err(mago_analyzer::error::AnalysisError::from)?;
         }
+        scan_phase.end();
+        let populate = Phase::start("populate");
 
         let mut diff = {
             let mut diff = CodebaseDiff::new();
@@ -1624,6 +1635,7 @@ impl IncrementalAnalysisService {
                 declared,
             );
             self.declare_body_returns(&mut merged_codebase, |_| true, &files_to_skip);
+            populate.end();
             let SelectiveAnalysisOutput {
                 result: mut analysis_result,
                 native_symbol_references,
@@ -1907,6 +1919,7 @@ impl IncrementalAnalysisService {
         }
         let scanned: HashSet<FileId> = new_file_scans.iter().map(|(file_id, _)| *file_id).collect();
         self.declare_body_returns(&mut merged_codebase, |file_id| scanned.contains(file_id), &files_to_skip);
+        populate.end();
 
         let SelectiveAnalysisOutput {
             result: mut analysis_result,
@@ -2276,6 +2289,7 @@ impl IncrementalAnalysisService {
         #[cfg(not(target_arch = "wasm32"))]
         const ANALYSIS_DURATION_THRESHOLD: Duration = Duration::from_secs(5);
 
+        let analysis = Phase::start("analysis");
         let plugin_registry = &self.plugin_registry;
         #[cfg(not(target_arch = "wasm32"))]
         let trace_enabled = tracing::enabled!(tracing::Level::TRACE);
@@ -2727,6 +2741,7 @@ impl IncrementalAnalysisService {
         for (file_id, reads) in files {
             reads_by_file.entry(file_id).or_default().extension = reads;
         }
+        analysis.end();
 
         Ok(SelectiveAnalysisOutput {
             result: aggregated_result,

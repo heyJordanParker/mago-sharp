@@ -63,6 +63,7 @@ use mago_database::watcher::WatchOptions;
 use mago_database::watcher::start_watcher;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::service::incremental_analysis::Scans;
+use mago_orchestrator::service::phase::Phase;
 use mago_prelude::Prelude;
 use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::Issue;
@@ -360,6 +361,7 @@ impl AnalyzeCommand {
                     _ => (None, Scans::default()),
                 };
 
+                let load = Phase::start("load");
                 let (prelude_database, database) = rayon::join(
                     || {
                         let start = trace_enabled.then(Instant::now);
@@ -386,6 +388,7 @@ impl AnalyzeCommand {
                 substitute(&substitutions, &mut database, workspace)?;
                 database.merge_base(prelude_database);
                 load_inputs_duration = load_inputs_start.map(|s| s.elapsed());
+                load.end();
 
                 if !database.files().any(|f| f.file_type == FileType::Host) {
                     tracing::warn!("No files found to analyze.");
@@ -406,6 +409,7 @@ impl AnalyzeCommand {
                 (server, issues)
             }
         };
+        let report = Phase::start("report");
         issues.extend(server.law_refusals()?);
         // Each issue that refused a file of the compile and that the analysis did not report, as a law left unproven.
         let refused: Vec<Issue> = match &compiled {
@@ -416,7 +420,6 @@ impl AnalyzeCommand {
         };
         issues.extend(refused);
         let service_run_duration = service_run_start.map(|s| s.elapsed());
-        let report_start = trace_enabled.then(Instant::now);
         let ignore_set = self.compile_ignore_set(&configuration);
         let database = server.database_mut();
 
@@ -442,7 +445,7 @@ impl AnalyzeCommand {
             exit_code = ExitCode::FAILURE;
         }
         let outcome = CommandOutcome::with_changes(exit_code, database, changed_file_ids.iter().copied())?;
-        let report_duration = report_start.map(|s| s.elapsed());
+        report.end();
 
         if self.staged && !changed_file_ids.is_empty() {
             git::stage_files(&configuration.source.workspace, database, changed_file_ids)?;
@@ -462,7 +465,6 @@ impl AnalyzeCommand {
             tracing::trace!("Database loaded in {:?} (concurrent task).", load_database_duration.unwrap_or_default());
             tracing::trace!("Prelude and database loaded in {:?}.", load_inputs_duration.unwrap_or_default());
             tracing::trace!("Analysis server ran in {:?}.", service_run_duration.unwrap_or_default());
-            tracing::trace!("Issues filtered and reported in {:?}.", report_duration.unwrap_or_default());
             tracing::trace!("Server dropped in {:?}.", drop_server_duration.unwrap_or_default());
             tracing::trace!("Orchestrator dropped in {:?}.", drop_orchestrator_duration.unwrap_or_default());
             tracing::trace!("Analyze command finished in {:?}.", start.elapsed());

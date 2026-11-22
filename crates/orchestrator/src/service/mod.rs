@@ -37,6 +37,7 @@ pub mod format;
 pub mod guard;
 pub mod incremental_analysis;
 pub mod lint;
+pub mod phase;
 
 use mago_database::file::File;
 use mago_syntax::dialect::Dialect;

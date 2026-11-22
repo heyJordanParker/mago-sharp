@@ -72,6 +72,7 @@ use mago_orchestrator::service::incremental_analysis::compile::Family;
 use mago_orchestrator::service::incremental_analysis::compile::Folder;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_orchestrator::service::incremental_analysis::compile::RecordedModule;
+use mago_orchestrator::service::phase::Phase;
 use mago_prelude::Prelude;
 use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::IssueCollection;
@@ -215,7 +216,14 @@ pub(crate) fn compile_for_hosts(
     configuration: &Configuration,
 ) -> Result<(BTreeMap<String, ExtensionHostConfiguration>, HostsChange), Error> {
     let mut hosts = HostsCompile::new(configuration)?;
-    let compiled = if hosts.enabled { silenced(|| hosts.compile_whole(false))? } else { HostsChange::Unchanged };
+    let compiled = if hosts.enabled {
+        let phase = Phase::start("hosts");
+        let compiled = silenced(|| hosts.compile_whole(false))?;
+        phase.end();
+        compiled
+    } else {
+        HostsChange::Unchanged
+    };
 
     Ok((hosts.extension_hosts, compiled))
 }
@@ -1227,6 +1235,7 @@ fn compiled(
     // A warning or an error the compile doesn't print in its outcome is printed again by the next compile, which a
     // record would skip. The walk below logs its own.
     let warnings = logger::warnings();
+    let load = Phase::start("load");
     // The one walk of the project: the record's source files come from it, and the load reads the files it lists.
     let mut listing = orchestrator.list_database(workspace)?;
     let mut sources = source_files(&root, &listing, &mut filesystems, autoloader.as_deref());
@@ -1311,6 +1320,7 @@ fn compiled(
     let database = orchestrator.load_listed(workspace, &listing)?.into_static();
     let loaded_files = (keeping == Keeping::Files).then(|| database.clone());
     let (database, included) = with_packages(database);
+    load.end();
 
     let mut errors = Vec::new();
     let library = match standard_library(&root, &database) {
@@ -1419,6 +1429,7 @@ fn compiled(
     }
     drop(hosts_files);
     let ((compilations, compiled_files), hosts_compiled) = compilations?;
+    let write_phase = Phase::start("write");
     let database = server.database();
     let mut stamped = in_path_order(stamped);
     let hosts_stamped = hosts.as_ref().map(|_| stamped.clone());
@@ -1590,6 +1601,7 @@ fn compiled(
         )?;
     }
     let (outcome, database) = finish(record, &record_path, outcome, database, stamped.into_iter().chain(listed))?;
+    write_phase.end();
     drop(writing);
     if let Some((hosts, lock, held, exclusive)) = held {
         hosts.hold(lock, held, exclusive, None)?;

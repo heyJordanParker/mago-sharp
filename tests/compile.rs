@@ -2061,6 +2061,62 @@ fn a_whole_analyze_with_a_return_type_host_reports_what_an_analysis_of_every_fil
     }
 }
 
+/// With `MAGO_LOG=debug`, a whole `mago analyze` with a host logs how long each phase of its compile and its report took,
+/// as "Phase scan took 0.12 s.", from the inputs it finds to the report it prints, a `mago compile` logs the compile of
+/// the hosts' folder that runs before it as `hosts`, and at the default level neither logs a phase.
+#[test]
+fn analyze_logs_each_phase_s_time_at_the_debug_level() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the phase times test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "tools/host.php", BOX_HOST);
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.boxes]\nfile = \"tools/host.php\"\n",
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let analyze = |level: &str| {
+        process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", "analyze"])
+                .env("MAGO_LOG", level)
+                .env("XDG_CACHE_HOME", cache.path())
+                .current_dir(root),
+        )
+        .unwrap()
+    };
+
+    let debug = analyze("debug");
+
+    assert!(debug.status.success(), "{}", printed(&debug));
+    let log = printed(&debug);
+    for phase in ["inputs", "load", "scan", "populate", "analysis", "lowering", "laws", "write", "hosts", "report"] {
+        let prefix = format!("Phase {phase} took ");
+        let took =
+            log.lines().filter_map(|line| line.split_once(&prefix)?.1.strip_suffix(" s.")?.parse::<f64>().ok()).count();
+        assert!(took > 0, "no `Phase {phase} took … s.` line: {log}");
+    }
+    let compile = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "compile"])
+            .env("MAGO_LOG", "debug")
+            .env("XDG_CACHE_HOME", cache.path())
+            .current_dir(root),
+    )
+    .unwrap();
+    assert!(compile.status.success(), "{}", printed(&compile));
+    assert!(printed(&compile).contains("Phase hosts took "), "the hosts' compile logs its time: {}", printed(&compile));
+
+    let info = analyze("info");
+
+    assert!(info.status.success(), "{}", printed(&info));
+    assert!(!printed(&info).contains("Phase "), "{}", printed(&info));
+}
+
 /// An extension host that declares the class `Stubbed` in a stub, whose `name()` returns a string.
 const STUB_HOST: &str = r#"<?php
 
