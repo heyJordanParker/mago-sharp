@@ -4469,70 +4469,90 @@ fn check_interface_method_signatures<'ctx, A>(
 
         let declaring_class = context.codebase.get_class_like(interface_fqcn_str).unwrap_or(interface_metadata);
         let method_span = class_method.name_span.unwrap_or(class_method.span);
-        if report_named_constructor_clash(
+        // PHP links a method a plain PHP trait gives the class as the class's own, so its mismatch is the class's,
+        // reported at its name with the trait's method beside it.
+        let trait_name = context
+            .codebase
+            .get_class_like(class_fqcn_word)
+            .filter(|declarer| declarer.kind.is_trait())
+            .map(|declarer| display_class_like_name(context, declarer.original_name));
+        let primary_span = if trait_name.is_some() {
+            class_like_metadata.name_span.unwrap_or(class_like_metadata.span)
+        } else {
+            method_span
+        };
+
+        context.collector.start_recording();
+        if !report_named_constructor_clash(
             context,
             class_like_metadata,
             class_method,
             declaring_class,
             interface_method,
-            method_span,
+            primary_span,
         ) {
-            continue;
-        }
+            let substituted_interface_method = get_substituted_method(
+                interface_method,
+                class_like_metadata,
+                interface_method_id.get_class_name(),
+                context.codebase,
+                context.dialect,
+            );
 
-        let substituted_interface_method = get_substituted_method(
-            interface_method,
-            class_like_metadata,
-            interface_method_id.get_class_name(),
-            context.codebase,
-            context.dialect,
-        );
-
-        let substituted_class_method = get_substituted_method(
-            class_method,
-            class_like_metadata,
-            class_method_id.get_class_name(),
-            context.codebase,
-            context.dialect,
-        );
-
-        let mut issues = method_signature::validate_method_signature_compatibility(
-            context.codebase,
-            class_like_metadata.name,
-            &substituted_class_method,
-            interface_method_id.get_class_name(),
-            &substituted_interface_method,
-            context.dialect,
-        );
-        method_signature::validate_erased_signature_compatibility(
-            context.codebase,
-            class_like_metadata,
-            declaring_class,
-            class_method,
-            interface_method,
-            &mut issues,
-        );
-
-        for incompatibility in issues {
-            if widens_parameter(
-                artifacts,
+            let substituted_class_method = get_substituted_method(
+                class_method,
                 class_like_metadata,
                 class_method_id.get_class_name(),
-                class_method,
-                &incompatibility,
-            ) {
-                continue;
-            }
-            report_signature_compatibility_issue(
-                context,
+                context.codebase,
+                context.dialect,
+            );
+
+            let mut issues = method_signature::validate_method_signature_compatibility(
+                context.codebase,
+                class_like_metadata.name,
+                &substituted_class_method,
+                interface_method_id.get_class_name(),
+                &substituted_interface_method,
+                context.dialect,
+            );
+            method_signature::validate_erased_signature_compatibility(
+                context.codebase,
                 class_like_metadata,
                 declaring_class,
-                *method_name_atom,
                 class_method,
-                incompatibility,
-                method_span,
+                interface_method,
+                &mut issues,
             );
+
+            for incompatibility in issues {
+                if widens_parameter(
+                    artifacts,
+                    class_like_metadata,
+                    class_method_id.get_class_name(),
+                    class_method,
+                    &incompatibility,
+                ) {
+                    continue;
+                }
+                report_signature_compatibility_issue(
+                    context,
+                    class_like_metadata,
+                    declaring_class,
+                    *method_name_atom,
+                    class_method,
+                    incompatibility,
+                    primary_span,
+                );
+            }
         }
+
+        let issues = context.collector.finish_recording().unwrap_or_default();
+        context.collector.extend(issues.into_iter().map(|issue| match trait_name {
+            Some(trait_name) => issue.with_annotation(
+                Annotation::secondary(method_span).with_message(format!("Declared in `{trait_name}` here.")),
+            ),
+            None => issue,
+        }));
     }
 }
 
@@ -6162,8 +6182,8 @@ where
 /// as the engine refuses the class: it is public, on each object, and of the stated type or a narrower one for a
 /// get-only property. Every interface property is virtual, so its hooks alone say whether it is get-only. The stated
 /// type reads a generic interface's type parameters as the type arguments the class's header gives it, as `TItem` is
-/// `int` under `: Holder<int>`. A property the class inherits is reported on the class's name, naming the base class to
-/// change.
+/// `int` under `: Holder<int>`. A property the class inherits, or takes from a plain PHP trait, is reported on the
+/// class's name, naming the base class or the trait to change.
 fn report_unfit_interface_property<A>(
     context: &mut Context<'_, '_, A>,
     class_like_metadata: &ClassLikeMetadata,
@@ -6179,12 +6199,18 @@ fn report_unfit_interface_property<A>(
     let property_name = display_property_name(context, property.name.0);
     let property_span = property.name_span.unwrap_or(owner.span);
     let stated_span = stated.name_span.unwrap_or(interface.span);
-    let (from, place) = if owner.name == class_like_metadata.name {
+    let declarer = owner
+        .declaring_property_ids
+        .get(&property.name.0)
+        .and_then(|declarer| context.codebase.get_class_like(*declarer))
+        .filter(|declarer| declarer.kind.is_trait())
+        .unwrap_or(owner);
+    let (from, place) = if declarer.name == class_like_metadata.name {
         (String::new(), String::new())
     } else {
-        let owner_name = display_class_like_name(context, owner.original_name);
+        let declarer_name = display_class_like_name(context, declarer.original_name);
 
-        (format!(", from `{owner_name}`"), format!(" in `{owner_name}`"))
+        (format!(", from `{declarer_name}`"), format!(" in `{declarer_name}`"))
     };
     let report = |context: &mut Context<'_, '_, A>, code: IssueCode, given: String, stated: String, help: String| {
         let issue = Issue::error(format!(

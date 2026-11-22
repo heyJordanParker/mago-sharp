@@ -126,8 +126,9 @@ pub(crate) fn check_extern_property<A>(
 
 /// Refuses each property `class` declares with storage that code outside it reaches, where a plain PHP parent defines
 /// `__get` and `__set`, spec section 14.3: the parent stores every other property through them, as Eloquent's `Model`
-/// saves a column, so this one would stay in memory and never be saved. A private one is the class's own, and one the
-/// parent declares, as Eloquent's `table`, is the parent's.
+/// saves a column, so this one would stay in memory and never be saved. A private one is the class's own, one the
+/// parent declares, as Eloquent's `table`, is the parent's, and one a plain PHP trait gives the class, as Eloquent's
+/// `SoftDeletes` gives `forceDeleting`, is the trait's.
 pub(crate) fn check_property_a_magic_parent_stores<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
 where
     A: Arena,
@@ -148,7 +149,8 @@ where
     let parent_class = class.direct_parent_class;
 
     for (name, property) in &class.properties {
-        if property.flags.is_static()
+        if class.declaring_property_ids.get(name) != Some(&class.name)
+            || property.flags.is_static()
             || property.flags.is_virtual_property()
             || property.read_visibility == Visibility::Private
             || parent_class.is_some_and(|parent_class| context.codebase.property_exists(parent_class, *name))

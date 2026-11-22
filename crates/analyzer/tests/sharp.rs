@@ -7813,6 +7813,27 @@ fn a_property_a_plain_php_parent_stores_is_reached_through_an_extern_property() 
     );
 }
 
+/// Spec section 14.3: the parent stores the properties a PHP# class declares, so a stored property a plain PHP trait
+/// gives the class, as Eloquent's `SoftDeletes` gives `forceDeleting`, is the trait's own field, and nothing reports it
+/// in the vendor file the project can't change. The class's own stored property beside it is refused at its line.
+#[test]
+fn a_stored_property_a_plain_php_trait_gives_a_model_is_the_traits_own() {
+    let model = "<?php\n\nnamespace Acme\\Orm;\n\nabstract class Model\n{\n    public function __get(string $key): mixed\n    {\n        return null;\n    }\n\n    public function __set(string $key, mixed $value): void\n    {\n    }\n}\n";
+    let soft_deletes =
+        "<?php\n\nnamespace Acme\\Orm;\n\ntrait SoftDeletes\n{\n    protected $forceDeleting = false;\n}\n";
+    let repro = "namespace App;\n\nimport Acme.Orm.Model;\nimport Acme.Orm.SoftDeletes;\n\npublic class Repro : Model, SoftDeletes\n{\n}\n";
+    let counted = "namespace App;\n\nimport Acme.Orm.Model;\nimport Acme.Orm.SoftDeletes;\n\npublic class Counted : Model, SoftDeletes\n{\n    protected int count = 0;\n}\n";
+    let library = [("vendor/acme/orm/src/Model.php", model), ("vendor/acme/orm/src/SoftDeletes.php", soft_deletes)];
+
+    assert_eq!(refusals(("app/Repro.sharp", repro), &library), Vec::<String>::new());
+    assert_eq!(
+        refusals(("app/Counted.sharp", counted), &library),
+        [
+            "8:19 incompatible-property-visibility `Counted`'s parent `Model` stores properties through `__get` and `__set`, so a protected `count` would never be saved. | Write `public extern int count { get; set; }`, or make it private to keep it in memory."
+        ]
+    );
+}
+
 /// Spec section 14.3 with section 12: a method value holds the collection as it was when the value was made, so a
 /// method that changes the collection would change only that copy. As in Swift, which refuses a value of a `mutating`
 /// method, it is refused, with the lambda that changes the collection itself.
@@ -34265,6 +34286,46 @@ fn an_event_or_a_class_gives_every_property_its_interfaces_state() {
         worded(get_only_struct, &[settable_interface]),
         [
             "5:29 incompatible-property-access `Stock` cannot give `total`, which `Settable` states with `set`: a struct never changes. | Given here. | Stated here."
+        ]
+    );
+}
+
+/// A member a plain PHP trait gives a PHP# class is the class's own when PHP links it, so one narrower than an interface
+/// above the class states, a trait's `protected $label` for `label { get; }` or its `protected function greet()` for
+/// `greet()`, is refused at the class's name, naming the trait, in the file the compile checks, and not in the vendor
+/// file of the trait.
+#[test]
+fn an_interface_member_a_trait_gives_too_narrowly_is_refused_at_the_class() {
+    let labelled =
+        ("app/Labelled.sharp", "namespace App;\n\npublic interface Labelled\n{\n    string label { get; }\n}\n");
+    let has_label = (
+        "vendor/acme/tags/src/HasLabel.php",
+        "<?php\n\nnamespace Acme\\Tags;\n\ntrait HasLabel\n{\n    protected $label = 'x';\n}\n",
+    );
+    let tagged = (
+        "app/Tagged.sharp",
+        "namespace App;\n\nimport Acme.Tags.HasLabel;\n\npublic class Tagged : Labelled, HasLabel\n{\n}\n",
+    );
+    let greets = ("app/Greets.sharp", "namespace App;\n\npublic interface Greets\n{\n    string greet();\n}\n");
+    let greeting = (
+        "vendor/acme/tags/src/Greeting.php",
+        "<?php\n\nnamespace Acme\\Tags;\n\ntrait Greeting\n{\n    protected function greet(): string\n    {\n        return 'hi';\n    }\n}\n",
+    );
+    let greeter = (
+        "app/Greeter.sharp",
+        "namespace App;\n\nimport Acme.Tags.Greeting;\n\npublic class Greeter : Greets, Greeting\n{\n}\n",
+    );
+
+    assert_eq!(
+        worded(tagged, &[labelled, has_label]),
+        [
+            "5:14 incompatible-property-access `Tagged` gives `label` as `protected`, from `HasLabel`, and `Labelled` states it `public`. | Inherited here. | Declared here. | Stated here. | Declare `label` `public` in `HasLabel`."
+        ]
+    );
+    assert_eq!(
+        worded(greeter, &[greets, greeting]),
+        [
+            "5:14 incompatible-visibility Visibility of `Greeter.greet` must not be narrowed from public to protected | Method declared as protected but should be public or wider | Parent method `Greets.greet` is declared as public here | In class `Greeter` | Declared in `Greeting` here. | Visibility can only be widened (e.g., protected → public) not narrowed. | Change the visibility to public or wider."
         ]
     );
 }
