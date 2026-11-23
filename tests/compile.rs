@@ -607,7 +607,8 @@ fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
 }
 
 /// An extension host whose file constructs the standard library's `SystemFiles` as it loads, through an autoloader that
-/// maps `Sharp\` to the installed library, as a host that builds the project's services at its start does.
+/// maps `Sharp\` to the installed library and `App\` to `app/`, as a host that builds the project's services at its
+/// start does.
 const HOST_CONSTRUCTING_SYSTEM_FILES: &str = r#"<?php
 
 declare(strict_types=1);
@@ -616,9 +617,11 @@ use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
 spl_autoload_register(static function (string $class): void {
-    $file = dirname(__DIR__) . '/vendor/heyjordanparker/php-sharp-composer/library/' . str_replace('\\', '/', $class) . '.sharp';
-    if (is_file($file)) {
-        require $file;
+    $folders = ['Sharp\\' => '/vendor/heyjordanparker/php-sharp-composer/library/Sharp/', 'App\\' => '/app/'];
+    foreach ($folders as $prefix => $folder) {
+        if (str_starts_with($class, $prefix)) {
+            require dirname(__DIR__) . $folder . str_replace('\\', '/', substr($class, strlen($prefix))) . '.sharp';
+        }
     }
 });
 
@@ -695,6 +698,34 @@ fn a_host_that_constructs_a_standard_library_class_starts_on_a_clean_tree_and_th
     compile_succeeds(root);
 
     assert_eq!(written_at(), written, "the compile wrote nothing");
+}
+
+/// The refusal of a project class a host's file constructs as it loads, before the compile wrote it for the hosts.
+const NOT_COMPILED_FOR_THE_HOSTS: &str = "app/Order.sharp isn't compiled for the extension hosts yet: a host's file runs \
+    as its worker starts, before mago compiles the project's own files, so there it can construct only the PHP# \
+    library's classes. Construct it in a hook instead.";
+
+/// A host's file that constructs a class of the project as it loads, on a clean tree, runs before the compile wrote
+/// that class for the hosts, so it can't load, and the refusal says why and what to do instead of naming the command
+/// that just failed. The run still writes both folders, so the next run loads the host with no other step.
+#[test]
+fn a_host_that_constructs_a_project_class_as_it_loads_fails_once_naming_why_and_loads_on_the_next_run() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the host compile test") {
+        return;
+    }
+    let directory = project_with_a_host_constructing_system_files();
+    let root = directory.path();
+    let host = HOST_CONSTRUCTING_SYSTEM_FILES.replace("new Sharp\\IO\\SystemFiles();\n", "new App\\Order();\n");
+    write(root, "tools/host.php", &host);
+
+    let failed = compile(root);
+
+    assert!(!failed.status.success(), "{}", printed(&failed));
+    assert!(printed(&failed).contains(NOT_COMPILED_FOR_THE_HOSTS), "{}", printed(&failed));
+    assert!(!printed(&failed).contains("Run vendor/bin/mago compile"), "{}", printed(&failed));
+    assert!(compiled(root, "app/Order.sharp").is_file(), "the failed run wrote the .sharp folder");
+    compile_succeeds(root);
 }
 
 /// `mago analyze` compiles the project's `.sharp` folder and the hosts' folder from one analysis without the hosts and

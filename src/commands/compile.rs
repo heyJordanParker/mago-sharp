@@ -1581,10 +1581,14 @@ fn compiled(
     }
 
     // The run takes this analysis over with the hosts, so the analysis records what it would ask them, unless they
-    // reach every file, which the run then analyzes from scratch from this analysis's scans.
-    let records = match started.as_ref().filter(|_| keeping == Keeping::Hosted) {
-        Some(started) => orchestrator.record_return_type_requests(Arc::clone(started)).map_err(AnalysisError::from)?,
-        None => false,
+    // reach every file, which the run then analyzes from scratch from this analysis's scans. A host that fails to load
+    // fails the run once the compile wrote both folders without the hosts, so the next run starts from them.
+    let (records, unloaded) = match started.as_ref().filter(|_| keeping == Keeping::Hosted) {
+        Some(started) => match orchestrator.record_return_type_requests(Arc::clone(started)) {
+            Ok(records) => (records, None),
+            Err(error) => (false, Some(AnalysisError::from(error))),
+        },
+        None => (false, None),
     };
     let package_files = package_files(&database, &included);
     let reports = matches!(keeping, Keeping::Analysis | Keeping::Hosted)
@@ -1840,6 +1844,9 @@ fn compiled(
         Some(files) => Loaded::Files(Box::new(files), server.take_scans()),
         None => Loaded::Nothing,
     };
+    if let Some(error) = unloaded {
+        return Err(error.into());
+    }
 
     Ok((outcome, database, loaded, started))
 }
