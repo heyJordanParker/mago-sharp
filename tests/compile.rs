@@ -1632,56 +1632,38 @@ fn a_watch_reports_the_vendor_files_the_autoload_maps_served_through_deletes_cre
     let once = || String::from_utf8_lossy(&process::output(&mut analyze(false)).unwrap().stdout).into_owned();
 
     let reports = tempfile::NamedTempFile::new().unwrap();
-    let watch_log = tempfile::NamedTempFile::new().unwrap();
-    let mut watch =
-        process::spawn(analyze(true).stdout(reports.reopen().unwrap()).stderr(watch_log.reopen().unwrap())).unwrap();
-    let seen = || std::fs::read_to_string(watch_log.path()).unwrap();
+    let mut watch = Watch::start(analyze(true).stdout(reports.reopen().unwrap()));
     let reported = || std::fs::read_to_string(reports.path()).unwrap();
-    let within = |done: &dyn Fn() -> bool| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while !done() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        done()
-    };
-    let started = within(&|| seen().contains("Initial analysis complete") || seen().contains("ERROR"));
-    let mut rounds: Vec<(&str, bool, String, String)> = Vec::new();
+    let started = watch.until(|seen| seen.contains("Initial analysis complete") || seen.contains("ERROR"));
+    let mut rounds: Vec<(&str, bool, String)> = Vec::new();
     let changes: [(&str, &dyn Fn()); 4] = [
         ("delete app/Extra.php", &|| std::fs::remove_file(root.join("app/Extra.php")).unwrap()),
         ("create app/Added.php", &|| write(root, "app/Added.php", &calling("added", 7))),
         ("rename app/Added.php", &|| std::fs::rename(root.join("app/Added.php"), root.join("app/Moved.php")).unwrap()),
         ("edit app/Order.php", &|| write(root, "app/Order.php", &calling("total", 6))),
     ];
-    let completed = || seen().matches("Analysis complete.").count();
+    let completed = |seen: &str| seen.matches("Analysis complete.").count();
     for (change, apply) in changes {
-        let (before, rounds_before) = (reported().len(), completed());
+        let (before, rounds_before) = (reported().len(), completed(&watch.log()));
         apply();
-        let done = within(&|| completed() > rounds_before || seen().contains("ERROR"));
-        // A change can reach the watch in two batches, as a rename's delete and create, each a round of its own.
-        let mut settled = completed();
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let now = completed();
-            if now == settled {
-                break;
-            }
-            settled = now;
-        }
-        let running = watch.try_wait().unwrap().is_none();
-        rounds.push((change, done && running && !seen().contains("ERROR"), reported().split_off(before), once()));
+        // A change can reach the watch in two batches, as a rename's delete and create, each a round of its own, so
+        // the watch is done with it at the round that reports what the one-shot command reports on the changed tree.
+        let cold = once();
+        let caught_up = watch.until(|seen| {
+            seen.contains("ERROR") || (completed(seen) > rounds_before && reported()[before..].ends_with(&cold))
+        });
+        let kept_watching = caught_up && watch.running() && !watch.log().contains("ERROR");
+        rounds.push((change, kept_watching, reported().split_off(before)));
     }
-    watch.kill().unwrap();
-    watch.wait().unwrap();
+    let failure = format!("{}{}", reported(), watch.stop());
 
-    let failure = format!("{}{}", reported(), seen());
     assert!(started, "{failure}");
-    for (change, kept_watching, report, cold) in rounds {
-        assert!(kept_watching, "the watch kept watching after `{change}`: {failure}");
-        assert!(report.contains("vendor/acme/rate/src/Rate.php"), "after `{change}`: {failure}");
+    for (change, kept_watching, report) in rounds {
         assert!(
-            report.ends_with(&cold),
-            "after `{change}` the watch reports what the one-shot command reports: {failure}"
+            kept_watching,
+            "after `{change}` the watch kept watching and reported what the one-shot command reports: {failure}"
         );
+        assert!(report.contains("vendor/acme/rate/src/Rate.php"), "after `{change}`: {failure}");
     }
 }
 
@@ -1993,10 +1975,17 @@ fn analyze_logs_each_phase_s_time_at_the_debug_level() {
     assert!(named.status.success(), "{}", printed(&named));
     assert!(printed(&named).contains("Phase hosts took "), "the hosts' compile logs its time: {}", printed(&named));
 
-    let info = analyze("info");
+    let default = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze"])
+            .env_remove("MAGO_LOG")
+            .env("XDG_CACHE_HOME", cache.path())
+            .current_dir(root),
+    )
+    .unwrap();
 
-    assert!(info.status.success(), "{}", printed(&info));
-    assert!(!printed(&info).contains("Phase "), "{}", printed(&info));
+    assert!(default.status.success(), "{}", printed(&default));
+    assert!(!printed(&default).contains("Phase "), "{}", printed(&default));
 }
 
 /// An extension host that declares the class `Stubbed` in a stub, whose `name()` returns a string.

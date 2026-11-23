@@ -22,6 +22,10 @@ use mago_extension::Host;
 use mago_extension::HostFile;
 use mago_extension::Hosts;
 
+/// The deadline of a host whose test checks no deadline: a day, longer than any CI job runs, so a loaded machine never
+/// reaches it, where `Duration::MAX` would overflow the engine's clock.
+pub const NO_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// A `mago analyze --watch` that a test reads the log of as the watch writes it, so the test waits for the watch's own
 /// events and never for wall time. Dropping it kills the watch.
 pub struct Watch {

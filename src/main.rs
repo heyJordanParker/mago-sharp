@@ -198,11 +198,7 @@ pub fn run(main_start: Instant) -> Result<ExitCode, Error> {
     configure_colors(arguments.colors);
 
     let logger_start = Instant::now();
-    initialize_logger(
-        if cfg!(debug_assertions) { LevelFilter::DEBUG } else { LevelFilter::INFO },
-        "MAGO_LOG",
-        arguments.colors,
-    );
+    initialize_logger(LevelFilter::INFO, "MAGO_LOG", arguments.colors);
     let logger_duration = logger_start.elapsed();
 
     // From here on `enabled!(Level::TRACE)` reflects the real subscriber.

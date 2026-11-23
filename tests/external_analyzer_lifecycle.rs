@@ -230,7 +230,7 @@ fn external_analyzer_lifecycle_is_exact_across_workers_and_incremental_runs() {
 
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-lifecycle-worker.php"),
-        Duration::from_secs(30),
+        common::NO_DEADLINE,
         &[("MAGO_LIFECYCLE_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
     );
     let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)
