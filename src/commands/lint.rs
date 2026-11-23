@@ -266,10 +266,11 @@ impl LintCommand {
         let extension_hosts = &extension_hosts;
         let extension_host_enabled = extension_hosts.values().any(|host| host.enabled);
         let php_version = configuration.php_version;
+        let environment = &configuration.environment;
         let (mut database, external_linter) = std::thread::scope(|scope| -> Result<_, Error> {
             let external_linter = extension_host_enabled.then(|| {
                 scope.spawn(move || {
-                    initialize_external_linter(extension_hosts, php_version)
+                    initialize_external_linter(extension_hosts, php_version, environment)
                         .map_err(mago_orchestrator::OrchestratorError::from)
                 })
             });

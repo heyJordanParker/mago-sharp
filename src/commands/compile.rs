@@ -326,7 +326,7 @@ impl HostsCompile {
         let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.clone(), error))?;
         let project: String =
             unit::source_hash(root.as_os_str().as_encoded_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
-        let folder = mago_sharp_lean::cache_root()
+        let folder = mago_sharp_lean::cache_root(&configuration.environment)
             .map_err(|error| OrchestratorError::General(error.to_string()))?
             .join("hosts")
             .join(project);
@@ -1318,6 +1318,7 @@ pub(crate) fn compile_with_hosts(
         configuration.php_version,
         &configuration.analyzer.plugins,
         configuration.analyzer.disable_default_plugins,
+        &configuration.environment,
     );
     let mut without_hosts = configuration.clone();
     without_hosts.extension_hosts.clear();
@@ -1489,7 +1490,7 @@ fn compiled(
     let requests = orchestrator.get_analyzer_plugin_registry().take_return_type_requests();
     let hidden = Hidden::new(configuration)?;
     let read_database = server.database().read_only();
-    let lean = Lean::new(&root, configuration.threads);
+    let lean = Lean::new(&root, configuration.threads, &configuration.environment);
     let stamped = Mutex::new(Vec::new());
     let compiled_files_path = compiled_folder.join(COMPILED_FILES);
     let last = CompiledFiles::decode(
@@ -2756,6 +2757,7 @@ mod tests {
 
     use super::*;
     use crate::config::CliOverrides;
+    use crate::config::test_environment;
     use crate::version_check::VersionDriftFailLevel;
 
     fn write(root: &Path, name: &str, contents: &str) {
@@ -2785,12 +2787,15 @@ mod tests {
             "app/Paced.sharp",
             "namespace App;\n\nimport Acme.Rate;\n\npublic class Paced\n{\n    public int percent() => Rate.percent();\n}\n",
         );
-        let configuration = Configuration::load(CliOverrides {
-            workspace: Some(root.clone()),
-            config: Some(root.join("mago.toml")),
-            no_version_check: true,
-            ..Default::default()
-        })
+        let configuration = Configuration::load(
+            CliOverrides {
+                workspace: Some(root.clone()),
+                config: Some(root.join("mago.toml")),
+                no_version_check: true,
+                ..Default::default()
+            },
+            test_environment(),
+        )
         .unwrap();
 
         (directory, root, configuration)
@@ -2894,12 +2899,15 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
             "mago.toml",
             "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.boxes]\nfile = \"tools/host.php\"\n",
         );
-        let configuration = Configuration::load(CliOverrides {
-            workspace: Some(root.clone()),
-            config: Some(root.join("mago.toml")),
-            no_version_check: true,
-            ..Default::default()
-        })
+        let configuration = Configuration::load(
+            CliOverrides {
+                workspace: Some(root.clone()),
+                config: Some(root.join("mago.toml")),
+                no_version_check: true,
+                ..Default::default()
+            },
+            test_environment(),
+        )
         .unwrap();
 
         (directory, root, configuration)

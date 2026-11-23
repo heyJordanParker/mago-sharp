@@ -327,6 +327,7 @@ impl AnalyzeCommand {
                 configuration.php_version,
                 &configuration.analyzer.plugins,
                 configuration.analyzer.disable_default_plugins,
+                &configuration.environment,
             );
             (external_analyzer, None, Loaded::Nothing)
         } else {
@@ -547,6 +548,7 @@ impl AnalyzeCommand {
             configuration.php_version,
             &configuration.analyzer.plugins,
             configuration.analyzer.disable_default_plugins,
+            &configuration.environment,
         )
         .map_err(|error| mago_orchestrator::OrchestratorError::General(error.to_string()))?
         {
@@ -783,7 +785,7 @@ struct RestartWatcher {
 fn watch_and_reload(mut configuration: Configuration) -> Result<(RestartWatcher, Configuration), Error> {
     let mut restart_watcher = setup_restart_watcher(&configuration)?;
     loop {
-        let reloaded = match Configuration::load(configuration.cli_overrides.clone())
+        let reloaded = match Configuration::load(configuration.cli_overrides.clone(), configuration.environment.clone())
             .and_then(|reloaded| reloaded.check_versions().map(|()| reloaded))
         {
             Ok(reloaded) => reloaded,
@@ -927,6 +929,7 @@ mod tests {
 
     use super::*;
     use crate::config::CliOverrides;
+    use crate::config::Environment;
 
     /// A change to the configuration file made before its restart watcher is live, as one saved while `mago` starts,
     /// is in the configuration `watch_and_reload` returns, and the watcher it returns watches the baseline that the
@@ -937,12 +940,15 @@ mod tests {
         let root = directory.path().canonicalize().unwrap();
         let file = root.join("mago.toml");
         std::fs::write(&file, "php-version = \"8.4\"\n").unwrap();
-        let configuration = Configuration::load(CliOverrides {
-            workspace: Some(root.clone()),
-            config: Some(file.clone()),
-            no_version_check: true,
-            ..Default::default()
-        })
+        let configuration = Configuration::load(
+            CliOverrides {
+                workspace: Some(root.clone()),
+                config: Some(file.clone()),
+                no_version_check: true,
+                ..Default::default()
+            },
+            Environment::new(),
+        )
         .unwrap();
         std::fs::write(&file, "php-version = \"8.4\"\n\n[analyzer]\nbaseline = \"baseline.toml\"\n").unwrap();
 
@@ -966,8 +972,14 @@ mod tests {
             no_version_check: true,
             ..Default::default()
         };
-        assert!(Configuration::load(cli_overrides.clone()).unwrap().extension_hosts.contains_key("logger"));
-        let configuration = Configuration::load(CliOverrides { no_extensions: true, ..cli_overrides }).unwrap();
+        assert!(
+            Configuration::load(cli_overrides.clone(), Environment::new())
+                .unwrap()
+                .extension_hosts
+                .contains_key("logger")
+        );
+        let configuration =
+            Configuration::load(CliOverrides { no_extensions: true, ..cli_overrides }, Environment::new()).unwrap();
 
         let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
 
@@ -1008,24 +1020,24 @@ mod tests {
             ..Default::default()
         };
 
-        temp_env::with_vars([("MAGO_PHP_VERSION", None::<&str>), ("MAGO_THREADS", None)], || {
-            std::fs::write(&file, "php-version = \"8.3\"\nthreads = 2\n").unwrap();
-            let configuration = Configuration::load(cli_overrides.clone()).unwrap();
-            std::fs::write(&file, "php-version = \"8.5\"\nthreads = 3\n").unwrap();
+        std::fs::write(&file, "php-version = \"8.3\"\nthreads = 2\n").unwrap();
+        let configuration = Configuration::load(cli_overrides.clone(), Environment::new()).unwrap();
+        std::fs::write(&file, "php-version = \"8.5\"\nthreads = 3\n").unwrap();
 
-            let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+        let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
 
-            assert_eq!((configuration.php_version, configuration.threads), (PHPVersion::PHP85, 3));
+        assert_eq!((configuration.php_version, configuration.threads), (PHPVersion::PHP85, 3));
 
-            let configuration =
-                Configuration::load(CliOverrides { php_version: Some(PHPVersion::PHP83), ..cli_overrides.clone() })
-                    .unwrap();
-            std::fs::write(&file, "php-version = \"8.4\"\nthreads = 4\n").unwrap();
+        let configuration = Configuration::load(
+            CliOverrides { php_version: Some(PHPVersion::PHP83), ..cli_overrides.clone() },
+            Environment::new(),
+        )
+        .unwrap();
+        std::fs::write(&file, "php-version = \"8.4\"\nthreads = 4\n").unwrap();
 
-            let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+        let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
 
-            assert_eq!((configuration.php_version, configuration.threads), (PHPVersion::PHP83, 4));
-        });
+        assert_eq!((configuration.php_version, configuration.threads), (PHPVersion::PHP83, 4));
     }
 
     /// A watch session after a reload analyzes on the reloaded `threads`, which the global pool `mago` built at start
@@ -1036,21 +1048,22 @@ mod tests {
         let root = directory.path().canonicalize().unwrap();
         let file = root.join("mago.toml");
 
-        temp_env::with_var("MAGO_THREADS", None::<&str>, || {
-            std::fs::write(&file, "threads = 2\n").unwrap();
-            let configuration = Configuration::load(CliOverrides {
+        std::fs::write(&file, "threads = 2\n").unwrap();
+        let configuration = Configuration::load(
+            CliOverrides {
                 workspace: Some(root.clone()),
                 config: Some(file.clone()),
                 no_version_check: true,
                 ..Default::default()
-            })
-            .unwrap();
-            std::fs::write(&file, "threads = 3\n").unwrap();
+            },
+            Environment::new(),
+        )
+        .unwrap();
+        std::fs::write(&file, "threads = 3\n").unwrap();
 
-            let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+        let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
 
-            assert_eq!(session_thread_pool(&configuration).unwrap().install(rayon::current_num_threads), 3);
-        });
+        assert_eq!(session_thread_pool(&configuration).unwrap().install(rayon::current_num_threads), 3);
     }
 
     /// A reload to a PHP version a fresh start refuses keeps the previous configuration.
@@ -1060,21 +1073,22 @@ mod tests {
         let root = directory.path().canonicalize().unwrap();
         let file = root.join("mago.toml");
 
-        temp_env::with_vars([("MAGO_PHP_VERSION", None::<&str>), ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None)], || {
-            std::fs::write(&file, "php-version = \"8.3\"\n").unwrap();
-            let configuration = Configuration::load(CliOverrides {
+        std::fs::write(&file, "php-version = \"8.3\"\n").unwrap();
+        let configuration = Configuration::load(
+            CliOverrides {
                 workspace: Some(root.clone()),
                 config: Some(file.clone()),
                 no_version_check: true,
                 ..Default::default()
-            })
-            .unwrap();
-            std::fs::write(&file, "php-version = \"7.4\"\n").unwrap();
+            },
+            Environment::new(),
+        )
+        .unwrap();
+        std::fs::write(&file, "php-version = \"7.4\"\n").unwrap();
 
-            let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+        let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
 
-            assert_eq!(configuration.php_version, PHPVersion::PHP83);
-        });
+        assert_eq!(configuration.php_version, PHPVersion::PHP83);
     }
 
     /// A reload reads again the workspace, `allow-unsupported-php-version` and `no-version-check` the edited
@@ -1088,32 +1102,28 @@ mod tests {
             std::fs::create_dir(root.join(workspace)).unwrap();
         }
 
-        temp_env::with_vars(
-            [("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None::<&str>), ("MAGO_NO_VERSION_CHECK", None)],
-            || {
-                std::fs::write(
-                    &file,
-                    format!(
-                        "allow-unsupported-php-version = true\nno-version-check = true\n\n[source]\nworkspace = {:?}\n",
-                        root.join("first")
-                    ),
-                )
+        std::fs::write(
+            &file,
+            format!(
+                "allow-unsupported-php-version = true\nno-version-check = true\n\n[source]\nworkspace = {:?}\n",
+                root.join("first")
+            ),
+        )
+        .unwrap();
+        let configuration =
+            Configuration::load(CliOverrides { config: Some(file.clone()), ..Default::default() }, Environment::new())
                 .unwrap();
-                let configuration =
-                    Configuration::load(CliOverrides { config: Some(file.clone()), ..Default::default() }).unwrap();
-                std::fs::write(&file, format!("[source]\nworkspace = {:?}\n", root.join("second"))).unwrap();
+        std::fs::write(&file, format!("[source]\nworkspace = {:?}\n", root.join("second"))).unwrap();
 
-                let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+        let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
 
-                assert_eq!(
-                    (
-                        configuration.source.workspace,
-                        configuration.allow_unsupported_php_version,
-                        configuration.no_version_check
-                    ),
-                    (root.join("second"), false, false)
-                );
-            },
+        assert_eq!(
+            (
+                configuration.source.workspace,
+                configuration.allow_unsupported_php_version,
+                configuration.no_version_check
+            ),
+            (root.join("second"), false, false)
         );
     }
 }

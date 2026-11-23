@@ -404,7 +404,7 @@ mod tests {
     /// The runtime library, built for these tests in a folder of the system's temporary folder, once per library source
     /// and Lean version as Mago builds it, with the Lean a law runs on.
     fn library() -> io::Result<PathBuf> {
-        let Toolchain::Ready(lake) = library::toolchain() else {
+        let Toolchain::Ready(lake) = library::toolchain(&std::env::vars_os().collect()) else {
             return Err(io::Error::other("no Lean is installed for the law checker, and Mago could not install one"));
         };
 

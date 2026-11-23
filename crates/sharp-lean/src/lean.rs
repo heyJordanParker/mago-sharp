@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fmt::Write;
 use std::fs;
 use std::io;
@@ -142,6 +143,9 @@ const HEARTBEATS: u32 = 200_000;
 pub struct Lean {
     root: PathBuf,
     threads: usize,
+    /// The variables of the environment the run reads, which name Mago's cache folder and elan's, where the step finds
+    /// Lean and builds its library.
+    environment: BTreeMap<OsString, OsString>,
 }
 
 /// Every law of the translations, in an order where each comes after each law it calls.
@@ -248,10 +252,11 @@ impl Record {
 }
 
 impl Lean {
-    /// The Lean step of the workspace at `root`, which proves laws on `threads` threads.
+    /// The Lean step of the workspace at `root`, which proves laws on `threads` threads, with Lean and its library in
+    /// the folders `environment` names.
     #[must_use]
-    pub fn new(root: &Path, threads: usize) -> Lean {
-        Lean { root: root.to_path_buf(), threads }
+    pub fn new(root: &Path, threads: usize, environment: &BTreeMap<OsString, OsString>) -> Lean {
+        Lean { root: root.to_path_buf(), threads, environment: environment.clone() }
     }
 
     /// Proves the laws of `translations` and returns the issues that refuse each file whose law is not proven.
@@ -365,10 +370,10 @@ impl Lean {
         package.write_toolchain()?;
         let mut wrote = writing.elapsed();
         let finding = Instant::now();
-        let library = match library::built() {
+        let library = match library::built(&self.environment) {
             Some(library) => library,
-            None => match library::toolchain() {
-                Toolchain::Ready(lake) => library::build(&lake)?,
+            None => match library::toolchain(&self.environment) {
+                Toolchain::Ready(lake) => library::build(&self.environment, &lake)?,
                 toolchain => {
                     for (translation, span) in
                         work.iter().filter_map(|(translation, _)| Some((*translation, translation.laws.first()?.span)))

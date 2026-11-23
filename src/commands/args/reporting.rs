@@ -36,6 +36,7 @@ use mago_reporting::ReportingFormat;
 use mago_reporting::ReportingTarget;
 
 use crate::config::env_reporting_format;
+use crate::config::process_environment;
 use crate::enum_variants;
 use crate::service::IssueProcessor;
 
@@ -246,7 +247,7 @@ impl ReportingArgs {
 ///
 /// A value that names no format falls through here, because loading the configuration stops the command on it.
 pub(crate) fn default_reporting_format() -> ReportingFormat {
-    if let Ok(Some(format)) = env_reporting_format() {
+    if let Ok(Some(format)) = env_reporting_format(&process_environment()) {
         return format;
     }
 

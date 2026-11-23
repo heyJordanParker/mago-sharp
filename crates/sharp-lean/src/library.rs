@@ -2,6 +2,9 @@
 //! version, and the Lean a law runs on, found one way: the Lean Mago installed in its cache folder, else elan's
 //! toolchain of the pinned version, else the Lean Mago downloads into its cache folder.
 
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fmt::Write;
 use std::fs;
 use std::io;
@@ -491,10 +494,11 @@ fn printed(output: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
 }
 
-/// The library's build in `lean/` in Mago's cache folder, as `built_in` finds it, so the compile runs it with no
-/// `lake`. `None` sends the compile to `build`, which reports what failed when Mago's cache folder can't be named.
-pub(crate) fn built() -> Option<PathBuf> {
-    built_in(&cache_root().ok()?.join("lean"), CHECKER)
+/// The library's build in `lean/` in Mago's cache folder of `environment`, as `built_in` finds it, so the compile runs
+/// it with no `lake`. `None` sends the compile to `build`, which reports what failed when Mago's cache folder can't be
+/// named.
+pub(crate) fn built(environment: &BTreeMap<OsString, OsString>) -> Option<PathBuf> {
+    built_in(&cache_root(environment).ok()?.join("lean"), CHECKER)
 }
 
 /// The library's build in `builds` when it is built, from `checker` when it holds a build. A build moves into place
@@ -505,10 +509,10 @@ fn built_in(builds: &Path, checker: &[u8]) -> Option<PathBuf> {
     is_built(&library).then_some(library)
 }
 
-/// Builds the library in `lean/` in Mago's cache folder, from the build Mago embeds when it embeds one, as `build_in`
-/// does.
-pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
-    build_in(&cache_root()?.join("lean"), lake, CHECKER)
+/// Builds the library in `lean/` in Mago's cache folder of `environment`, from the build Mago embeds when it embeds
+/// one, as `build_in` does.
+pub(crate) fn build(environment: &BTreeMap<OsString, OsString>, lake: &Lake) -> io::Result<PathBuf> {
+    build_in(&cache_root(environment)?.join("lean"), lake, CHECKER)
 }
 
 /// Writes the library's package to `<key>.staging` in `builds`, builds it with `lake`, or unpacks `checker` there when
@@ -563,11 +567,13 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake, checker: &[u8]) -> io::Result
 /// Builds the law checker with the Lean a law runs on, in a folder of its own, and writes the zstd archive of its
 /// `.lake/build` to `archive`, which the release build embeds in Mago as its checker.
 ///
+/// `environment` names Mago's cache folder and elan's, where it finds Lean.
+///
 /// # Errors
 ///
 /// Returns the error of finding Lean, of the build, or of writing the archive.
-pub fn write_checker(archive: &Path) -> io::Result<()> {
-    let lake = match toolchain() {
+pub fn write_checker(archive: &Path, environment: &BTreeMap<OsString, OsString>) -> io::Result<()> {
+    let lake = match toolchain(environment) {
         Toolchain::Ready(lake) => lake,
         Toolchain::Unsupported => return Err(io::Error::other("Mago pins no Lean for this platform")),
         Toolchain::Failed(failure) => return Err(io::Error::other(failure)),
@@ -593,11 +599,11 @@ pub(crate) enum Toolchain {
     Failed(String),
 }
 
-/// The Lean a law runs on: [`installed`] in Mago's cache folder and elan's folder, else the Lean Mago downloads now. A
-/// Lean of another version, as a `lake` on the `PATH` may run, is never the one.
-pub(crate) fn toolchain() -> Toolchain {
-    let installed = cache_root().ok().and_then(|cache| installed(&cache, elan_home().as_deref()));
-    match installed.map_or_else(install, |lake| Ok(Some(lake))) {
+/// The Lean a law runs on: [`installed`] in Mago's cache folder and elan's folder, as `environment` names them, else the
+/// Lean Mago downloads now. A Lean of another version, as a `lake` on the `PATH` may run, is never the one.
+pub(crate) fn toolchain(environment: &BTreeMap<OsString, OsString>) -> Toolchain {
+    let installed = cache_root(environment).ok().and_then(|cache| installed(&cache, elan_home(environment).as_deref()));
+    match installed.map_or_else(|| install(environment), |lake| Ok(Some(lake))) {
         Ok(Some(lake)) => Toolchain::Ready(lake),
         Ok(None) => Toolchain::Unsupported,
         Err(error) => Toolchain::Failed(error.to_string()),
@@ -615,21 +621,18 @@ fn installed(cache: &Path, elan: Option<&Path>) -> Option<Lake> {
     own.into_iter().chain(elan).map(|lean| Lake { lean }).find(|lake| lake.program().is_file())
 }
 
-/// The folder elan installs toolchains into: `$ELAN_HOME`, else `.elan` in the home folder.
-fn elan_home() -> Option<PathBuf> {
-    std::env::var_os("ELAN_HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::home_dir().map(|home| home.join(".elan")))
+/// The folder elan installs toolchains into, in `environment`: `$ELAN_HOME`, else `.elan` in `$HOME`.
+fn elan_home(environment: &BTreeMap<OsString, OsString>) -> Option<PathBuf> {
+    variable(environment, "ELAN_HOME").or_else(|| variable(environment, "HOME").map(|home| home.join(".elan")))
 }
 
-/// Installs the pinned Lean into `lean/` in Mago's cache folder and returns its `lake`. `None` where Mago pins no Lean
-/// archive for the platform it is built for. An error names the step that failed.
-fn install() -> io::Result<Option<Lake>> {
+/// Installs the pinned Lean into `lean/` in Mago's cache folder of `environment` and returns its `lake`. `None` where
+/// Mago pins no Lean archive for the platform it is built for. An error names the step that failed.
+fn install(environment: &BTreeMap<OsString, OsString>) -> io::Result<Option<Lake>> {
     let Some(archive) = &ARCHIVE else {
         return Ok(None);
     };
-    let cache = cache_root()?;
+    let cache = cache_root(environment)?;
 
     install_from(&url(archive), archive, &cache)
         .map(Some)
@@ -887,26 +890,33 @@ fn remove_folder(folder: &Path) -> io::Result<()> {
     }
 }
 
-/// Mago's cache folder: `$XDG_CACHE_HOME/mago`, else `~/Library/Caches/mago` on macOS, `%LOCALAPPDATA%\mago` on
-/// Windows and `~/.cache/mago` elsewhere.
+/// Mago's cache folder in `environment`, the variables of the environment a run reads.
+///
+/// It is `$XDG_CACHE_HOME/mago`, else `%LOCALAPPDATA%\mago` on Windows, else `Library/Caches/mago` in `$HOME` on macOS
+/// and `.cache/mago` in it elsewhere.
 ///
 /// # Errors
 ///
-/// Returns an error when no environment variable names the cache and the user has no home folder.
-pub fn cache_root() -> io::Result<PathBuf> {
-    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME").filter(|cache| !cache.is_empty()) {
-        return Ok(PathBuf::from(cache).join("mago"));
+/// Returns an error when `environment` names neither the cache nor a home folder.
+pub fn cache_root(environment: &BTreeMap<OsString, OsString>) -> io::Result<PathBuf> {
+    if let Some(cache) = variable(environment, "XDG_CACHE_HOME") {
+        return Ok(cache.join("mago"));
     }
     if cfg!(windows)
-        && let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|local| !local.is_empty())
+        && let Some(local) = variable(environment, "LOCALAPPDATA")
     {
-        return Ok(PathBuf::from(local).join("mago"));
+        return Ok(local.join("mago"));
     }
 
-    let home =
-        std::env::home_dir().ok_or_else(|| io::Error::other("The checker's cache folder needs a home folder"))?;
+    let home = variable(environment, "HOME")
+        .ok_or_else(|| io::Error::other("The checker's cache folder needs a home folder"))?;
 
     Ok(if cfg!(target_os = "macos") { home.join("Library/Caches/mago") } else { home.join(".cache/mago") })
+}
+
+/// The folder the variable `name` of `environment` names, unless it is unset or empty.
+fn variable(environment: &BTreeMap<OsString, OsString>, name: &str) -> Option<PathBuf> {
+    environment.get(OsStr::new(name)).filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 #[cfg(all(test, unix))]

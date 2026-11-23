@@ -86,7 +86,8 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashSet;
-use std::env::home_dir;
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;
@@ -153,13 +154,43 @@ const ENV_NO_VERSION_CHECK: &str = "MAGO_NO_VERSION_CHECK";
 const ENV_EDITOR_URL: &str = "MAGO_EDITOR_URL";
 const ENV_REPORTING_FORMAT: &str = "MAGO_REPORTING_FORMAT";
 
-/// Returns the reporting format `MAGO_REPORTING_FORMAT` names, or `None` when it is unset.
+/// The variables of the environment a run reads, by name: the process's in `main`, as [`process_environment`] takes
+/// them once, and a map a test gives. The configuration and mago's cache folder come from them, never from the
+/// process's environment read again, which every test of a binary shares.
+pub type Environment = BTreeMap<OsString, OsString>;
+
+/// The process's environment, with `HOME` the user's home folder when the process sets none, as `std::env::home_dir`
+/// finds it.
+pub fn process_environment() -> Environment {
+    let mut environment: Environment = std::env::vars_os().collect();
+    if let Some(home) = std::env::home_dir() {
+        environment.entry(OsString::from("HOME")).or_insert_with(|| home.into_os_string());
+    }
+
+    environment
+}
+
+/// The variables of the process that name the home folder and the folders of mago's cache and elan's toolchains, alone,
+/// so a test finds the Lean and the extension SDK the machine installed and reads no `MAGO_*` override.
+#[cfg(test)]
+pub(crate) fn test_environment() -> Environment {
+    const KEPT: [&str; 4] = ["HOME", "XDG_CACHE_HOME", "LOCALAPPDATA", "ELAN_HOME"];
+
+    process_environment().into_iter().filter(|(name, _)| KEPT.iter().any(|kept| name == kept)).collect()
+}
+
+/// The value of the variable `name` in `environment`, unless it is unset or not UTF-8.
+fn variable<'environment>(environment: &'environment Environment, name: &str) -> Option<&'environment str> {
+    environment.get(OsStr::new(name)).and_then(|value| value.to_str())
+}
+
+/// Returns the reporting format `MAGO_REPORTING_FORMAT` names in `environment`, or `None` when it is unset.
 ///
 /// # Errors
 ///
 /// Returns `EnvVarParse` when the variable names no reporting format.
-pub(crate) fn env_reporting_format() -> Result<Option<ReportingFormat>, Error> {
-    let Ok(name) = std::env::var(ENV_REPORTING_FORMAT) else {
+pub(crate) fn env_reporting_format(environment: &Environment) -> Result<Option<ReportingFormat>, Error> {
+    let Some(name) = variable(environment, ENV_REPORTING_FORMAT) else {
         return Ok(None);
     };
 
@@ -407,6 +438,12 @@ pub struct Configuration {
     #[serde(skip)]
     #[schemars(skip)]
     pub cli_overrides: CliOverrides,
+
+    /// The environment [`Self::load`] read, which names mago's cache folder. Watch mode loads the configuration
+    /// again from it.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub environment: Environment,
 }
 
 impl Configuration {
@@ -437,6 +474,9 @@ impl Configuration {
     ///   the fatal behaviour on major-version drift.
     /// * `no_extensions` — turns every extension host off.
     ///
+    /// `environment` holds the variables it reads: `XDG_CONFIG_HOME` and `HOME` for the global configuration file,
+    /// and the `MAGO_*` overrides. The configuration keeps it.
+    ///
     /// # Errors
     ///
     /// - `ReadConfigFile` / `ParseConfigFile` — I/O or syntax failures on any layer.
@@ -446,7 +486,7 @@ impl Configuration {
     /// - `InvalidExtendsEntry` — `extends` is not a string or array of strings.
     /// - `EnvVarParse` — an `MAGO_*` env var is set but its value can't be parsed.
     /// - Normalization errors (invalid source paths, etc.).
-    pub fn load(cli_overrides: CliOverrides) -> Result<Configuration, Error> {
+    pub fn load(cli_overrides: CliOverrides, environment: Environment) -> Result<Configuration, Error> {
         let workspace_dir = cli_overrides.workspace.clone().unwrap_or_else(|| CURRENT_DIR.to_path_buf());
 
         let resolved_config_file: Option<(PathBuf, ConfigFormat)>;
@@ -458,10 +498,11 @@ impl Configuration {
                 ConfigFormat::for_path(file).ok_or_else(|| Error::UnsupportedConfigExtension(file.clone()))?,
             ));
         } else {
+            let home = environment.get(OsStr::new("HOME")).map(PathBuf::from);
             let fallback_roots = [
-                std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-                home_dir().map(|h| h.join(".config")),
-                home_dir(),
+                environment.get(OsStr::new("XDG_CONFIG_HOME")).map(PathBuf::from),
+                home.as_ref().map(|h| h.join(".config")),
+                home,
             ];
 
             resolved_config_file = Self::find_config_files(&workspace_dir, &fallback_roots);
@@ -481,7 +522,7 @@ impl Configuration {
             Configuration::from_workspace(workspace_dir.clone())
         };
 
-        configuration.apply_env_overrides()?;
+        configuration.apply_env_overrides(&environment)?;
 
         configuration.config_file = resolved_config_file.as_ref().map(|(p, _)| p.clone());
 
@@ -516,7 +557,7 @@ impl Configuration {
         }
 
         if configuration.editor_url.is_none() {
-            configuration.editor_url = detect_editor_url();
+            configuration.editor_url = detect_editor_url(&environment);
         }
 
         configuration.normalize()?;
@@ -525,6 +566,7 @@ impl Configuration {
             configuration.extension_hosts.clear();
         }
         configuration.cli_overrides = cli_overrides;
+        configuration.environment = environment;
 
         Ok(configuration)
     }
@@ -598,31 +640,30 @@ impl Configuration {
     ///
     /// It also checks `MAGO_REPORTING_FORMAT`, which the reporting format's default reads, so a value that names
     /// no format stops the command here.
-    fn apply_env_overrides(&mut self) -> Result<(), Error> {
-        // Env-var names are static — no per-call allocation.
-        if let Ok(v) = std::env::var(ENV_PHP_VERSION) {
+    fn apply_env_overrides(&mut self, environment: &Environment) -> Result<(), Error> {
+        if let Some(v) = variable(environment, ENV_PHP_VERSION) {
             self.php_version =
                 v.parse().map_err(|e| Error::EnvVarParse { name: ENV_PHP_VERSION, source: Box::new(e) })?;
         }
-        if let Ok(v) = std::env::var(ENV_THREADS) {
+        if let Some(v) = variable(environment, ENV_THREADS) {
             self.threads = v.parse().map_err(|e| Error::EnvVarParse { name: ENV_THREADS, source: Box::new(e) })?;
         }
-        if let Ok(v) = std::env::var(ENV_STACK_SIZE) {
+        if let Some(v) = variable(environment, ENV_STACK_SIZE) {
             self.stack_size =
                 v.parse().map_err(|e| Error::EnvVarParse { name: ENV_STACK_SIZE, source: Box::new(e) })?;
         }
-        if let Ok(v) = std::env::var(ENV_ALLOW_UNSUPPORTED_PHP_VERSION) {
-            self.allow_unsupported_php_version = parse_bool(&v)
+        if let Some(v) = variable(environment, ENV_ALLOW_UNSUPPORTED_PHP_VERSION) {
+            self.allow_unsupported_php_version = parse_bool(v)
                 .map_err(|e| Error::EnvVarParse { name: ENV_ALLOW_UNSUPPORTED_PHP_VERSION, source: Box::new(e) })?;
         }
-        if let Ok(v) = std::env::var(ENV_NO_VERSION_CHECK) {
+        if let Some(v) = variable(environment, ENV_NO_VERSION_CHECK) {
             self.no_version_check =
-                parse_bool(&v).map_err(|e| Error::EnvVarParse { name: ENV_NO_VERSION_CHECK, source: Box::new(e) })?;
+                parse_bool(v).map_err(|e| Error::EnvVarParse { name: ENV_NO_VERSION_CHECK, source: Box::new(e) })?;
         }
-        if let Ok(v) = std::env::var(ENV_EDITOR_URL) {
-            self.editor_url = Some(v);
+        if let Some(v) = variable(environment, ENV_EDITOR_URL) {
+            self.editor_url = Some(v.to_owned());
         }
-        env_reporting_format()?;
+        env_reporting_format(environment)?;
         Ok(())
     }
 
@@ -677,6 +718,7 @@ impl Configuration {
             editor_url: None,
             config_file: None,
             cli_overrides: CliOverrides::default(),
+            environment: Environment::new(),
         }
     }
 
@@ -883,26 +925,35 @@ mod tests {
     use std::fs;
 
     use pretty_assertions::assert_eq;
-    use tempfile::env::temp_dir;
 
     use super::*;
 
+    /// The environment of `variables`, each a name and its value.
+    fn environment(variables: &[(&str, &Path)]) -> Environment {
+        variables.iter().map(|(name, value)| (OsString::from(name), value.as_os_str().to_owned())).collect()
+    }
+
+    /// A new, empty folder of its own, kept while the first value lives, and its path.
+    fn folder() -> (tempfile::TempDir, PathBuf) {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().to_path_buf();
+
+        (folder, path)
+    }
+
     fn load_config(workspace_path: Option<PathBuf>) -> Configuration {
-        temp_env::with_vars(
-            [
-                ("HOME", temp_dir().to_str()),
-                ("MAGO_THREADS", None),
-                ("MAGO_PHP_VERSION", None),
-                ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None),
-            ],
-            || Configuration::load(CliOverrides { workspace: workspace_path, ..Default::default() }).unwrap(),
+        let (_home, home) = folder();
+
+        Configuration::load(
+            CliOverrides { workspace: workspace_path, ..Default::default() },
+            environment(&[("HOME", &home)]),
         )
+        .unwrap()
     }
 
     #[test]
     fn test_take_defaults() {
-        let workspace_path = temp_dir().join("workspace-0");
-        std::fs::create_dir_all(&workspace_path).unwrap();
+        let (_workspace_path, workspace_path) = folder();
 
         let config = load_config(Some(workspace_path));
 
@@ -911,9 +962,7 @@ mod tests {
 
     #[test]
     fn extension_hosts_resolve_from_the_configuration_directory() {
-        let directory = temp_dir().join("extension-configuration");
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
+        let (_directory, directory) = folder();
         let configuration_file = directory.join("mago.toml");
         write_file(
             &configuration_file,
@@ -944,18 +993,15 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn enabled_extension_host_requires_a_file() {
-        let directory = temp_dir().join("extension-missing-file");
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
+        let (_directory, directory) = folder();
         let configuration_file = directory.join("mago.toml");
         write_file(&configuration_file, "[extension-hosts.php]\n");
 
         for no_extensions in [false, true] {
-            let error = Configuration::load(CliOverrides {
-                config: Some(configuration_file.clone()),
-                no_extensions,
-                ..Default::default()
-            })
+            let error = Configuration::load(
+                CliOverrides { config: Some(configuration_file.clone()), no_extensions, ..Default::default() },
+                Environment::new(),
+            )
             .expect_err("enabled extension without a file should fail, under --no-extensions too");
 
             assert!(matches!(error, Error::InvalidExtensionHostConfiguration(_)));
@@ -969,9 +1015,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn disabled_extension_host_may_omit_its_file() {
-        let directory = temp_dir().join("disabled-extension");
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
+        let (_directory, directory) = folder();
         let configuration_file = directory.join("mago.toml");
         write_file(&configuration_file, "[extension-hosts.php]\nenabled = false\n");
 
@@ -984,23 +1028,22 @@ ini = { memory_limit = "2G" }
     /// option, so its upgrade step is plain.
     #[test]
     fn an_extension_host_that_sets_a_command_fails_to_load_naming_it() {
-        let directory = temp_dir().join("extension-command");
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
+        let (_directory, directory) = folder();
         let configuration_file = directory.join("mago.toml");
         write_file(&configuration_file, "[extension-hosts.php]\ncommand = [\"php\", \"worker.php\"]\n");
 
-        let error = Configuration::load(CliOverrides { config: Some(configuration_file), ..Default::default() })
-            .expect_err("a host with a command should fail to load");
+        let error = Configuration::load(
+            CliOverrides { config: Some(configuration_file), ..Default::default() },
+            Environment::new(),
+        )
+        .expect_err("a host with a command should fail to load");
 
         assert!(error.to_string().contains("unknown field `command`"), "{error}");
     }
 
     #[test]
     fn extension_hosts_can_be_overridden_by_name_through_extends() {
-        let directory = temp_dir().join("extended-extension-configuration");
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
+        let (_directory, directory) = folder();
         write_file(
             &directory.join("base.toml"),
             "[extension-hosts.php]\nfile = \"host.php\"\nrequest-timeout-ms = 2000\n",
@@ -1017,9 +1060,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_toml_has_precedence_when_multiple_configs_present() {
-        let workspace_path = temp_dir().join("workspace-with-multiple-configs");
-        let _ = std::fs::remove_dir_all(&workspace_path);
-        std::fs::create_dir_all(&workspace_path).unwrap();
+        let (_workspace_path, workspace_path) = folder();
 
         create_tmp_file("threads = 3", &workspace_path, "toml");
         create_tmp_file("threads: 2\nphp-version: \"7.4.0\"", &workspace_path, "yaml");
@@ -1033,9 +1074,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_dist_config_is_loaded_when_primary_config_is_absent() {
-        let workspace_path = temp_dir().join("workspace-with-dist-config");
-        let _ = std::fs::remove_dir_all(&workspace_path);
-        std::fs::create_dir_all(&workspace_path).unwrap();
+        let (_workspace_path, workspace_path) = folder();
 
         create_named_tmp_file("threads = 3", &workspace_path, CONFIGURATION_DIST_FILE_NAME, "toml");
 
@@ -1047,9 +1086,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_primary_config_has_precedence_over_dist_config() {
-        let workspace_path = temp_dir().join("workspace-with-primary-and-dist-config");
-        let _ = std::fs::remove_dir_all(&workspace_path);
-        std::fs::create_dir_all(&workspace_path).unwrap();
+        let (_workspace_path, workspace_path) = folder();
 
         create_tmp_file("threads = 5", &workspace_path, "toml");
         create_named_tmp_file("threads = 3", &workspace_path, CONFIGURATION_DIST_FILE_NAME, "toml");
@@ -1062,16 +1099,16 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_global_dist_config_is_not_loaded() {
-        let workspace_path = temp_dir().join("workspace-without-config");
-        let xdg_config_home_path = temp_dir().join("xdg-config-home-with-dist-config");
-        let _ = std::fs::remove_dir_all(&workspace_path);
-        let _ = std::fs::remove_dir_all(&xdg_config_home_path);
-        std::fs::create_dir_all(&workspace_path).unwrap();
-        std::fs::create_dir_all(&xdg_config_home_path).unwrap();
+        let (_workspace_path, workspace_path) = folder();
+        let (_xdg_config_home_path, xdg_config_home_path) = folder();
 
         create_named_tmp_file("threads = 3", &xdg_config_home_path, CONFIGURATION_DIST_FILE_NAME, "toml");
 
-        let config = load_config(Some(workspace_path));
+        let config = Configuration::load(
+            CliOverrides { workspace: Some(workspace_path), ..Default::default() },
+            environment(&[("XDG_CONFIG_HOME", &xdg_config_home_path)]),
+        )
+        .unwrap();
 
         assert_eq!(config.config_file, None);
         assert_eq!(config.threads, *LOGICAL_CPUS);
@@ -1079,62 +1116,34 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_env_config_override_all_others() {
-        let workspace_path = temp_dir().join("workspace-1");
-        let config_path = temp_dir().join("config-1");
-
-        std::fs::create_dir_all(&workspace_path).unwrap();
-        std::fs::create_dir_all(&config_path).unwrap();
+        let (_workspace_path, workspace_path) = folder();
+        let (_config_path, config_path) = folder();
 
         let config_file_path = create_tmp_file("threads = 1", &config_path, "toml");
         create_tmp_file("threads = 2", &workspace_path, "toml");
 
-        let config = temp_env::with_vars(
-            [
-                ("HOME", None),
-                ("MAGO_THREADS", Some("3")),
-                ("MAGO_PHP_VERSION", None),
-                ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None),
-            ],
-            || {
-                Configuration::load(CliOverrides {
-                    workspace: Some(workspace_path),
-                    config: Some(config_file_path),
-                    ..Default::default()
-                })
-                .unwrap()
-            },
-        );
+        let config = Configuration::load(
+            CliOverrides { workspace: Some(workspace_path), config: Some(config_file_path), ..Default::default() },
+            environment(&[("MAGO_THREADS", Path::new("3"))]),
+        )
+        .unwrap();
 
         assert_eq!(config.threads, 3);
     }
 
     #[test]
     fn test_config_cancel_workspace() {
-        let workspace_path = temp_dir().join("workspace-2");
-        let config_path = temp_dir().join("config-2");
-
-        std::fs::create_dir_all(&workspace_path).unwrap();
-        std::fs::create_dir_all(&config_path).unwrap();
+        let (_workspace_path, workspace_path) = folder();
+        let (_config_path, config_path) = folder();
 
         create_tmp_file("threads = 2\nphp-version = \"7.4.0\"", &workspace_path, "toml");
 
         let config_file_path = create_tmp_file("threads = 1", &config_path, "toml");
-        let config = temp_env::with_vars(
-            [
-                ("HOME", None::<&str>),
-                ("MAGO_THREADS", None),
-                ("MAGO_PHP_VERSION", None),
-                ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None),
-            ],
-            || {
-                Configuration::load(CliOverrides {
-                    workspace: Some(workspace_path),
-                    config: Some(config_file_path),
-                    ..Default::default()
-                })
-                .unwrap()
-            },
-        );
+        let config = Configuration::load(
+            CliOverrides { workspace: Some(workspace_path), config: Some(config_file_path), ..Default::default() },
+            Environment::new(),
+        )
+        .unwrap();
 
         assert_eq!(config.threads, 1);
         assert_eq!(config.php_version.to_string(), DEFAULT_PHP_VERSION.to_string());
@@ -1142,35 +1151,19 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_workspace_has_precedence_over_global() {
-        let home_path = temp_dir().join("home-3");
-        let xdg_config_home_path = temp_dir().join("xdg-config-home-3");
-        let workspace_path = temp_dir().join("workspace-3");
-
-        let _ = std::fs::remove_dir_all(&home_path);
-        let _ = std::fs::remove_dir_all(&xdg_config_home_path);
-        let _ = std::fs::remove_dir_all(&workspace_path);
-
-        std::fs::create_dir_all(&home_path).unwrap();
-        std::fs::create_dir_all(&xdg_config_home_path).unwrap();
-        std::fs::create_dir_all(&workspace_path).unwrap();
+        let (_home_path, home_path) = folder();
+        let (_xdg_config_home_path, xdg_config_home_path) = folder();
+        let (_workspace_path, workspace_path) = folder();
 
         create_tmp_file("threads: 2\nphp-version: \"8.1.0\"", &workspace_path.to_owned(), "yaml");
         create_tmp_file("threads = 3\nphp-version = \"7.4.0\"", &home_path, "toml");
         create_tmp_file("source.excludes = [\"yes\"]", &xdg_config_home_path, "toml");
 
-        let config = temp_env::with_vars(
-            [
-                ("HOME", Some(home_path)),
-                ("XDG_CONFIG_HOME", Some(xdg_config_home_path)),
-                ("MAGO_THREADS", None),
-                ("MAGO_PHP_VERSION", None),
-                ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None),
-            ],
-            || {
-                Configuration::load(CliOverrides { workspace: Some(workspace_path.clone()), ..Default::default() })
-                    .unwrap()
-            },
-        );
+        let config = Configuration::load(
+            CliOverrides { workspace: Some(workspace_path.clone()), ..Default::default() },
+            environment(&[("HOME", &home_path), ("XDG_CONFIG_HOME", &xdg_config_home_path)]),
+        )
+        .unwrap();
 
         assert_eq!(config.threads, 2);
         assert_eq!(config.php_version.to_string(), "8.1.0".to_string());
@@ -1194,23 +1187,13 @@ ini = { memory_limit = "2G" }
     }
 
     fn load_isolated(file: &Path) -> Configuration {
-        temp_env::with_vars(
-            [
-                ("HOME", None::<&str>),
-                ("XDG_CONFIG_HOME", None),
-                ("MAGO_THREADS", None),
-                ("MAGO_PHP_VERSION", None),
-                ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None),
-            ],
-            || Configuration::load(CliOverrides { config: Some(file.to_path_buf()), ..Default::default() }).unwrap(),
-        )
+        Configuration::load(CliOverrides { config: Some(file.to_path_buf()), ..Default::default() }, Environment::new())
+            .unwrap()
     }
 
     #[test]
     fn test_extends_single_string() {
-        let dir = temp_dir().join("extends-single");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = folder();
 
         write_file(&dir.join("base.toml"), "threads = 7\nphp-version = \"8.0.0\"\n");
         write_file(&dir.join("mago.toml"), "extends = \"base.toml\"\nphp-version = \"8.3.0\"\n");
@@ -1222,9 +1205,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_extends_array_in_order() {
-        let dir = temp_dir().join("extends-array");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = folder();
 
         write_file(&dir.join("a.toml"), "threads = 1\nphp-version = \"8.0.0\"\n");
         write_file(&dir.join("b.toml"), "threads = 2\n");
@@ -1237,8 +1218,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_extends_relative_to_config_file_not_cwd() {
-        let dir = temp_dir().join("extends-relative");
-        let _ = fs::remove_dir_all(&dir);
+        let (_dir, dir) = folder();
         let nested = dir.join("nested");
         fs::create_dir_all(&nested).unwrap();
 
@@ -1251,8 +1231,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_extends_directory_picks_up_mago_file() {
-        let dir = temp_dir().join("extends-dir");
-        let _ = fs::remove_dir_all(&dir);
+        let (_dir, dir) = folder();
         let configs = dir.join("configs");
         fs::create_dir_all(&configs).unwrap();
 
@@ -1265,8 +1244,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_extends_directory_without_config_warns_and_skips() {
-        let dir = temp_dir().join("extends-empty-dir");
-        let _ = fs::remove_dir_all(&dir);
+        let (_dir, dir) = folder();
         fs::create_dir_all(dir.join("empty")).unwrap();
         write_file(&dir.join("mago.toml"), "extends = \"empty\"\nthreads = 3\n");
 
@@ -1276,9 +1254,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_extends_array_excludes_concat() {
-        let dir = temp_dir().join("extends-array-concat");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = folder();
 
         write_file(&dir.join("base.toml"), "[source]\nexcludes = [\"vendor\", \"node_modules\"]\n");
         write_file(&dir.join("mago.toml"), "extends = \"base.toml\"\n[source]\nexcludes = [\"build\"]\n");
@@ -1289,9 +1265,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_extends_replaces_an_extension_host_file() {
-        let dir = temp_dir().join("extends-host-file");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = folder();
 
         write_file(&dir.join("base.toml"), "[extension-hosts.acme]\nfile = \"vendor/acme/host.php\"\n");
         write_file(
@@ -1306,9 +1280,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_extends_keeps_an_extension_host_file_it_does_not_redeclare() {
-        let dir = temp_dir().join("extends-host-file-inherited");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = folder();
 
         write_file(&dir.join("base.toml"), "[extension-hosts.acme]\nfile = \"vendor/acme/host.php\"\n");
         write_file(
@@ -1341,22 +1313,21 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_extends_cycle_is_detected() {
-        let dir = temp_dir().join("extends-cycle");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = folder();
 
         write_file(&dir.join("a.toml"), "extends = \"b.toml\"\n");
         write_file(&dir.join("b.toml"), "extends = \"a.toml\"\n");
 
-        let result = Configuration::load(CliOverrides { config: Some(dir.join("a.toml")), ..Default::default() });
+        let result = Configuration::load(
+            CliOverrides { config: Some(dir.join("a.toml")), ..Default::default() },
+            Environment::new(),
+        );
         assert!(result.is_err(), "expected cycle to be detected");
     }
 
     #[test]
     fn test_extends_transitive_chain() {
-        let dir = temp_dir().join("extends-transitive");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = folder();
 
         write_file(&dir.join("grandparent.toml"), "threads = 1\nphp-version = \"8.0.0\"\n");
         write_file(&dir.join("parent.toml"), "extends = \"grandparent.toml\"\nthreads = 2\n");
@@ -1369,9 +1340,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_extends_mixed_formats() {
-        let dir = temp_dir().join("extends-mixed");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = folder();
 
         write_file(&dir.join("base.json"), "{\"threads\": 4}\n");
         write_file(&dir.join("middle.yaml"), "extends: \"base.json\"\nphp-version: \"8.2.0\"\n");
@@ -1398,9 +1367,7 @@ ini = { memory_limit = "2G" }
     ///                    php-version = "8.3.0"  (overrides layer-json)
     #[test]
     fn test_extends_long_mixed_format_chain() {
-        let dir = temp_dir().join("extends-long-chain");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = folder();
 
         write_file(&dir.join("bottom.toml"), "stack-size = 16777216\n");
         write_file(&dir.join("layer-yml.yml"), "extends: \"bottom.toml\"\nthreads: 7\n");
@@ -1424,9 +1391,7 @@ ini = { memory_limit = "2G" }
 
     #[test]
     fn test_supports_schema_in_config() {
-        let dir = temp_dir().join("supports-schema-in-config");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let (_dir, dir) = folder();
         let config_path = dir.join("mago.toml");
 
         write_file(&config_path, "\"$schema\" = \"mago_json_schema.json\"\n");
@@ -1443,9 +1408,9 @@ ini = { memory_limit = "2G" }
 ///
 /// Checks terminal environment variables to determine which editor is running,
 /// and returns the appropriate URL template for clickable file paths.
-fn detect_editor_url() -> Option<String> {
-    if let Ok(bundle_id) = std::env::var("__CFBundleIdentifier") {
-        let url = match bundle_id.as_str() {
+fn detect_editor_url(environment: &Environment) -> Option<String> {
+    if let Some(bundle_id) = variable(environment, "__CFBundleIdentifier") {
+        let url = match bundle_id {
             "com.jetbrains.PhpStorm" | "com.jetbrains.PhpStorm-EAP" => {
                 "phpstorm://open?file=%file%&line=%line%&column=%column%"
             }
@@ -1467,8 +1432,8 @@ fn detect_editor_url() -> Option<String> {
         return Some(url.to_string());
     }
 
-    if let Ok(term_program) = std::env::var("TERM_PROGRAM") {
-        let url = match term_program.as_str() {
+    if let Some(term_program) = variable(environment, "TERM_PROGRAM") {
+        let url = match term_program {
             "vscode" => "vscode://file/%file%:%line%:%column%",
             "zed" => "zed://file/%file%:%line%:%column%",
             _ => return None,

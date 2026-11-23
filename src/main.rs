@@ -56,6 +56,7 @@ use crate::commands::CliArguments;
 use crate::commands::MagoCommand;
 use crate::config::CliOverrides;
 use crate::config::Configuration;
+use crate::config::process_environment;
 use crate::error::Error;
 use crate::utils::configure_colors;
 use crate::utils::logger::initialize_logger;
@@ -219,15 +220,18 @@ pub fn run(main_start: Instant) -> Result<ExitCode, Error> {
     } = arguments;
 
     let config_load_start = trace_enabled.then(Instant::now);
-    let configuration = Configuration::load(CliOverrides {
-        workspace,
-        config,
-        php_version,
-        threads,
-        allow_unsupported_php_version,
-        no_version_check,
-        no_extensions,
-    })?;
+    let configuration = Configuration::load(
+        CliOverrides {
+            workspace,
+            config,
+            php_version,
+            threads,
+            allow_unsupported_php_version,
+            no_version_check,
+            no_extensions,
+        },
+        process_environment(),
+    )?;
     let config_load_duration = config_load_start.map(|s| s.elapsed()).unwrap_or_default();
 
     if let MagoCommand::SelfUpdate(cmd) = command {

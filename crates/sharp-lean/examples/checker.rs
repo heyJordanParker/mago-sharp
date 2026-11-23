@@ -7,5 +7,5 @@ fn main() -> std::io::Result<()> {
         return Err(std::io::Error::other("name the archive to write"));
     };
 
-    mago_sharp_lean::write_checker(std::path::Path::new(&archive))
+    mago_sharp_lean::write_checker(std::path::Path::new(&archive), &std::env::vars_os().collect())
 }

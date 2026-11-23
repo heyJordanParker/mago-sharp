@@ -787,6 +787,7 @@ fn load(
         configuration.php_version,
         &configuration.analyzer.plugins,
         configuration.analyzer.disable_default_plugins,
+        &configuration.environment,
     ) {
         orchestrator.set_external_analyzer_handle(external_analyzer);
     }
@@ -1439,6 +1440,7 @@ mod tests {
 
     use super::*;
     use crate::config::CliOverrides;
+    use crate::config::test_environment;
 
     /// An `ignore` entry hides an extension host rule's issue from the proof of a conversion, and never a language
     /// issue it names, which `mago compile` reports whatever the configuration says (spec section 27).
@@ -1449,12 +1451,10 @@ mod tests {
         let file = root.join("mago.toml");
         std::fs::write(&file, "php-version = \"8.5\"\n\n[analyzer]\nignore = [\"proof/marker\", \"mixed-argument\"]\n")
             .unwrap();
-        let configuration = Configuration::load(CliOverrides {
-            workspace: Some(root),
-            config: Some(file),
-            no_version_check: true,
-            ..Default::default()
-        })
+        let configuration = Configuration::load(
+            CliOverrides { workspace: Some(root), config: Some(file), no_version_check: true, ..Default::default() },
+            test_environment(),
+        )
         .unwrap();
         let issues = IssueCollection::from(vec![
             Issue::warning("This declaration is refined.").with_code("proof/marker"),
@@ -1507,12 +1507,15 @@ mod tests {
         }
         commit_all(root);
 
-        Configuration::load(CliOverrides {
-            workspace: Some(root.to_path_buf()),
-            config: Some(root.join("mago.toml")),
-            no_version_check: true,
-            ..Default::default()
-        })
+        Configuration::load(
+            CliOverrides {
+                workspace: Some(root.to_path_buf()),
+                config: Some(root.join("mago.toml")),
+                no_version_check: true,
+                ..Default::default()
+            },
+            test_environment(),
+        )
         .unwrap()
     }
 
@@ -1774,12 +1777,15 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         ));
         std::fs::write(root.join("mago.toml"), toml).unwrap();
 
-        Configuration::load(CliOverrides {
-            workspace: Some(root.to_path_buf()),
-            config: Some(root.join("mago.toml")),
-            no_version_check: true,
-            ..Default::default()
-        })
+        Configuration::load(
+            CliOverrides {
+                workspace: Some(root.to_path_buf()),
+                config: Some(root.join("mago.toml")),
+                no_version_check: true,
+                ..Default::default()
+            },
+            test_environment(),
+        )
         .unwrap()
     }
 
@@ -1917,7 +1923,7 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         let configuration = hosted(&root, &[clean(0), clean(1)], None);
         let project: String =
             unit::source_hash(root.as_os_str().as_encoded_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
-        let folder = mago_sharp_lean::cache_root().unwrap().join("hosts").join(project);
+        let folder = mago_sharp_lean::cache_root(&configuration.environment).unwrap().join("hosts").join(project);
         std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
         std::fs::write(&folder, "").unwrap();
 
@@ -2053,12 +2059,15 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             "php-version = \"8.5\"\n\n[source]\npaths = [\"src\", \"tools/*Rule.php\"]\nexcludes = [\"src/Generated\"]\n",
         )
         .unwrap();
-        let configuration = Configuration::load(CliOverrides {
-            workspace: Some(root.clone()),
-            config: Some(root.join("mago.toml")),
-            no_version_check: true,
-            ..Default::default()
-        })
+        let configuration = Configuration::load(
+            CliOverrides {
+                workspace: Some(root.clone()),
+                config: Some(root.join("mago.toml")),
+                no_version_check: true,
+                ..Default::default()
+            },
+            test_environment(),
+        )
         .unwrap();
         let paths = [
             "config",
@@ -2116,12 +2125,15 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             ),
         )
         .unwrap();
-        let configuration = Configuration::load(CliOverrides {
-            workspace: Some(root.clone()),
-            config: Some(root.join("mago.toml")),
-            no_version_check: true,
-            ..Default::default()
-        })
+        let configuration = Configuration::load(
+            CliOverrides {
+                workspace: Some(root.clone()),
+                config: Some(root.join("mago.toml")),
+                no_version_check: true,
+                ..Default::default()
+            },
+            test_environment(),
+        )
         .unwrap();
 
         let run = ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
@@ -2575,12 +2587,15 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         )
         .unwrap();
         commit_all(&root);
-        let configuration = Configuration::load(CliOverrides {
-            workspace: Some(root.clone()),
-            config: Some(root.join("mago.toml")),
-            no_version_check: true,
-            ..Default::default()
-        })
+        let configuration = Configuration::load(
+            CliOverrides {
+                workspace: Some(root.clone()),
+                config: Some(root.join("mago.toml")),
+                no_version_check: true,
+                ..Default::default()
+            },
+            test_environment(),
+        )
         .unwrap();
 
         let externs = Externs::new(&root, &psr4_roots(&root).unwrap()[0]).unwrap();

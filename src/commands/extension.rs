@@ -34,8 +34,9 @@ impl ExtensionCommand {
     pub fn execute(self, configuration: Configuration) -> Result<ExitCode, Error> {
         let enabled_hosts = configuration.extension_hosts.iter().filter(|(_, host)| host.enabled).collect::<Vec<_>>();
         let (extension_hosts, _) = compile_for_hosts(&configuration)?;
-        let external = initialize_external_linter(&extension_hosts, configuration.php_version)
-            .map_err(mago_orchestrator::OrchestratorError::from)?;
+        let external =
+            initialize_external_linter(&extension_hosts, configuration.php_version, &configuration.environment)
+                .map_err(mago_orchestrator::OrchestratorError::from)?;
 
         match self.command {
             ExtensionSubcommand::List { json } => {
