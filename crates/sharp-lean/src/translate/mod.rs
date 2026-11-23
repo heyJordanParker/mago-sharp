@@ -1315,7 +1315,9 @@ impl Translator<'_, '_> {
     /// The statement `protected def <key> (a : A) : Prop := [fact →] [condition = pure true →] [A.«$valid» a →] holds
     /// do …` of `law`, a law of `full`: the law holds for every value of its parameters that meets its `when` condition
     /// and keeps its class-like's precondition, as each value of it does, given each of `facts`, unless its claim
-    /// finishes with `false`. The condition and the claim compute ints exactly, as [`Body::computes_exactly`] says.
+    /// finishes with `false`. A parameter of one case of a machine holds a value of that case alone that keeps the
+    /// case's invariants, as [`machine::HeldCase::premises`] states it. The condition and the claim compute ints
+    /// exactly, as [`Body::computes_exactly`] says.
     /// With `reading`, each value of an interface is read as one of an implementer, as [`Body::reads_as`] says.
     fn law_statement(
         &self,
@@ -1365,13 +1367,17 @@ impl Translator<'_, '_> {
             uses.extend(condition_uses);
             unmodeled.extend(condition_unmodeled);
         }
-        // Spec section 28: each value the law takes keeps the precondition every value of its class-like keeps.
-        let preconditions: Vec<String> = law
-            .parameter_list
-            .parameters
-            .iter()
-            .filter_map(|parameter| body.valid(parameter.hint.as_ref(), &parameter_name(parameter)))
-            .collect();
+        // Spec section 28: each value the law takes keeps the precondition every value of its class-like keeps, and a
+        // value of one case of a machine is that case's, keeping its invariants, spec section 20.2.
+        let mut preconditions = Vec::new();
+        for parameter in law.parameter_list.parameters.iter() {
+            let value = parameter_name(parameter);
+            if let Some(held) = self.held_case(parameter) {
+                preconditions.extend(held.premises(&value));
+                uses.extend(held.uses);
+            }
+            preconditions.extend(body.valid(parameter.hint.as_ref(), &value));
+        }
         text.extend(preconditions.iter().map(|valid| format!("  {valid} →\n")));
         body.computes_exactly();
         let (lines, claim_uses, claim_unmodeled) = body.expression_body(law.claim);

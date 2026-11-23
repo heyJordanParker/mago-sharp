@@ -4651,3 +4651,159 @@ fn a_law_over_instant_plus_a_constant_duration_proves() {
     assert!(output.status.success(), "{}", printed(&output));
     assert!(compiled(root, "app/Visits/Visit.sharp").exists());
 }
+
+const RECEIPT: &str = "namespace App.Store;\n\npublic class Receipt\n{\n    public Receipt(\n        public string holder { get; set; },\n        public string? gateway { get; set; } = null,\n        public string? last4 { get; set; } = null,\n        public string? brand { get; set; } = null,\n        public string? transactionId { get; set; } = null,\n        public bool isTest { get; set; } = false,\n    ) : super() {\n    }\n}\n";
+
+const VARIANT: &str = "namespace App.Store;\n\npublic class Variant\n{\n}\n";
+
+/// `app/Store/OrderStatus.sharp`, a machine of nine cases whose moves pay, refund and dispute an order, with `laws` and
+/// the invariant `aPartlyRefundedOrderHoldsARefund` in its body, which reads `Receipt` and `Variant`.
+fn refunding_order(laws: &str) -> String {
+    format!(
+        r#"namespace App.Store;
+
+import Sharp.Key;
+import Sharp.Tag;
+
+[Tag("status")]
+public machine OrderStatus : Variant
+{{
+    [Key("pending")] case Pending([Key("payment")] Receipt payment)
+    {{
+        public OrderStatus.Paid pay(Receipt payment) => OrderStatus.Paid(payment);
+        public OrderStatus.Reserved reserve(Receipt payment) => OrderStatus.Reserved(payment);
+        public OrderStatus.Failed fail(string? failureReason) => OrderStatus.Failed(failureReason, this.payment);
+        public OrderStatus.Abandoned abandon(string? failureReason) => OrderStatus.Abandoned(failureReason, this.payment);
+        public OrderStatus.Canceled cancel(string? failureReason) => OrderStatus.Canceled(failureReason, this.payment);
+    }}
+    [Key("reserved")] case Reserved([Key("payment")] Receipt payment)
+    {{
+        public OrderStatus.Paid pay(Receipt payment) => OrderStatus.Paid(payment);
+        public OrderStatus.Failed fail(string? failureReason) => OrderStatus.Failed(failureReason, this.payment);
+    }}
+    [Key("paid")] case Paid([Key("payment")] Receipt payment)
+    {{
+        public OrderStatus.PartiallyRefunded|OrderStatus.Refunded refund(int cents, int amount)
+        {{
+            if (cents <= 0 || cents > amount) {{ throw new ValueError(`A refund takes between 1 and ${{amount}}, not ${{cents}}.`); }}
+            return cents == amount ? OrderStatus.Refunded(this.payment) : OrderStatus.PartiallyRefunded(cents, this.payment);
+        }}
+        public OrderStatus.Disputed dispute() => OrderStatus.Disputed(0, this.payment);
+        public OrderStatus.Paid pay(Receipt payment) => this;
+    }}
+    [Key("partiallyRefunded")] case PartiallyRefunded([Key("refunded_amount")] int refundedCents, [Key("payment")] Receipt payment)
+    {{
+        public OrderStatus.PartiallyRefunded|OrderStatus.Refunded refund(int cents, int amount)
+        {{
+            if (cents <= 0 || this.refundedCents + cents > amount) {{ throw new ValueError(`A refund takes between 1 and ${{amount - this.refundedCents}}, not ${{cents}}.`); }}
+            return this.refundedCents + cents == amount ? OrderStatus.Refunded(this.payment) : OrderStatus.PartiallyRefunded(this.refundedCents + cents, this.payment);
+        }}
+        public OrderStatus.Disputed dispute()
+            => this.refundedCents >= 0 ? OrderStatus.Disputed(this.refundedCents, this.payment) : throw new ValueError(`${{this.refundedCents}} is below 0.`);
+        public OrderStatus.PartiallyRefunded pay(Receipt payment) => this;
+    }}
+    [Key("disputed")] case Disputed([Key("refunded_amount")] int refundedCents, [Key("payment")] Receipt payment)
+    {{
+        public OrderStatus.Paid|OrderStatus.PartiallyRefunded win()
+            => this.refundedCents > 0 ? OrderStatus.PartiallyRefunded(this.refundedCents, this.payment) : OrderStatus.Paid(this.payment);
+        public OrderStatus.Refunded lose(int cents, int amount)
+            => this.refundedCents + cents == amount ? OrderStatus.Refunded(this.payment) : throw new ValueError(`A lost dispute takes all ${{amount - this.refundedCents}}, not ${{cents}}.`);
+        public OrderStatus.Disputed pay(Receipt payment) => this;
+    }}
+    [Key("failed")] case Failed([Key("failure_reason")] string? failureReason, [Key("payment")] Receipt payment)
+    {{ public OrderStatus.Paid pay(Receipt payment) => OrderStatus.Paid(payment); }}
+    [Key("abandoned")] case Abandoned([Key("failure_reason")] string? failureReason, [Key("payment")] Receipt payment)
+    {{ public OrderStatus.Paid pay(Receipt payment) => OrderStatus.Paid(payment); }}
+    [Key("canceled")] case Canceled([Key("failure_reason")] string? failureReason, [Key("payment")] Receipt payment)
+    {{
+        public OrderStatus.Canceled receiveLatePayment(Receipt payment) => OrderStatus.Canceled(this.failureReason, payment);
+        public OrderStatus.Refunded refund(int cents, int amount)
+            => cents == amount ? OrderStatus.Refunded(this.payment) : throw new ValueError(`Refunded only in full, ${{amount}}, not ${{cents}}.`);
+    }}
+    [Key("refunded")] case Refunded([Key("payment")] Receipt payment)
+    {{ public OrderStatus.Refunded pay(Receipt payment) => this; }}
+
+    public static OrderStatus.Pending placed(Receipt payment) => OrderStatus.Pending(payment);
+
+    public int refunded(int amount) => match (this) {{
+        OrderStatus.PartiallyRefunded partly => partly.refundedCents,
+        OrderStatus.Disputed disputed => disputed.refundedCents,
+        OrderStatus.Refunded => amount,
+        OrderStatus.Pending or OrderStatus.Reserved or OrderStatus.Paid or OrderStatus.Failed or OrderStatus.Abandoned or OrderStatus.Canceled => 0,
+    }};
+    public bool settled() => match (this) {{
+        OrderStatus.Refunded => true,
+        OrderStatus.Pending or OrderStatus.Reserved or OrderStatus.Paid or OrderStatus.PartiallyRefunded or OrderStatus.Disputed or OrderStatus.Failed or OrderStatus.Abandoned or OrderStatus.Canceled => false,
+    }};
+    public Receipt snapshot() => match (this) {{
+        OrderStatus.Pending pending => pending.payment,
+        OrderStatus.Reserved reserved => reserved.payment,
+        OrderStatus.Paid paid => paid.payment,
+        OrderStatus.PartiallyRefunded partly => partly.payment,
+        OrderStatus.Disputed disputed => disputed.payment,
+        OrderStatus.Failed failed => failed.payment,
+        OrderStatus.Abandoned abandoned => abandoned.payment,
+        OrderStatus.Canceled canceled => canceled.payment,
+        OrderStatus.Refunded refunded => refunded.payment,
+    }};
+
+    law aPartlyRefundedOrderHoldsARefund(OrderStatus.PartiallyRefunded partly) => partly.refundedCents > 0;
+
+{laws}}}
+"#
+    )
+}
+
+/// Spec sections 20.2 and 28: a law over one case of a machine and another value holds for each value of that case
+/// that keeps the case's invariants, so a law true of `Refunded` alone proves, and so does one whose claim needs the
+/// invariant of `PartiallyRefunded`.
+#[test]
+fn a_law_over_one_case_of_a_machine_beside_another_parameter_holds_for_each_value_of_that_case() {
+    let laws = "    law aFurtherRefundKeepsThePayment(OrderStatus.PartiallyRefunded partly, int cents, int amount) when cents > 0 && partly.refundedCents + cents <= amount\n        => partly.refund(cents, amount).snapshot().transactionId == partly.payment.transactionId;\n\n    law aRefundedOrderRefundsTheAmount(OrderStatus.Refunded refunded, int amount) => refunded.refunded(amount) == amount;\n";
+    let order = refunding_order(laws);
+    let directory = library_project(&[
+        ("app/Store/OrderStatus.sharp", &order),
+        ("app/Store/Receipt.sharp", RECEIPT),
+        ("app/Store/Variant.sharp", VARIANT),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Store/OrderStatus.sharp").exists());
+}
+
+/// Spec sections 20.2 and 28: a law over two cases of a machine holds for each pair of their values that keep their
+/// cases' invariants.
+#[test]
+fn a_law_over_two_cases_of_a_machine_holds_for_each_pair_of_their_values() {
+    let laws = "    law aRefundedOrderSettlesWhereAPartlyRefundedOneHoldsARefund(OrderStatus.Refunded refunded, OrderStatus.PartiallyRefunded partly)\n        => refunded.settled() && !partly.settled() && partly.refundedCents > 0;\n";
+    let order = refunding_order(laws);
+    let directory = library_project(&[
+        ("app/Store/OrderStatus.sharp", &order),
+        ("app/Store/Receipt.sharp", RECEIPT),
+        ("app/Store/Variant.sharp", VARIANT),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Store/OrderStatus.sharp").exists());
+}
+
+/// Spec section 20.2: `Json.decode` builds a case that keeps its invariants, whatever value a move gives, so a law
+/// true of the one value every move builds, `Paid(5)`, is not proven, and the small values that break it keep the
+/// case's invariants: `Paid(0)` breaks `paidIsPositive`, so it names `Paid(1)`.
+#[test]
+fn a_law_true_after_every_move_but_false_of_a_decoded_case_is_not_proven_and_names_a_value_its_case_keeps() {
+    let order = "namespace App;\n\nimport Sharp.Key;\nimport Sharp.Tag;\n\n[Tag(\"status\")]\npublic machine Order\n{\n    [Key(\"open\")] case Open\n    {\n        public Order.Paid pay() => Order.Paid(5);\n    }\n\n    [Key(\"paid\")] final case Paid(int cents);\n\n    public static Order.Open open() => Order.Open;\n\n    law paidIsPositive(Order.Paid paid) => paid.cents > 0;\n\n    law paidIsFive(Order.Paid paid, int x) => paid.cents == 5;\n}\n";
+    let directory = library_project(&[("app/Order.sharp", order)]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("error[law-unproven]: law paidIsFive is not proven\n"), "{}", printed(&output));
+    assert!(printed(&output).contains(" = fails for: paid = Order.Paid(1), x = 0\n"), "{}", printed(&output));
+}

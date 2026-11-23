@@ -75,10 +75,11 @@ impl Translator<'_, '_> {
 
     /// The search of `law` of the class-like `full`: its claim, and `<law>.«$breaking»`, the first values of the law's
     /// parameters its claim finishes with `false` on, written as PHP# writes them, `a = new Account(0), amount = -1`,
-    /// as `Sharp.Law.first` finds them, the first parameter's values varying slowest. A parameter takes its first
-    /// candidate value alone once the lists of values before it number more than [`LIMIT`] with its others. None for a
-    /// law without parameters, whose claim takes no value, and for one with a parameter whose type has no candidate
-    /// value.
+    /// as `Sharp.Law.first` finds them, the first parameter's values varying slowest, leaving out each value of one case
+    /// of a machine that breaks one of the case's invariants, since no program holds it, spec section 20.2. A parameter
+    /// takes its first candidate value alone once the lists of values before it number more than [`LIMIT`] with its
+    /// others. None for a law without parameters, whose claim takes no value, and for one with a parameter whose type
+    /// has no candidate value.
     pub(super) fn breaking(&self, full: &[u8], lean: &str, short: &str, law: &LawNode) -> Option<Breaking> {
         if law.parameter_list.parameters.is_empty() {
             return None;
@@ -88,7 +89,15 @@ impl Translator<'_, '_> {
         let mut candidates = Candidates { body: &mut body, reach: self.reach, span: law.name.span, bound: 0 };
         let mut lines = Vec::new();
         let mut lists = 1;
+        let mut kept = Vec::new();
+        let mut kept_uses = Vec::new();
         for (index, parameter) in law.parameter_list.parameters.iter().enumerate() {
+            if let Some(held) = self.held_case(parameter) {
+                kept.extend(
+                    held.invariants.iter().map(|claim| format!("Sharp.Machine.breaks ({claim} «$argument{index}»)")),
+                );
+                kept_uses.extend(held.uses);
+            }
             let r#type = get_union_from_hint(
                 parameter.hint.as_ref()?,
                 Some(word(full)),
@@ -118,11 +127,17 @@ impl Translator<'_, '_> {
         let key = names::member(lean, law.name.value);
         let arguments: Vec<String> =
             (0..law.parameter_list.parameters.len()).map(|index| format!("«$argument{index}»")).collect();
-        lines.push(format!("  Sharp.Law.broken ({} {})", claim.key, arguments.join(" ")));
+        let broken = format!("Sharp.Law.broken ({} {})", claim.key, arguments.join(" "));
+        lines.push(if kept.is_empty() {
+            format!("  {broken}")
+        } else {
+            format!("  if {} then none else {broken}", kept.join(" || "))
+        });
         let text =
             format!("{}\n\nprotected def {key}.«$breaking» : Option String :=\n{}", claim.text, lines.join("\n"));
         let (_, mut uses, mut unmodeled) = body.finish();
         uses.extend(claim.uses);
+        uses.extend(kept_uses);
         unmodeled.extend(claim.unmodeled);
 
         Some(Breaking { text, uses, unmodeled })
