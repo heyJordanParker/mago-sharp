@@ -2203,7 +2203,7 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
     assert_eq!(
         lambda.diagnostics(),
         [
-            "3:45 compile error: `field` cannot be used in a lambda: PHP would call the accessor again instead of reading the storage.",
+            "3:45 compile error: `field` cannot be used in a lambda: inside a lambda `field` isn't the property's storage.",
             "3:59 compile error: Could not infer a precise return type for property hook `Report.b.get`. Saw type `Any?`."
         ]
     );

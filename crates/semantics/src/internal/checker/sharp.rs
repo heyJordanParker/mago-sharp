@@ -309,8 +309,8 @@ const ANY: &[u8] = b"Any";
 ///   a method body has, which runs each time a call leaves the argument out, spec section 7. A parameter written
 ///   `int ...values` is variadic, as spec section 7 writes it, and PHP's own checks report a variadic parameter that is not the last or has a default. `check_parameter_list` reports a
 ///   variadic parameter that declares a member or has a `void` type in a `.sharp` file only, as upstream Mago reports
-///   neither. An optional parameter before a required one is an error, because PHP would make it required. A
-///   variadic parameter is not a required one, as in PHP. A default of `Position.current()` of the standard library is
+///   neither. An optional parameter before a required one is an error, since an optional parameter comes after
+///   every required one. A variadic parameter is not a required one. A default of `Position.current()` of the standard library is
 ///   the caller's position, spec section 27, which a PHP# call passes. A default that reads one part of it, as
 ///   `Position.current().line`, is an error, because the parameter takes the whole position.
 /// - Types: `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter in scope written by its short name,
@@ -795,10 +795,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Enum(r#enum), File) => {
             check_case_class_names(r#enum, context);
             check_case_fields_named_like_members(r#enum, context);
-            // Spec section 20: a backed enum runs as a PHP enum, which carries no type arguments.
+            // Spec section 20: a backed enum declares no type parameters.
             if let (Some(list), Some(backing)) = (&r#enum.type_parameters, &r#enum.backing_type_hint) {
                 context.report(
-                    Issue::error("A backed enum takes no type parameters: it runs as a PHP enum, which holds none.")
+                    Issue::error("A backed enum declares no type parameters.")
                         .with_annotation(Annotation::primary(list.span()).with_message("Declared here."))
                         .with_annotation(Annotation::secondary(backing.span()).with_message("Backed here."))
                         .with_note("Remove the backing type to give the enum type parameters, as in `enum Option<T>`."),
@@ -1252,14 +1252,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             enter(node, Class, context)
         }
         (Node::ClassLikeMember(ClassLikeMember::Property(_)) | Node::EnumBackingTypeHint(_), Enum) => None,
-        (Node::EnumCase(case), Enum) if case.item.name().value.eq_ignore_ascii_case(b"class") => {
-            context.report(
-                Issue::error("An enum case cannot be named `class`: PHP reserves `class` for the class name.")
-                    .with_annotation(Annotation::primary(case.item.name().span).with_message("Declared here.")),
-            );
-
-            Some(Enum)
-        }
         // A machine's case, spec section 20.2, takes `final` and a block of members, which `check_enum` keeps to a
         // machine, and its members are checked as the machine's own.
         (Node::EnumCase(case), Enum) => {
@@ -3744,8 +3736,8 @@ fn check_header(inheritance: &Inheritance, place: Place, context: &mut Context<'
     }
 }
 
-/// Reports each optional parameter before the last required one, which PHP makes required with a deprecation. A
-/// variadic parameter is not a required one, as in PHP.
+/// Reports each optional parameter before the last required one: an optional parameter comes after every required one.
+/// A variadic parameter is not a required one.
 fn report_optional_before_required(parameters: &FunctionLikeParameterList, context: &mut Context<'_, '_, '_>) {
     let Some(last_required) = parameters
         .parameters
@@ -3759,13 +3751,12 @@ fn report_optional_before_required(parameters: &FunctionLikeParameterList, conte
     for parameter in parameters.parameters.iter().take_while(|parameter| parameter.span() != last_required.span()) {
         if parameter.default_value.is_some() {
             context.report(
-                Issue::error(format!(
-                    "The optional parameter `{}` comes before the required parameter `{}`: PHP would make it required.",
-                    BytesDisplay(parameter.variable.name),
-                    BytesDisplay(last_required.variable.name)
-                ))
-                .with_annotation(Annotation::primary(parameter.span()).with_message("Optional here."))
-                .with_help("Move the optional parameter after the required ones, or give the required one a default."),
+                Issue::error("An optional parameter comes after every required one.")
+                    .with_annotation(Annotation::primary(parameter.span()).with_message("Optional here."))
+                    .with_annotation(Annotation::secondary(last_required.span()).with_message("Required here."))
+                    .with_help(
+                        "Move the optional parameter after the required ones, or give the required one a default.",
+                    ),
             );
         }
     }
@@ -4314,12 +4305,12 @@ fn check_accessor_returns(accessor: &[u8], observed_after: bool, block: &Block, 
             (b"willSet" | b"didSet", Some(value)) => context.report(
                 Issue::error(format!("`{}` must not return a value.", BytesDisplay(accessor)))
                     .with_annotation(Annotation::primary(value.span()).with_message("Returned here."))
-                    .with_note("It runs inside the `set` hook, which PHP gives the return type `void`."),
+                    .with_note("It runs inside the `set` accessor, which returns no value."),
             ),
             (b"get", None) => context.report(
                 Issue::error("A `get` accessor must return a value.")
                     .with_annotation(Annotation::primary(r#return.span()).with_message("Returns no value."))
-                    .with_note("PHP gives a `get` hook the property's type.")
+                    .with_note("A `get` accessor returns the property's type.")
                     .with_help("Return the property's value, such as `return field;`."),
             ),
             (b"set", Some(value)) | (b"init", Some(value)) => context.report(
@@ -4329,7 +4320,7 @@ fn check_accessor_returns(accessor: &[u8], observed_after: bool, block: &Block, 
                     "A `set` accessor must not return a value."
                 })
                 .with_annotation(Annotation::primary(value.span()).with_message("Returned here."))
-                .with_note("PHP gives a `set` hook the return type `void`.")
+                .with_note("A `set` accessor writes the value, and returns none.")
                 .with_help("Write the value with `field = value;`, then `return;` if the body ends early."),
             ),
             _ => {}
@@ -4352,7 +4343,7 @@ fn check_accessor_node(node: Node<'_, '_>, property: &[u8], in_lambda: bool, con
         Node::ConstantAccess(access) if in_lambda && context.names.binding(&access.name) == Some(Binding::Field) => {
             context.report(
                 Issue::error(
-                    "`field` cannot be used in a lambda: PHP would call the accessor again instead of reading the storage.",
+                    "`field` cannot be used in a lambda: inside a lambda `field` isn't the property's storage.",
                 )
                 .with_annotation(Annotation::primary(access.span()).with_message("Used here."))
                 .with_help("Copy `field` into a local before the lambda, and use the local inside it."),
@@ -4367,7 +4358,7 @@ fn check_accessor_node(node: Node<'_, '_>, property: &[u8], in_lambda: bool, con
             context.report(
                 Issue::error(format!("Write `field` instead of `this.{property}` inside `{property}`'s own accessor."))
                     .with_annotation(Annotation::primary(node.span()).with_message("Written here."))
-                    .with_note("PHP reads and writes the storage there, while C# would call the accessor again."),
+                    .with_note("`field` names the property's storage inside its own accessors."),
             );
         }
         _ => {}
@@ -5433,12 +5424,12 @@ fn check_intersection(intersection: &IntersectionHint, place: Place, context: &m
 
                 context.report(
                     Issue::error(format!(
-                        "Duplicate type `{}` is redundant.",
+                        "`{}` names `{}` twice: name it once.",
+                        BytesDisplay(context.get_code_snippet(intersection)),
                         BytesDisplay(context.get_code_snippet(*member))
                     ))
                     .with_annotation(Annotation::primary(member.span()).with_message("Written again here."))
-                    .with_annotation(Annotation::secondary(first.span()).with_message("First written here."))
-                    .with_help("Remove the second one."),
+                    .with_annotation(Annotation::secondary(first.span()).with_message("First written here.")),
                 );
                 joined = false;
 
@@ -5591,10 +5582,13 @@ fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_
 
         let written = |hint: &Hint| BytesDisplay(context.get_code_snippet(hint)).to_string();
         let issue = match overlap {
-            Overlap::Written => Issue::error(format!("Duplicate type `{}` is redundant.", written(member)))
-                .with_annotation(Annotation::primary(member.span()).with_message("Written again here."))
-                .with_annotation(Annotation::secondary(first.span()).with_message("First written here."))
-                .with_help("Remove the second one, as PHP refuses a union that names a type twice."),
+            Overlap::Written => Issue::error(format!(
+                "`{}` names `{}` twice: name it once.",
+                BytesDisplay(context.get_code_snippet(union)),
+                written(member)
+            ))
+            .with_annotation(Annotation::primary(member.span()).with_message("Written again here."))
+            .with_annotation(Annotation::secondary(first.span()).with_message("First written here.")),
             Overlap::Iterated { collection, iterable } => Issue::error(format!(
                 "`{}` is already an `{}`, so the union is `{}`.",
                 written(collection),
@@ -5859,7 +5853,7 @@ fn has_required_constructor(class: &ClassLike) -> bool {
 /// Checks a named constructor of `class`, spec section 9.1: its class has objects of its own, unless the named
 /// constructor is `required`, the contract each subclass keeps, spec section 11, it is declared on its own
 /// class's name, as in `Artifact.fromJson`, takes only an access modifier, has a name that is neither its class's nor
-/// one PHP reserves, and passes control to the main constructor with `: this(…)`. `check_members` reports a name
+/// a magic method's, which the engine calls itself, and passes control to the main constructor with `: this(…)`. `check_members` reports a name
 /// another member of the class has, as PHP's duplicate-method check, since the named constructor runs as the static
 /// method of its name.
 fn check_named_constructor(
@@ -5901,10 +5895,12 @@ fn check_named_constructor(
             constructor.name.span,
             "Declared here.",
         );
-    } else if constructor.name.value.starts_with(b"__") {
+    } else if super::MAGIC_METHOD_SEMANTICS
+        .iter()
+        .any(|(magic_method, ..)| magic_method.eq_ignore_ascii_case(constructor.name.value))
+    {
         report(
-            "A named constructor's name cannot start with `__`: PHP reserves those names for its magic methods."
-                .to_owned(),
+            format!("A named constructor cannot be named `{name}`: the engine calls `{name}` itself."),
             constructor.name.span,
             "Declared here.",
         );
@@ -7088,7 +7084,6 @@ pub fn check_function_call(function_call: &FunctionCall, context: &mut Context<'
                 .with_annotation(
                     Annotation::primary(argument.span()).with_message("The only argument of `assert` is a spread."),
                 )
-                .with_note("PHP compiles `assert` with one argument by adding its text as a positional description.")
                 .with_help("Pass the condition without `...`, or pass the description by name after the spread."),
         );
     }
@@ -7244,9 +7239,24 @@ fn check_local_name(name: &[u8], span: Span, kind: &str, context: &mut Context<'
 
 /// Refuses, in an enum that runs as classes, spec sections 20 and 31, a case named as a type PHP# reserves, since each
 /// case runs as a class of its name, and a method named as a case that carries data, ignoring case as PHP does, since
-/// `PaymentResult.Paid(…)` creates that case.
+/// `PaymentResult.Paid(…)` creates that case. In any other enum a case is read as `Role.name`, and `Role.class` reads
+/// the class, so no case is named `class`, while `Shape.class(…)` creates a case that carries data.
 fn check_case_class_names(r#enum: &mago_syntax::cst::Enum, context: &mut Context<'_, '_, '_>) {
     if !r#enum.runs_as_classes() {
+        for member in &r#enum.members {
+            if let ClassLikeMember::EnumCase(case) = member
+                && case.item.name().value.eq_ignore_ascii_case(b"class")
+            {
+                context.report(
+                    Issue::error(format!(
+                        "An enum case cannot be named `class`: `{}.class` reads the class, not a case.",
+                        BytesDisplay(r#enum.name.value)
+                    ))
+                    .with_annotation(Annotation::primary(case.item.name().span).with_message("Declared here.")),
+                );
+            }
+        }
+
         return;
     }
 

@@ -5061,7 +5061,10 @@ fn report_signature_compatibility_issue<'ctx, A>(
                         .with_message(format!("Parent method `{parent_display}` takes any number of `{param_name}`")),
                 )
                 .with_annotations(in_class)
-                .with_note("PHP refuses an override that does not take every argument the overridden method takes.")
+                .with_note(format!(
+                    "An override of a variadic parameter is variadic too, written as `int ...{param_name}` or as the \
+                     `List<int> {param_name}` it arrives as."
+                ))
                 .with_help(format!("Declare `{param_name}` variadic, as in `int ...{param_name}`.")),
             );
         }
@@ -5988,14 +5991,15 @@ fn check_class_like_properties<'ctx, A>(
                                     Annotation::secondary(parent_type.span)
                                         .with_message(format!("The parent property is defined with type `{parent_type_id}` here.")),
                                 )
-                                .with_note("PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class.")
+                                .with_note("An override keeps the type of the property it overrides.")
                                 .with_help(format!("Change the type of `{property}` to `{parent_type_id}` to match the parent property."))
                             );
-                    } else if is_sharp {
+                    } else if is_sharp && !class_like_metadata.flags.is_sharp() {
                         let erased_type = get_php_declared_type(&declaring_type.type_union, context.codebase);
                         let erased_parent_type = get_php_declared_type(&parent_type.type_union, context.codebase);
 
-                        // The engine links the erased declarations as PHP does.
+                        // A PHP# override runs with the type its parent erases to, and the bridge checks each write
+                        // against its own type. A plain PHP override links its own declaration against the erased one.
                         if is_property_type_variance_invalid(
                             context.codebase,
                             Dialect::Php,
@@ -6016,21 +6020,11 @@ fn check_class_like_properties<'ctx, A>(
                                 &erased_parent_type_id,
                                 method_signature::bound_example(context.codebase, Some(parent_type), &erased_type),
                             );
-                            let message = if context.dialect.is_sharp() {
-                                format!(
-                                    "Property `{}` must have {erased_parent_type_id}, the type `{}` erases to.",
-                                    display_sharp_member(class_name, &property_name),
-                                    display_sharp_member(parent_class_name, &property_name)
-                                )
-                            } else {
-                                format!(
-                                    "Property `{class_name}::${property_name}` must have the type {erased_parent_type_id}, the type `{parent_class_name}::${property_name}` erases to."
-                                )
-                            };
-
                             context.collector.report_with_code(
                                 IssueCode::IncompatiblePropertyType,
-                                Issue::error(message)
+                                Issue::error(format!(
+                                    "Property `{class_name}::${property_name}` must have the type {erased_parent_type_id}, the type `{parent_class_name}::${property_name}` erases to."
+                                ))
                                 .with_annotation(
                                     Annotation::primary(declaring_type.span)
                                         .with_message(format!("Erases to {erased_type_id}.")),
@@ -6038,7 +6032,7 @@ fn check_class_like_properties<'ctx, A>(
                                 .with_annotation(Annotation::secondary(parent_type.span).with_message(format!(
                                     "Erases to {erased_parent_type_id}."
                                 )))
-                                .with_note("PHP# erases type parameters when it compiles, and PHP requires a property to keep the type of the property it overrides.")
+                                .with_note("A PHP# class's type parameters erase as it compiles, and an override keeps the type of the property it overrides.")
                                 .with_help(help),
                             );
                         }
@@ -6147,21 +6141,22 @@ fn check_class_like_properties<'ctx, A>(
                 let parent_type_id = localized_parent_type.get_id();
 
                 context.collector.report_with_code(
-                        IssueCode::IncompatiblePropertyType,
-                        Issue::error(format!(
-                            "Property `{child_display}` has an incompatible type declaration from docblock."
-                        ))
-                        .with_annotation(
-                            Annotation::primary(declaring_type.span)
-                                .with_message(format!("This type `{declaring_type_id}` is incompatible with the parent's type.")),
-                        )
-                        .with_annotation(
-                            Annotation::secondary(parent_type.span)
-                                .with_message(format!("The parent property is defined with type `{parent_type_id}` here.")),
-                        )
-                        .with_note("PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class.")
-                        .with_help(format!("Change the type of `{property}` to `{parent_type_id}` to match the parent property.")),
-                    );
+                    IssueCode::IncompatiblePropertyType,
+                    Issue::error(format!(
+                        "Property `{child_display}` has an incompatible type declaration from docblock."
+                    ))
+                    .with_annotation(Annotation::primary(declaring_type.span).with_message(format!(
+                        "This type `{declaring_type_id}` is incompatible with the parent's type."
+                    )))
+                    .with_annotation(
+                        Annotation::secondary(parent_type.span)
+                            .with_message(format!("The parent property is defined with type `{parent_type_id}` here.")),
+                    )
+                    .with_note("An override keeps the type of the property it overrides.")
+                    .with_help(format!(
+                        "Change the type of `{property}` to `{parent_type_id}` to match the parent property."
+                    )),
+                );
             }
         }
 
@@ -6546,7 +6541,7 @@ fn check_class_like_constants<'ctx, 'arena, A>(
 
                     context.collector.report_with_code(
                         IssueCode::IncompatibleConstantAccess,
-                        Issue::error(format!("Constant `{constant}` has narrower visibility than parent constant."))
+                        Issue::error(format!("`{constant}` narrows the constant's access: an override keeps the constant's access or widens it."))
                         .with_annotation(
                             Annotation::primary(child_span)
                                 .with_message(format!("This constant is declared as `{child_visibility}`, which is narrower than the parent's `{parent_visibility}`")),
@@ -6555,7 +6550,6 @@ fn check_class_like_constants<'ctx, 'arena, A>(
                             Annotation::secondary(parent_span)
                                 .with_message(format!("Parent constant is declared as `{parent_visibility}` in `{parent_class_name}` here")),
                         )
-                        .with_note("PHP requires that overriding constants maintain or widen visibility (public → protected → private).")
                         .with_help(format!("Change the visibility of `{constant_name}` to at least `{parent_visibility}` to match the parent constant.")),
                     );
                 }

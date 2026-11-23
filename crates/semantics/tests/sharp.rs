@@ -757,7 +757,10 @@ fn an_intersection_joins_classes_and_interfaces_wherever_a_type_goes() {
         issues(
             "namespace App.Tenant;\n\nclass Report\n{\n    private Lib & Other & Lib g;\n\n    private Lib<int> & Lib<int> h;\n}\n"
         ),
-        ["5:27 Duplicate type `Lib` is redundant.", "7:24 Duplicate type `Lib<int>` is redundant."]
+        [
+            "5:27 `Lib & Other & Lib` names `Lib` twice: name it once.",
+            "7:24 `Lib<int> & Lib<int>` names `Lib<int>` twice: name it once."
+        ]
     );
     // Parentheses around one member get the parentheses error, never the error that the member is no class.
     let parenthesized = issues("namespace App.Tenant;\n\nclass Report\n{\n    private (Lib) & Other g;\n}\n");
@@ -1786,7 +1789,7 @@ fn a_named_constructor_passes_control_with_this_and_its_arguments_cannot_use_thi
 #[test]
 fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_and_a_body() {
     // A PHP# class names its members as declared, spec section 24, so `Order.order` is no `Order.Order`.
-    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.Order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public Order.order() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n    public required Order.parsed() : this(1) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.Order() : this(1) { }\n    public Order.__get() : this(1) { }\n    public Order.order() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n    public required Order.parsed() : this(1) { }\n}\n";
     // A `required` one is the contract each subclass keeps, so an abstract class declares it, spec section 11.
     let r#abstract = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    public Shape(int sides) { }\n\n    public Shape.triangle() : this(3) { }\n    public required Shape.parsed() : this(3) { }\n}\n";
 
@@ -1795,7 +1798,7 @@ fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_a
         [
             "7:12 A named constructor is declared on its own class, as in `Order.copy`.",
             "8:18 A named constructor cannot have its class's name: `new Order(…)` calls the main constructor.",
-            "9:18 A named constructor's name cannot start with `__`: PHP reserves those names for its magic methods.",
+            "9:18 A named constructor cannot be named `__get`: the engine calls `__get` itself.",
             "11:12 A named constructor takes only `public`, `protected`, `private` or `required`: remove `static`.",
             "13:23 A named constructor's parameter declares no property: only the main constructor's parameters do.",
             "14:35 A named constructor needs a body, even an empty `{ }`.",
@@ -1807,6 +1810,9 @@ fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_a
             "7:18 An abstract class has no objects of its own, so a named constructor it declares is `required`, for each subclass to declare its own."
         ]
     );
+    // A name that starts with `__` and is no magic method's is a name like any other.
+    let made = "namespace App.Tenant;\n\npublic class Maker\n{\n    public Maker(int size) { }\n\n    public Maker.__make(int size) : this(size) { }\n}\n";
+    assert_eq!(issues(made), Vec::<String>::new());
 }
 
 /// Spec section 9.1: a named constructor runs as the static method of its name, so it shares no name with a method of
@@ -2098,12 +2104,7 @@ fn a_struct_declares_operators_as_a_class_does() {
 fn an_optional_parameter_before_a_required_one_is_an_error() {
     let code = leak(method("        return extra;\n").replace("int extra", "int first = 1, int extra, int last = 2"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "5:20 The optional parameter `first` comes before the required parameter `extra`: PHP would make it required."
-        ]
-    );
+    assert_eq!(issues(code), ["5:20 An optional parameter comes after every required one."]);
 }
 
 #[test]
@@ -4563,7 +4564,7 @@ fn a_union_typed_class_constant_follows_the_union_rules() {
         [
             "5:22 A type that holds null is written `int?`.",
             "6:22 Unexpected `iterable`",
-            "7:29 Duplicate type `int` is redundant.",
+            "7:29 `int|string|int` names `int` twice: name it once.",
         ]
     );
 }
@@ -4759,7 +4760,7 @@ fn nullable_properties_with_accessor_bodies_are_in_the_slice() {
     assert_eq!(issues(address), Vec::<String>::new());
 }
 
-/// A lambda is a function of its own, so PHP would call the accessor again where it reads `$this->count`.
+/// A lambda is a function of its own, so inside it `field` isn't the property's storage.
 #[test]
 fn field_inside_a_lambda_in_an_accessor_is_an_error() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int count { get { const read = () => field; const twice = () => () => field; return read(); } set; }\n}\n";
@@ -4767,14 +4768,13 @@ fn field_inside_a_lambda_in_an_accessor_is_an_error() {
     assert_eq!(
         issues(code),
         [
-            "5:49 `field` cannot be used in a lambda: PHP would call the accessor again instead of reading the storage.",
-            "5:82 `field` cannot be used in a lambda: PHP would call the accessor again instead of reading the storage.",
+            "5:49 `field` cannot be used in a lambda: inside a lambda `field` isn't the property's storage.",
+            "5:82 `field` cannot be used in a lambda: inside a lambda `field` isn't the property's storage.",
         ]
     );
 }
 
-/// PHP reads and writes the storage where a property's own accessor names it, while C# calls the accessor again, so
-/// the accessor writes `field`. A lambda calls the accessor again in both.
+/// `field` names the property's storage inside its own accessors, so an accessor writes `field`, never `this.count`.
 #[test]
 fn the_property_read_through_this_inside_its_own_accessor_is_an_error_that_names_field() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int count { get => this.count + 1; set => this.count = value; }\n    public int other { get { const read = () => this.other; return read(); } }\n    public int size { get => (this).size + (this?.size ?? 0); }\n}\n";
@@ -4790,10 +4790,10 @@ fn the_property_read_through_this_inside_its_own_accessor_is_an_error_that_names
     );
 }
 
-/// PHP gives a `get` hook the property's type and a `set` hook `void`, so `get` returns a value and `set` returns
-/// none, as does `init`, which runs as the `set` hook. A lambda in an accessor returns for itself.
+/// A `get` accessor returns the property's type, so it returns a value, and a `set` writes the value and returns none,
+/// as does `init`. A lambda in an accessor returns for itself.
 #[test]
-fn a_get_returns_a_value_and_a_set_returns_none_as_php_hooks_do() {
+fn a_get_returns_a_value_and_a_set_returns_none() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int a { get { return; } }\n    public int b { get => field; set { return value; } }\n    public int c { get => field; set { const run = () => { return 1; }; return; } }\n    public int d { get { const run = () => { return; }; return 1; } }\n    public int e { get => field; init { return value; } }\n}\n";
 
     assert_eq!(
@@ -4815,7 +4815,7 @@ fn field_in_a_nested_block_gives_storage_and_field_only_in_a_lambda_does_not() {
     assert_eq!(
         issues(code),
         [
-            "6:45 `field` cannot be used in a lambda: PHP would call the accessor again instead of reading the storage.",
+            "6:45 `field` cannot be used in a lambda: inside a lambda `field` isn't the property's storage.",
             "6:73 The property `b` has no storage for its initial value: give it an auto accessor, such as `get;`, or use `field` in an accessor body.",
         ]
     );
@@ -4971,10 +4971,16 @@ fn void_in_a_union_reports_only_the_php_error() {
 }
 
 #[test]
-fn a_type_written_twice_in_a_union_is_an_error_as_in_php() {
+fn a_type_written_twice_in_a_union_is_an_error() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public int|string|int run(Calc|string|calc extra)\n    {\n        return 1;\n    }\n}\n";
 
-    assert_eq!(issues(code), ["7:23 Duplicate type `int` is redundant.", "7:43 Duplicate type `calc` is redundant."]);
+    assert_eq!(
+        issues(code),
+        [
+            "7:23 `int|string|int` names `int` twice: name it once.",
+            "7:43 `Calc|string|calc` names `calc` twice: name it once."
+        ]
+    );
 }
 
 #[test]
@@ -4994,7 +5000,7 @@ fn a_nullable_union_is_checked_as_its_union_and_never_joins_another_union() {
     assert_eq!(
         issues(code),
         [
-            "5:32 Duplicate type `int` is redundant.",
+            "5:32 `int|string|int` names `int` twice: name it once.",
             "5:46 A type that holds null is written `int?`.",
             "5:57 Type `int?` cannot be part of a union.",
             "5:74 Type `(int|string)?` cannot be part of a union.",
@@ -6427,7 +6433,7 @@ fn an_enum_declares_a_computed_property_and_no_stored_one() {
 }
 
 /// Spec section 31: an enum without a backing type declares type parameters as a class does, with bounds and without
-/// `in` or `out`. A backed enum runs as a PHP enum, which holds none.
+/// `in` or `out`. A backed enum declares none, spec section 20.
 #[test]
 fn an_enum_declares_type_parameters_without_a_backing_type() {
     for (declaration, expected) in [
@@ -6443,7 +6449,7 @@ fn an_enum_declares_type_parameters_without_a_backing_type() {
         ),
         (
             "enum Backed<T> : string\n{\n    case Pro = \"pro\";\n}\n",
-            Some("3:12 A backed enum takes no type parameters: it runs as a PHP enum, which holds none."),
+            Some("3:12 A backed enum declares no type parameters."),
         ),
     ] {
         let code = leak(format!("namespace App.Tenant;\n\n{declaration}"));
@@ -6554,14 +6560,27 @@ fn a_case_field_named_like_a_member_of_its_enum_is_an_error_that_names_both() {
     );
 }
 
+/// A case of an enum whose cases carry no data is read as `Status.name`, and `Status.class` reads the class, so it can't
+/// be named `class` in any case. A case that carries data runs as a class of its own, which `Shape.class(…)` creates.
 #[test]
-fn an_enum_case_named_class_is_an_error_as_in_php() {
+fn a_case_named_class_is_an_error_only_in_an_enum_whose_cases_carry_no_data() {
     let pure = "namespace App.Tenant;\n\nenum Status\n{\n    case class;\n}\n";
     let backed = "namespace App.Tenant;\n\nenum Mode : string\n{\n    case CLASS = \"c\";\n}\n";
-    let refusal = "5:10 An enum case cannot be named `class`: PHP reserves `class` for the class name.";
+    let data = "namespace App.Tenant;\n\nenum Shape\n{\n    case class(int sides);\n    case Dot;\n}\n";
 
-    assert_eq!(issues(pure), [refusal]);
-    assert_eq!(issues(backed), [refusal]);
+    assert_eq!(
+        issues(pure),
+        [
+            "5:10 An enum case cannot be named `class`: `Status.class` reads the class, not a case.",
+            "5:10 Enum case name `class` should be in Pascal case."
+        ]
+    );
+    assert_eq!(
+        issues(backed),
+        ["5:10 An enum case cannot be named `class`: `Mode.class` reads the class, not a case."]
+    );
+    // Only the naming warning, which refuses nothing.
+    assert_eq!(issues(data), ["5:10 Enum case name `class` should be in Pascal case."]);
 }
 
 #[test]
@@ -7069,7 +7088,10 @@ fn a_union_of_two_collections_compiles_and_one_of_two_function_types_is_refused(
         "List<int>|Map<string, int> items, Function<int()>|Function<string()> make, List<int>|string fine",
     ));
 
-    assert_eq!(issues(code), ["5:70 Duplicate type `Function<string()>` is redundant."]);
+    assert_eq!(
+        issues(code),
+        ["5:70 `Function<int()>|Function<string()>` names `Function<string()>` twice: name it once."]
+    );
 }
 
 /// Spec section 11: type arguments reach the running program, so two generic classes, or one class with other type
@@ -7086,7 +7108,7 @@ fn a_union_refuses_a_type_written_twice_and_a_collection_beside_its_iterable() {
     assert_eq!(
         issues(code),
         [
-            "5:81 Duplicate type `Box<Order>` is redundant.",
+            "5:81 `Box<Order>|Box<Order>` names `Box<Order>` twice: name it once.",
             "5:161 `List<int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
             "5:188 `Map<string, int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",
             "5:217 `Set<int>` is already an `Iterable<int>`, so the union is `Iterable<int>`.",

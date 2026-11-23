@@ -51,6 +51,7 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_collection_object;
 use mago_codex::ttype::get_int_or_string;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_declared_type;
 use mago_codex::ttype::get_php_plain_form;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_void;
@@ -2576,11 +2577,13 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
-    /// The type the root declaration of the property `property` of the fully qualified class name `class` writes, when
-    /// that root is a typed plain PHP property and `class` declares the property with a narrower type, spec section
-    /// 6.1. PHP keeps a property's type through every override as the class links, so the property runs with it, and
-    /// its own type checks each write. None for any other property, which runs with the type it writes.
-    pub(crate) fn narrowed_root_type(&self, class: Word, property: &[u8]) -> Option<&'analysis TUnion> {
+    /// The type the root declaration of the property `property` of the fully qualified class name `class` runs with,
+    /// when `class` declares the property with a narrower type: a typed plain PHP root's own type, spec section 6.1,
+    /// and the type a PHP# root erases to, as `mixed` for the `T value` of a `Holder<T>` that a `Holder<string>`
+    /// overrides with `string value`. The engine keeps a property's type through every override as the class links,
+    /// so the property runs with it, and its own type checks each write, as a widened parameter's does. None for any
+    /// other property, which runs with the type it writes.
+    pub(crate) fn narrowed_root_type(&self, class: Word, property: &[u8]) -> Option<TUnion> {
         let variable = [b"$", property].concat();
         let own = &self
             .codebase
@@ -2590,18 +2593,21 @@ impl<'analysis> Types<'analysis> {
             .type_union;
         let (root_class, root) = self.root_property(class, word(&variable));
         let root_type = &root.type_declaration_metadata.as_ref()?.type_union;
-        let is_plain = !self.codebase.get_class_like(root_class)?.flags.is_sharp();
+        let (root_type, own) = if self.codebase.get_class_like(root_class)?.flags.is_sharp() {
+            (get_php_declared_type(root_type, self.codebase), get_php_declared_type(own, self.codebase))
+        } else {
+            (root_type.clone(), own.clone())
+        };
 
-        (is_plain
-            && !union_comparator::is_contained_by(
-                self.codebase,
-                root_type,
-                own,
-                false,
-                false,
-                false,
-                &mut ComparisonResult::new(),
-            ))
+        (!union_comparator::is_contained_by(
+            self.codebase,
+            &root_type,
+            &own,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::new(),
+        ))
         .then_some(root_type)
     }
 

@@ -19767,8 +19767,8 @@ fn each_refused_bound_gives_one_error() {
     assert_eq!(
         errors("T : Shareable & Shareable, TOther", "int", "1"),
         [
-            "Duplicate type `Shareable` is redundant.",
-            "Duplicate type `Shareable` is redundant.",
+            "`Shareable & Shareable` names `Shareable` twice: name it once.",
+            "`Shareable & Shareable` names `Shareable` twice: name it once.",
             "Type argument `int` does not satisfy `Bounded.held<T, TOther>`'s `T`.",
             "`int` does not satisfy the bound `Shareable & Shareable` of type parameter `T`.",
         ]
@@ -20846,11 +20846,12 @@ fn a_return_type_that_would_erase_wider_than_the_parent_return_type_is_an_error(
     assert_eq!(each_file(errors, &feed, &[]), [vec![], vec![], vec!["3:23 invalid-template-parameter Error"]]);
 }
 
-/// PHP requires an overriding property to keep the type of the property it overrides, so a property that erases to
-/// another type than the `virtual` one it overrides is refused, from a PHP# class or a PHP class whose
-/// `@extends Slot<Order>` names it, and one whose parent's bound erases to the same type is not.
+/// An override keeps the type of the property it overrides. A PHP# override that erases to a narrower type than the
+/// `virtual` one it overrides runs with the type its parent erases to, which the bridge writes, so it compiles, as one
+/// whose parent's bound erases to the same type does. A plain PHP class whose `@extends Slot<Order>` names it links its
+/// own declaration, so it is refused.
 #[test]
-fn a_property_whose_type_erases_to_another_type_than_the_parent_property_is_an_error() {
+fn a_property_that_erases_narrower_than_its_parent_compiles_in_sharp_and_is_refused_in_plain_php() {
     let order = ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n");
     let unbound = (
         "src/Demo/Slot.sharp",
@@ -20866,13 +20867,7 @@ fn a_property_whose_type_erases_to_another_type_than_the_parent_property_is_an_e
     );
     let php_order_slot = "<?php\n\nnamespace Demo;\n\n/** @extends Slot<Order> */\nclass OrderSlot extends Slot\n{\n    public ?Order $item = null;\n}\n";
 
-    assert_eq!(each_file(issues, &[order, unbound], &[order_slot]), vec![Vec::<String>::new(); 2]);
-    assert_eq!(
-        explained(order_slot, &[order, unbound]),
-        [
-            "5:21 incompatible-property-type Property `OrderSlot.item` must have `Any?`, the type `Slot.item` erases to. Write `item` with a type that erases to `Any?`, or bound the type parameter, as in `Slot<TItem : Order>`, so both sides erase to the bound."
-        ]
-    );
+    assert_eq!(each_file(issues, &[order, unbound, order_slot], &[]), vec![Vec::<String>::new(); 3]);
     assert_eq!(each_file(issues, &[order, bound, order_slot], &[]), vec![Vec::<String>::new(); 3]);
     assert_eq!(
         explained(("src/Demo/OrderSlot.php", php_order_slot), &[order, unbound]),
@@ -23608,10 +23603,9 @@ fn a_type_argument_outside_its_bound_is_named_as_sharp_writes_it() {
     );
 }
 
-/// An override that does not fit the member it overrides names both types as PHP# writes them, and a property that
-/// erases to another type than the parent's names each class and member as PHP# writes it, `ListBase.item`, and each erased
-/// type as PHP# writes it, as `Any?`, or as PHP's where PHP# has no name for it, as in PHP's `array|null`. The
-/// parameter of `ListBase.put` takes the type argument, so it is widened. The PHP twin keeps Mago's text.
+/// An override that does not fit the member it overrides names both types as PHP# writes them. A property and a
+/// parameter of `ListBase` that take the type argument run with the types their parents erase to, so they compile. The
+/// PHP twin keeps Mago's text.
 #[test]
 fn an_override_names_its_types_as_sharp_writes_them_and_the_erased_types_as_php_does() {
     let sharp = [
@@ -23635,9 +23629,9 @@ fn an_override_names_its_types_as_sharp_writes_them_and_the_erased_types_as_php_
     assert_eq!(
         worded(("src/Demo/Base.php", php), &[]),
         [
-            "37:12 incompatible-property-type Property `Demo\\OrderBase::$item` has an incompatible type declaration. | This type `Demo\\Line|null` is incompatible with the parent's type. | The parent property is defined with type `mixed` here. | PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class. | Change the type of `$item` to `mixed` to match the parent property.",
+            "37:12 incompatible-property-type Property `Demo\\OrderBase::$item` has an incompatible type declaration. | This type `Demo\\Line|null` is incompatible with the parent's type. | The parent property is defined with type `mixed` here. | An override keeps the type of the property it overrides. | Change the type of `$item` to `mixed` to match the parent property.",
             "39:25 docblock-type-mismatch Docblock type `Demo\\Order` for parameter `$item` is incompatible with native type `Demo\\Line`. | Native type is `Demo\\Line`... | ...but docblock declares `Demo\\Order` | The docblock type must be compatible with the native type declaration. | Either change the docblock type to match `Demo\\Line`, or update the native type to be compatible with `Demo\\Order`.",
-            "52:12 incompatible-property-type Property `Demo\\ListBase::$item` has an incompatible type declaration. | This type `array<array-key, mixed>|null` is incompatible with the parent's type. | The parent property is defined with type `mixed` here. | PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class. | Change the type of `$item` to `mixed` to match the parent property.",
+            "52:12 incompatible-property-type Property `Demo\\ListBase::$item` has an incompatible type declaration. | This type `array<array-key, mixed>|null` is incompatible with the parent's type. | The parent property is defined with type `mixed` here. | An override keeps the type of the property it overrides. | Change the type of `$item` to `mixed` to match the parent property.",
         ]
     );
     assert_eq!(
@@ -23645,8 +23639,7 @@ fn an_override_names_its_types_as_sharp_writes_them_and_the_erased_types_as_php_
         [
             "7:26 incompatible-parameter-type Parameter `item` of `OrderBase.put` expects type `Line` but parent `Base.put` expects type `Order` | Parameter `item` expects type `Line` but parent expects `Order` | Parent method `Base.put` parameter defined here | In class `OrderBase` | A call through `Base` may pass `item` any `Order`, so `OrderBase.put` must take every `Order` too. | Change the parameter type to be compatible with the parent method.",
             "11:26 incompatible-return-type Return type `Line` of `OrderBase.get` is incompatible with parent return type `Order` of `Base.get` | Returns type `Line` but parent expects `Order` | Parent method `Base.get` return type defined here | In class `OrderBase` | Return types must be covariant: child must return equal or narrower types than parent. | Change the return type to be compatible with the parent method.",
-            "5:21 incompatible-property-type Property `OrderBase.item` has an incompatible type declaration. | This type `Line?` is incompatible with the parent's type. | The parent property is defined with type `Order?` here. | PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class. | Change the type of `item` to `Order?` to match the parent property.",
-            "5:21 incompatible-property-type Property `ListBase.item` must have `Any?`, the type `Base.item` erases to. | Erases to PHP's `array|null`. | Erases to `Any?`. | PHP# erases type parameters when it compiles, and PHP requires a property to keep the type of the property it overrides. | Write `item` with a type that erases to `Any?`.",
+            "5:21 incompatible-property-type Property `OrderBase.item` has an incompatible type declaration. | This type `Line?` is incompatible with the parent's type. | The parent property is defined with type `Order?` here. | An override keeps the type of the property it overrides. | Change the type of `item` to `Order?` to match the parent property.",
         ]
     );
 }
@@ -26681,7 +26674,7 @@ fn an_override_names_its_members_and_types_as_sharp_writes_them() {
         [
             "31:21 incompatible-parameter-type Parameter `$item` of `Demo\\OrderBase::put()` expects type `Demo\\Line` but parent `Demo\\Base::put()` expects type `Demo\\Order` | Parameter `$item` expects type `Demo\\Line` but parent expects `Demo\\Order` | Parent method `Demo\\Base::put()` parameter defined here | In class `Demo\\OrderBase` | Parameter types must be contravariant: child must accept equal or wider types than parent. | Change the parameter type to be compatible with the parent method.",
             "35:21 incompatible-return-type Return type `Demo\\Line` of `Demo\\OrderBase::get()` is incompatible with parent return type `Demo\\Order` of `Demo\\Base::get()` | Returns type `Demo\\Line` but parent expects `Demo\\Order` | Parent method `Demo\\Base::get()` return type defined here | In class `Demo\\OrderBase` | Return types must be covariant: child must return equal or narrower types than parent. | Change the return type to be compatible with the parent method.",
-            "29:12 incompatible-property-type Property `Demo\\OrderBase::$item` has an incompatible type declaration. | This type `Demo\\Line|null` is incompatible with the parent's type. | The parent property is defined with type `Demo\\Order|null` here. | PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class. | Change the type of `$item` to `Demo\\Order|null` to match the parent property.",
+            "29:12 incompatible-property-type Property `Demo\\OrderBase::$item` has an incompatible type declaration. | This type `Demo\\Line|null` is incompatible with the parent's type. | The parent property is defined with type `Demo\\Order|null` here. | An override keeps the type of the property it overrides. | Change the type of `$item` to `Demo\\Order|null` to match the parent property.",
         ]
     );
     assert_eq!(
@@ -26689,7 +26682,7 @@ fn an_override_names_its_members_and_types_as_sharp_writes_them() {
         [
             "7:26 incompatible-parameter-type Parameter `item` of `OrderBase.put` expects type `Line` but parent `Base.put` expects type `Order` | Parameter `item` expects type `Line` but parent expects `Order` | Parent method `Base.put` parameter defined here | In class `OrderBase` | A call through `Base` may pass `item` any `Order`, so `OrderBase.put` must take every `Order` too. | Change the parameter type to be compatible with the parent method.",
             "11:26 incompatible-return-type Return type `Line` of `OrderBase.get` is incompatible with parent return type `Order` of `Base.get` | Returns type `Line` but parent expects `Order` | Parent method `Base.get` return type defined here | In class `OrderBase` | Return types must be covariant: child must return equal or narrower types than parent. | Change the return type to be compatible with the parent method.",
-            "5:21 incompatible-property-type Property `OrderBase.item` has an incompatible type declaration. | This type `Line?` is incompatible with the parent's type. | The parent property is defined with type `Order?` here. | PHP requires property types to be invariant, meaning the type declaration in a child class must be exactly the same as in the parent class. | Change the type of `item` to `Order?` to match the parent property.",
+            "5:21 incompatible-property-type Property `OrderBase.item` has an incompatible type declaration. | This type `Line?` is incompatible with the parent's type. | The parent property is defined with type `Order?` here. | An override keeps the type of the property it overrides. | Change the type of `item` to `Order?` to match the parent property.",
         ]
     );
     assert_eq!(each_file(worded, &declared, &[]), vec![Vec::<String>::new(); 3]);

@@ -5330,11 +5330,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.property_hint(php_type, property, line)
     }
 
-    /// The PHP type of the property `property`, which PHP# declares with the type `hint`, the type the parent declares
-    /// for an override of a typed plain PHP property, as [`Self::property_type`] has it without its type text.
+    /// The PHP type of the property `property`, which PHP# declares with the type `hint`, the type its root declares
+    /// for an override that narrows it, [`Types::narrowed_root_type`], as [`Self::property_type`] has it without its
+    /// type text.
     fn php_property_type(&mut self, hint: &Hint, property: &[u8], line: u32) -> u32 {
         match self.types.narrowed_root_type(word(self.class), property) {
-            Some(root) => self.declared_type(root, line),
+            Some(root) => self.declared_type(&root, line),
             None => self.hint(hint),
         }
     }
