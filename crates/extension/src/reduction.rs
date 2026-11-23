@@ -1,5 +1,5 @@
-//! The worker management messages a host's worker answers beside its extensions' requests: terminal worker-state reduction, and the
-//! question whether a worker loaded one of some classes.
+//! The worker management messages a host's worker answers beside its extensions' requests: the reduction of every
+//! worker's state and the issues it reports, and the question whether a worker loaded one of some classes.
 
 use mago_engine::Value;
 
@@ -70,8 +70,15 @@ pub(crate) fn reduce_request(responses: &[Vec<Value>]) -> Result<Vec<Value>, Wor
     Ok(writer.finish())
 }
 
-pub(crate) fn decode_reduce_response(payload: &[Value]) -> Result<(), WorkerError> {
-    message_reader(payload, REDUCE_RESPONSE)?.finish().map_err(invalid_response)
+/// The issues the reducers reported, as the analyzer protocol writes them: the one list a reduce response holds.
+pub(crate) fn decode_reduce_response(payload: &[Value]) -> Result<Vec<Value>, WorkerError> {
+    let mut reader = message_reader(payload, REDUCE_RESPONSE)?;
+    let Value::List(issues) = reader.read_value("worker reducer issues").map_err(invalid_response)? else {
+        return Err(invalid_response("a reduce response holds its issues as one list"));
+    };
+    reader.finish().map_err(invalid_response)?;
+
+    Ok(issues.clone())
 }
 
 fn message_writer(kind: u16) -> ValueWriter {
@@ -128,5 +135,20 @@ mod tests {
         assert_eq!(reader.read_value("first").unwrap(), &Value::List(first));
         assert_eq!(reader.read_value("second").unwrap(), &Value::List(second));
         reader.finish().unwrap();
+    }
+
+    /// A reduce response holds the issues its reducers reported as one list, which the analyzer decodes, and nothing
+    /// else.
+    #[test]
+    fn a_reduce_response_gives_the_list_of_issues_it_holds() {
+        let issues = vec![Value::Int(1), Value::String(b"issue".to_vec())];
+        let mut response = message_writer(REDUCE_RESPONSE);
+        response.write_value(Value::List(issues.clone()));
+        assert_eq!(decode_reduce_response(&response.finish()).unwrap(), issues);
+
+        let mut bare = message_writer(REDUCE_RESPONSE);
+        bare.write_u32(1);
+        decode_reduce_response(&bare.finish()).unwrap_err();
+        decode_reduce_response(&message_writer(REDUCE_RESPONSE).finish()).unwrap_err();
     }
 }

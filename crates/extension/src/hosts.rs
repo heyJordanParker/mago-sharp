@@ -329,8 +329,9 @@ impl Hosts {
     }
 
     /// Runs the worker reducers of host `host`: collects each interpreter's state, on the thread it runs on, and reduces
-    /// it all in the calling thread's interpreter.
-    fn reduce(&self, host: usize) -> Result<(), WorkerError> {
+    /// it all in the calling thread's interpreter. Returns the issues the reducers reported, as the analyzer protocol
+    /// writes them, or none when no extension of the host has a reducer.
+    fn reduce(&self, host: usize) -> Result<Vec<Value>, WorkerError> {
         let collect = || -> Option<Result<Vec<Value>, WorkerError>> {
             let current = self.engine.interpreter();
             PREPARED
@@ -354,7 +355,7 @@ impl Hosts {
             reducers |= reduction::decode_collect_response(response)?;
         }
         if !reducers {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         self.prepare()?;
@@ -365,8 +366,9 @@ impl Hosts {
 }
 
 impl Drop for Hosts {
-    /// Runs each host's worker reducers, then ends the interpreter of every thread of the current pool, and the calling
-    /// thread's, so stopped hosts keep no interpreter alive.
+    /// Runs the worker reducers of each host [`Host::enable_worker_reduction`] armed, as a linter's are, whose issues no
+    /// report holds, then ends the interpreter of every thread of the current pool, and the calling thread's, so stopped
+    /// hosts keep no interpreter alive.
     fn drop(&mut self) {
         for (host, reducing) in self.reducing.iter().enumerate() {
             if reducing.load(Ordering::Acquire)
@@ -466,6 +468,17 @@ impl Host {
     /// Has the host's worker reducers run when mago stops the hosts.
     pub fn enable_worker_reduction(&self) {
         self.hosts.reducing[self.index].store(true, Ordering::Release);
+    }
+
+    /// Runs the host's worker reducers now, over what each interpreter gathered since its last collection, and returns
+    /// the issues they reported, as the analyzer protocol writes them, or none when no extension of the host has a
+    /// reducer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an interpreter can't collect, the reducing one can't be made ready, or a reducer fails.
+    pub fn reduce(&self) -> Result<Vec<Value>, WorkerError> {
+        self.hosts.reduce(self.index)
     }
 }
 

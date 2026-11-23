@@ -29,6 +29,10 @@ use Mago\Sdk\Internal\Hosts;
 use Mago\Sdk\Internal\Protocol\ValueWriter;
 use Mago\Sdk\Internal\Worker\Protocol as WorkerProtocol;
 use Mago\Sdk\PHPVersion;
+use Mago\Sdk\Reporting\Issue;
+use Mago\Sdk\Reporting\Level;
+use Mago\Sdk\SourceLocation;
+use Mago\Sdk\Span;
 use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Worker;
 use Mago\Sdk\WorkerReducer;
@@ -133,6 +137,53 @@ final class WorkerTest extends TestCase
                 'second: response',
             ],
             $sent,
+        );
+    }
+
+    /**
+     * A reduce request runs each reducer over every worker's contribution, and answers with each issue a reducer
+     * reported, under the index of its extension, with its level, code, message and the file and span it points at.
+     */
+    public function testAReduceRequestAnswersWithTheIssuesItsReducersReported(): void
+    {
+        $reducer = new class implements WorkerReducer {
+            public function collect(): string
+            {
+                return 'src/Second.php';
+            }
+
+            public function reduce(WorkerReductionContext $context): void
+            {
+                foreach ($context->workerPayloads as $file) {
+                    $context->report(
+                        Level::Error,
+                        'duplicate-body',
+                        Issue::at('This body repeats another.', new SourceLocation($file, new Span(3, 9))),
+                    );
+                }
+            }
+        };
+        $worker = new Worker(
+            new Extension('acme/plain', 'Plain', '1.0.0'),
+            new Extension('acme/bodies', 'Bodies', '1.0.0', workerReducer: $reducer),
+        );
+        /** @var list<\Closure(list<null|bool|int|float|string|list<mixed>>): list<null|bool|int|float|string|list<mixed>>> $handlers */
+        $handlers = (new ReflectionProperty(Hosts::class, 'handlers'))->getValue();
+        $place = count($handlers);
+        $worker->run();
+        Mago::$answer = static fn(): ?array => null;
+        [$collected, $collect] = Hosts::handle($place, self::collectRequest());
+        [$reduced, $answer] = Hosts::handle($place, [WorkerProtocol::NAME, WorkerProtocol::REDUCE_REQUEST, 1, $collect]);
+        Mago::$answer = null;
+
+        self::assertTrue($collected && $reduced, (string) ($reduced ? '' : $answer));
+        self::assertSame(
+            [
+                WorkerProtocol::NAME,
+                0x8002,
+                [1, 1, 4, 'duplicate-body', 'This body repeats another.', 0, null, null, 1, 1, 'src/Second.php', 3, 9, null, 0],
+            ],
+            $answer,
         );
     }
 

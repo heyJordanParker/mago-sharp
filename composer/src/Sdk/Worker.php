@@ -593,11 +593,13 @@ final class Worker
         }
 
         $payloadsByExtension = WorkerProtocol::readReduceRequest($reader, $this->workerReducerIndices);
+        $reported = [];
         foreach ($this->workerReducerIndices as $extensionIndex) {
             $extension = $this->extensions[$extensionIndex];
             $host->progress("the worker reducer of extension `{$extension->identifier}`");
+            $context = new WorkerReductionContext($payloadsByExtension[$extensionIndex]);
             try {
-                $extension->workerReducer?->reduce(new WorkerReductionContext($payloadsByExtension[$extensionIndex]));
+                $extension->workerReducer?->reduce($context);
             } catch (Throwable $throwable) {
                 throw new ProtocolException(
                     "Worker reducer for extension `{$extension->identifier}` failed to reduce: {$throwable->getMessage()}",
@@ -605,9 +607,13 @@ final class Worker
                     $throwable,
                 );
             }
+
+            foreach ($context->takeReportedIssues() as $issue) {
+                $reported[] = [$extensionIndex, $issue];
+            }
         }
 
-        return WorkerProtocol::writeReduceResponse();
+        return WorkerProtocol::writeReduceResponse(AnalyzerProtocol::writeReducedIssues($reported));
     }
 
     /**

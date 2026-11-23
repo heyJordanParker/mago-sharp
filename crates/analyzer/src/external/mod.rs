@@ -821,6 +821,16 @@ pub trait AnalyzerTransport: std::fmt::Debug + Send + Sync {
     /// worker loaded one starts again before its next request. A transport with no interpreter holds no class.
     fn reload_holding(&self, _classes: &[&[u8]]) {}
 
+    /// Runs the worker reducers over what each interpreter gathered since its last collection, and returns the issues
+    /// they reported, as the analyzer protocol writes them. A transport with no interpreter gathered nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an interpreter fails to collect or a reducer fails.
+    fn reduce(&self) -> Result<Vec<Value>, WorkerError> {
+        Ok(Vec::new())
+    }
+
     /// Sends one request, servicing the worker's codebase queries with `handler`. `running` names what the request
     /// runs, for its deadline's error when the worker names nothing it started.
     ///
@@ -848,6 +858,10 @@ impl AnalyzerTransport for Host {
 
     fn reload_holding(&self, classes: &[&[u8]]) {
         Self::reload_holding(self, classes);
+    }
+
+    fn reduce(&self) -> Result<Vec<Value>, WorkerError> {
+        Self::reduce(self)
     }
 
     fn request_with_handler<H>(
@@ -1630,19 +1644,7 @@ impl ExternalAnalyzer<Host> {
         enabled_plugins: &[String],
         disable_defaults: bool,
     ) -> Result<Self, ExternalAnalyzerError> {
-        let analyzer = Self::initialize_transports(
-            hosts.into_iter().map(Arc::new),
-            php_version,
-            enabled_plugins,
-            disable_defaults,
-        )?;
-        for backend in &analyzer.backends {
-            if backend.registration.has_worker_reducer {
-                backend.transport.enable_worker_reduction();
-            }
-        }
-
-        Ok(analyzer)
+        Self::initialize_transports(hosts.into_iter().map(Arc::new), php_version, enabled_plugins, disable_defaults)
     }
 }
 
@@ -1747,7 +1749,7 @@ impl<T> ExternalAnalyzer<T> {
 
     /// Whether the hosts register what an analysis without them leaves no trace of in the files it reaches: a provider
     /// besides a return-type one, an issue filter, an analysis hook, a before-analysis plugin, an entry point, or a
-    /// worker reducer, which reduces the requests its workers saw when the hosts stop. An analysis without such hosts
+    /// worker reducer, which reduces what its workers gathered over the analysis's files. An analysis without such hosts
     /// differs from one with them only in the files whose return-type requests a provider answers, the files a
     /// codebase-scan hook selects and the files that read what it refines, and the files that read a stub.
     pub(crate) fn reaches_every_file(&self) -> bool {
@@ -2240,6 +2242,25 @@ where
         }
 
         Ok(result)
+    }
+
+    /// Runs the worker reducers of each host that has one, once, after every worker ran its hooks on every file of the
+    /// analysis of `session`, and gives the issues they reported, each under its extension's identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a reducer fails or reports an issue that names no file the analysis holds.
+    pub(crate) fn run_worker_reducers(
+        &self,
+        session: &ExternalAnalysisSession,
+    ) -> Result<IssueCollection, ExternalAnalyzerError> {
+        let mut issues = IssueCollection::new();
+        for backend in self.backends.iter().filter(|backend| backend.registration.has_worker_reducer) {
+            let reported = backend.transport.reduce().inspect_err(|_| self.record_lifecycle_error())?;
+            issues.extend(lifecycle::decode_reduced_issues(&reported, &backend.registration.extensions, session)?);
+        }
+
+        Ok(issues)
     }
 
     pub(crate) fn run_after_analysis_hooks(

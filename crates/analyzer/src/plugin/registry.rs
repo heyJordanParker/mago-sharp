@@ -484,6 +484,25 @@ impl PluginRegistry {
             .map_err(PluginError::from)
     }
 
+    /// Runs the external hosts' worker reducers once for the analysis of `session`, after every worker ran its hooks on
+    /// every file, and gives the issues they reported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a reducer fails or reports an issue that names no file the analysis holds.
+    pub fn run_external_worker_reducers(
+        &self,
+        session: Option<&ExternalAnalysisSession>,
+    ) -> PluginResult<IssueCollection> {
+        self.external_analyzer
+            .as_deref()
+            .zip(session)
+            .map(|(analyzer, session)| analyzer.with(|analyzer| analyzer.run_worker_reducers(session)))
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(PluginError::from)
+    }
+
     #[inline]
     #[must_use]
     pub fn new() -> Self {

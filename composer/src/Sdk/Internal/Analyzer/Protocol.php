@@ -849,6 +849,62 @@ final class Protocol
     }
 
     /**
+     * The issues worker reducers reported, each as the index of the extension whose reducer reported it and the issue,
+     * for the response to a reduce request.
+     *
+     * @param list<array{int<0, max>, ReportedIssue}> $reportedIssues
+     *
+     * @return list<null|bool|int|float|string|list<mixed>>
+     */
+    public static function writeReducedIssues(array $reportedIssues): array
+    {
+        $writer = new ValueWriter();
+        $writer->writeCount($reportedIssues);
+        foreach ($reportedIssues as [$extension, $reported]) {
+            $writer->writeU32($extension);
+            self::writeIssue($writer, $reported, null);
+        }
+
+        return $writer->finish();
+    }
+
+    /**
+     * Writes `$reported`'s level, code, message, notes, help, link, annotations and edits, each annotation and edit
+     * that names no file pointing into `$reportingFile`.
+     */
+    private static function writeIssue(ValueWriter $writer, ReportedIssue $reported, ?string $reportingFile): void
+    {
+        $issue = $reported->issue;
+        $writer->writeU8($reported->level->value);
+        $writer->writeString($reported->code);
+        $writer->writeString($issue->message);
+        $writer->writeCount($issue->notes);
+        foreach ($issue->notes as $note) {
+            $writer->writeString($note);
+        }
+
+        $writer->writeOptionalString($issue->help);
+        $writer->writeOptionalString($issue->link);
+        $writer->writeCount($issue->annotations);
+        foreach ($issue->annotations as $annotation) {
+            $writer->writeU8($annotation->kind->value);
+            $writer->writeOptionalString($annotation->file ?? $reportingFile);
+            $writer->writeU32($annotation->span->start);
+            $writer->writeU32($annotation->span->end);
+            $writer->writeOptionalString($annotation->message);
+        }
+
+        $writer->writeCount($issue->edits);
+        foreach ($issue->edits as $edit) {
+            $writer->writeOptionalString($edit->file ?? $reportingFile);
+            $writer->writeU32($edit->span->start);
+            $writer->writeU32($edit->span->end);
+            $writer->writeU8($edit->safety->value);
+            $writer->writeBytes($edit->newText);
+        }
+    }
+
+    /**
      * @param list<int|ReportedIssue|string|null> $reportedIssues each issue as its plugin, the issue, and the file
      *   whose after-file hooks reported it, which a project-level hook's issue has none of. Mago keeps an after-file
      *   issue with that file's analysis, so it stays until the hooks of that file run again.
@@ -888,7 +944,6 @@ final class Protocol
             $reported = $reportedIssues[$index + 1];
             /** @var string|null $reportingFile */
             $reportingFile = $reportedIssues[$index + 2];
-            $issue = $reported->issue;
             $writer->writeU16($plugin);
             if (
                 $requestKind === self::AFTER_FILE_ANALYSIS_REQUEST
@@ -901,33 +956,7 @@ final class Protocol
                 );
             }
 
-            $writer->writeU8($reported->level->value);
-            $writer->writeString($reported->code);
-            $writer->writeString($issue->message);
-            $writer->writeCount($issue->notes);
-            foreach ($issue->notes as $note) {
-                $writer->writeString($note);
-            }
-
-            $writer->writeOptionalString($issue->help);
-            $writer->writeOptionalString($issue->link);
-            $writer->writeCount($issue->annotations);
-            foreach ($issue->annotations as $annotation) {
-                $writer->writeU8($annotation->kind->value);
-                $writer->writeOptionalString($annotation->file ?? $reportingFile);
-                $writer->writeU32($annotation->span->start);
-                $writer->writeU32($annotation->span->end);
-                $writer->writeOptionalString($annotation->message);
-            }
-
-            $writer->writeCount($issue->edits);
-            foreach ($issue->edits as $edit) {
-                $writer->writeOptionalString($edit->file ?? $reportingFile);
-                $writer->writeU32($edit->span->start);
-                $writer->writeU32($edit->span->end);
-                $writer->writeU8($edit->safety->value);
-                $writer->writeBytes($edit->newText);
-            }
+            self::writeIssue($writer, $reported, $reportingFile);
         }
 
         $writer->writeU32(intdiv(count($contributedReferences), 5));

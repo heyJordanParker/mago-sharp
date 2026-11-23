@@ -117,11 +117,15 @@ final class Protocol
     }
 
     /**
+     * Answers a reduce request with `$issues`, the issues the reducers reported, as the analyzer protocol writes them.
+     *
+     * @param list<null|bool|int|float|string|list<mixed>> $issues
+     *
      * @return list<null|bool|int|float|string|list<mixed>>
      */
-    public static function writeReduceResponse(): array
+    public static function writeReduceResponse(array $issues): array
     {
-        return self::createMessage(self::REDUCE_RESPONSE)->finish();
+        return (new ValueWriter([self::NAME, self::REDUCE_RESPONSE, $issues]))->finish();
     }
 
     /**

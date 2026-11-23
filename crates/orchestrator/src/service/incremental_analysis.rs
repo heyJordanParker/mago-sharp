@@ -2727,6 +2727,13 @@ impl IncrementalAnalysisService {
             aggregated_result.issues.extend(after_issues.into_iter().filter(in_project));
         }
 
+        if !self.scan_only {
+            let reduced = plugin_registry
+                .run_external_worker_reducers(external_session.as_deref())
+                .map_err(mago_analyzer::error::AnalysisError::from)?;
+            aggregated_result.issues.extend(reduced.into_iter().filter(in_project));
+        }
+
         if !after_analysis {
             snapshots.clear();
         }

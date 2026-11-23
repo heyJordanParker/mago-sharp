@@ -52,6 +52,7 @@ use crate::utils::names::namespace_function_name;
 use crate::utils::names::namespace_member;
 
 use super::ExternalAnalysisSession;
+use super::ExternalExtension;
 use super::ExternalPlugin;
 use super::NODE_REQUIREMENT_ARGUMENT_TYPES;
 use super::NODE_REQUIREMENT_RECEIVER_TYPE;
@@ -1244,6 +1245,29 @@ fn write_reference_summary(writer: &mut ValueWriter, references: &SymbolReferenc
     writer.write_u64(references.total_map_entries() as u64);
 }
 
+/// The issues the worker reducers of `extensions`' host reported, as `payload` holds them, each under its extension's
+/// identifier. An issue names the file it points into, as an after-analysis hook's does.
+pub(super) fn decode_reduced_issues(
+    payload: &[Value],
+    extensions: &[ExternalExtension],
+    session: &ExternalAnalysisSession,
+) -> Result<IssueCollection, ExternalAnalyzerError> {
+    let mut reader = ValueReader::new(payload);
+    let count = reader.read_count("worker reducer issues", MAXIMUM_ISSUES)?;
+    let mut issues = IssueCollection::new();
+    for _ in 0..count {
+        let index = reader.read_u32("worker reducer issue extension index")?;
+        let extension = extensions
+            .get(index as usize)
+            .ok_or_else(|| protocol(format!("worker reducer reported an issue for unknown extension index {index}")))?;
+        let owner = format!("the worker reducer of extension `{}`", extension.identifier);
+        issues.push(read_issue(&mut reader, &extension.identifier, &owner, session, None)?);
+    }
+    reader.finish()?;
+
+    Ok(issues)
+}
+
 pub(super) fn decode_lifecycle_response(
     payload: &[Value],
     request_kind: u16,
@@ -1291,111 +1315,8 @@ pub(super) fn decode_lifecycle_response(
         } else {
             None
         };
-        let level = read_level(&mut reader)?;
-        let local_code = reader.read_string("lifecycle issue code")?;
-        if local_code.is_empty() {
-            return Err(protocol(format!("plugin `{}` reported an empty issue code", plugin.identifier)));
-        }
-
-        let message = reader.read_string("lifecycle issue message")?;
-        if message.is_empty() {
-            return Err(protocol(format!("plugin `{}` reported an empty issue message", plugin.identifier)));
-        }
-
-        let note_count = reader.read_count("lifecycle issue notes", MAXIMUM_NOTES)?;
-        let mut notes = Vec::with_capacity(note_count);
-        for _ in 0..note_count {
-            notes.push(reader.read_string("lifecycle issue note")?);
-        }
-
-        let help = reader.read_optional_string("lifecycle issue help")?;
-        let link = reader.read_optional_string("lifecycle issue link")?;
-        let annotation_count = reader.read_count("lifecycle issue annotations", MAXIMUM_ANNOTATIONS)?;
-        let mut annotations = Vec::with_capacity(annotation_count);
-        let mut has_primary = false;
-        for _ in 0..annotation_count {
-            let kind = match reader.read_u8("lifecycle annotation kind")? {
-                1 => AnnotationKind::Primary,
-                2 => AnnotationKind::Secondary,
-                value => return Err(protocol(format!("invalid lifecycle annotation kind {value}"))),
-            };
-
-            let named_file = reader.read_optional_bytes("lifecycle annotation file")?;
-
-            let (file_id, size) = match named_file {
-                Some(name) => session.source(name).ok_or_else(|| {
-                    protocol(format!("lifecycle annotation names unknown file `{}`", String::from_utf8_lossy(name)))
-                })?,
-                None => default_file
-                    .map(|file| (file.id, file.size))
-                    .ok_or_else(|| protocol("a project lifecycle annotation must name its source file"))?,
-            };
-
-            let start = reader.read_u32("lifecycle annotation start")?;
-            let end = reader.read_u32("lifecycle annotation end")?;
-            if start > end || end > size {
-                return Err(protocol(format!(
-                    "plugin `{}` reported invalid annotation span {start}..{end}",
-                    plugin.identifier
-                )));
-            }
-
-            has_primary |= kind == AnnotationKind::Primary;
-            let mut annotation = Annotation::new(kind, Span::new(file_id, Position::new(start), Position::new(end)));
-            if let Some(message) = reader.read_optional_string("lifecycle annotation message")? {
-                annotation = annotation.with_message(message);
-            }
-
-            annotations.push(annotation);
-        }
-
-        // FIXME(azjezz): Should we forbid missing primary annotations? Rust-side can create issues without primary annotations,
-        // but it messes up the baseline stuff.
-        if !has_primary {
-            return Err(protocol(format!(
-                "plugin `{}` reported an issue without a primary annotation",
-                plugin.identifier
-            )));
-        }
-
-        let edit_count = reader.read_count("lifecycle issue edits", MAXIMUM_EDITS)?;
-        let mut edits = HashMap::default();
-        for _ in 0..edit_count {
-            let named_file = reader.read_optional_bytes("lifecycle edit file")?;
-
-            let (file_id, size) = match named_file {
-                Some(name) => session.source(name).ok_or_else(|| {
-                    protocol(format!("lifecycle edit names unknown file `{}`", String::from_utf8_lossy(name)))
-                })?,
-                None => default_file
-                    .map(|file| (file.id, file.size))
-                    .ok_or_else(|| protocol("a project lifecycle edit must name its source file"))?,
-            };
-
-            let start = reader.read_u32("lifecycle edit start")?;
-            let end = reader.read_u32("lifecycle edit end")?;
-            if start > end || end > size {
-                return Err(protocol(format!(
-                    "plugin `{}` reported invalid edit range {start}..{end}",
-                    plugin.identifier
-                )));
-            }
-
-            let safety = read_safety(&mut reader)?;
-            let new_text = reader.read_bytes("lifecycle edit replacement")?.to_vec();
-            edits
-                .entry(file_id)
-                .or_insert_with(Vec::new)
-                .push(TextEdit::replace(TextRange::new(start, end), new_text).with_safety(safety));
-        }
-
-        let mut issue = Issue::new(level, message)
-            .with_code(format!("{}/{}", plugin.identifier, local_code))
-            .with_annotations(annotations);
-        issue.notes = notes;
-        issue.help = help;
-        issue.link = link;
-        issue.edits = edits;
+        let owner = format!("plugin `{}`", plugin.identifier);
+        let issue = read_issue(&mut reader, &plugin.identifier, &owner, session, default_file)?;
         match reporting_file {
             Some(file_id) => issues_by_file.entry(file_id).or_default().push(issue),
             None => issues.push(issue),
@@ -1498,6 +1419,115 @@ pub(super) fn decode_lifecycle_response(
     session.record_rule_times(rule_times, None);
 
     Ok(LifecycleEffects { issues, issues_by_file, references, references_by_file })
+}
+
+/// Reads one issue's level, code, message, notes, help, link, annotations and edits, as the SDK's `writeIssue` writes
+/// them, for the plugin or worker reducer `owner` names, whose `identifier` its code starts with. An annotation or edit
+/// that names no file points into `default_file`.
+fn read_issue(
+    reader: &mut ValueReader<'_>,
+    identifier: &str,
+    owner: &dyn std::fmt::Display,
+    session: &ExternalAnalysisSession,
+    default_file: Option<&File>,
+) -> Result<Issue, ExternalAnalyzerError> {
+    let level = read_level(reader)?;
+    let local_code = reader.read_string("lifecycle issue code")?;
+    if local_code.is_empty() {
+        return Err(protocol(format!("{owner} reported an empty issue code")));
+    }
+
+    let message = reader.read_string("lifecycle issue message")?;
+    if message.is_empty() {
+        return Err(protocol(format!("{owner} reported an empty issue message")));
+    }
+
+    let note_count = reader.read_count("lifecycle issue notes", MAXIMUM_NOTES)?;
+    let mut notes = Vec::with_capacity(note_count);
+    for _ in 0..note_count {
+        notes.push(reader.read_string("lifecycle issue note")?);
+    }
+
+    let help = reader.read_optional_string("lifecycle issue help")?;
+    let link = reader.read_optional_string("lifecycle issue link")?;
+    let annotation_count = reader.read_count("lifecycle issue annotations", MAXIMUM_ANNOTATIONS)?;
+    let mut annotations = Vec::with_capacity(annotation_count);
+    let mut has_primary = false;
+    for _ in 0..annotation_count {
+        let kind = match reader.read_u8("lifecycle annotation kind")? {
+            1 => AnnotationKind::Primary,
+            2 => AnnotationKind::Secondary,
+            value => return Err(protocol(format!("invalid lifecycle annotation kind {value}"))),
+        };
+
+        let named_file = reader.read_optional_bytes("lifecycle annotation file")?;
+
+        let (file_id, size) = match named_file {
+            Some(name) => session.source(name).ok_or_else(|| {
+                protocol(format!("lifecycle annotation names unknown file `{}`", String::from_utf8_lossy(name)))
+            })?,
+            None => default_file
+                .map(|file| (file.id, file.size))
+                .ok_or_else(|| protocol("a project lifecycle annotation must name its source file"))?,
+        };
+
+        let start = reader.read_u32("lifecycle annotation start")?;
+        let end = reader.read_u32("lifecycle annotation end")?;
+        if start > end || end > size {
+            return Err(protocol(format!("{owner} reported invalid annotation span {start}..{end}")));
+        }
+
+        has_primary |= kind == AnnotationKind::Primary;
+        let mut annotation = Annotation::new(kind, Span::new(file_id, Position::new(start), Position::new(end)));
+        if let Some(message) = reader.read_optional_string("lifecycle annotation message")? {
+            annotation = annotation.with_message(message);
+        }
+
+        annotations.push(annotation);
+    }
+
+    // FIXME(azjezz): Should we forbid missing primary annotations? Rust-side can create issues without primary annotations,
+    // but it messes up the baseline stuff.
+    if !has_primary {
+        return Err(protocol(format!("{owner} reported an issue without a primary annotation")));
+    }
+
+    let edit_count = reader.read_count("lifecycle issue edits", MAXIMUM_EDITS)?;
+    let mut edits = HashMap::default();
+    for _ in 0..edit_count {
+        let named_file = reader.read_optional_bytes("lifecycle edit file")?;
+
+        let (file_id, size) = match named_file {
+            Some(name) => session.source(name).ok_or_else(|| {
+                protocol(format!("lifecycle edit names unknown file `{}`", String::from_utf8_lossy(name)))
+            })?,
+            None => default_file
+                .map(|file| (file.id, file.size))
+                .ok_or_else(|| protocol("a project lifecycle edit must name its source file"))?,
+        };
+
+        let start = reader.read_u32("lifecycle edit start")?;
+        let end = reader.read_u32("lifecycle edit end")?;
+        if start > end || end > size {
+            return Err(protocol(format!("{owner} reported invalid edit range {start}..{end}")));
+        }
+
+        let safety = read_safety(reader)?;
+        let new_text = reader.read_bytes("lifecycle edit replacement")?.to_vec();
+        edits
+            .entry(file_id)
+            .or_insert_with(Vec::new)
+            .push(TextEdit::replace(TextRange::new(start, end), new_text).with_safety(safety));
+    }
+
+    let mut issue =
+        Issue::new(level, message).with_code(format!("{identifier}/{local_code}")).with_annotations(annotations);
+    issue.notes = notes;
+    issue.help = help;
+    issue.link = link;
+    issue.edits = edits;
+
+    Ok(issue)
 }
 
 fn read_safety(reader: &mut ValueReader<'_>) -> Result<Safety, ExternalAnalyzerError> {
