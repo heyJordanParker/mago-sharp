@@ -95,6 +95,14 @@ pub struct CodebaseEntryKeys {
     pub file_ids: Vec<FileId>,
 }
 
+/// A member a class-like declares, by the name the codex keys it by: a property's with its `$`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Member {
+    Method(Word),
+    Property(Word),
+    Constant(Word),
+}
+
 /// Holds all analyzed information about the symbols, structures, and relationships within a codebase.
 ///
 /// This acts as the central repository for metadata gathered during static analysis,
@@ -1150,6 +1158,44 @@ impl CodebaseMetadata {
     pub fn get_declaring_property(&self, class: Word, property: Word) -> Option<&PropertyMetadata> {
         let declaring_class = self.get_class_like(class)?.declaring_property_ids.get(&property)?;
         self.class_likes.get(declaring_class)?.properties.get(&property)
+    }
+
+    /// Whether the engine holds `member`, which `class` declares, to the namespace of `class`, spec section 5: a
+    /// member written `internal`, or a `public` one of an `internal` class, unless it replaces a member of a parent
+    /// class or an interface that reaches further, through which code reaches it. The lowering sets the engine's flag
+    /// from it, and the analyzer refuses the reach the engine refuses.
+    #[must_use]
+    pub fn is_held_to_namespace(&self, class: Word, member: Member) -> bool {
+        let Some(metadata) = self.get_class_like(class) else {
+            return false;
+        };
+        let Some((flags, public)) = self.own_member(class, member) else {
+            return false;
+        };
+
+        flags.is_internal_reach()
+            || (public
+                && metadata.flags.is_internal_reach()
+                && !metadata.all_parent_classes.iter().chain(&metadata.all_parent_interfaces).any(|ancestor| {
+                    self.own_member(*ancestor, member).is_some() && !self.is_held_to_namespace(*ancestor, member)
+                }))
+    }
+
+    /// The flags of `member` as `class` itself declares it, and whether it is `public`, or none when `class` doesn't. The
+    /// codex keeps an `extern` property as a magic property, spec section 14.3.
+    fn own_member(&self, class: Word, member: Member) -> Option<(MetadataFlags, bool)> {
+        match member {
+            Member::Method(name) => self.get_method(class, name).map(|method| {
+                (method.flags, method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_public()))
+            }),
+            Member::Property(name) => self
+                .get_property(class, name)
+                .or_else(|| self.get_magic_property(class, name))
+                .map(|property| (property.flags, property.read_visibility.is_public())),
+            Member::Constant(name) => {
+                self.get_class_constant(class, name).map(|constant| (constant.flags, constant.visibility.is_public()))
+            }
+        }
     }
 
     /// Whether `class` has the `parse` spec section 10 gives a struct or a PHP# class, rather than one it declares,

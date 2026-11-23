@@ -2,7 +2,9 @@ use mago_allocator::Arena;
 use mago_word::Word;
 use mago_word::word;
 
+use mago_codex::context::ScopeContext;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::Member;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::module::ModuleKind;
@@ -38,26 +40,53 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_property_name;
 use mago_bytes::BytesDisplay;
 
-/// Whether PHP# code reaches `class`, or its member that is `internal` itself when `member_is_internal`. Spec section
-/// 5: an `internal` declaration or member reaches its namespace and every namespace below it, and a member is never
-/// more visible than its class, so every member of an `internal` class is `internal` too, as C#'s effective
-/// accessibility is. Plain PHP has no namespace visibility, so a `.php` file reaches everything.
+/// Whether the code of `scope` reaches `class`, or one of its members, when `held` says the engine holds it to the
+/// namespace of `class`, spec section 5: an `internal` class, or a member that
+/// [`CodebaseMetadata::is_held_to_namespace`] holds. PHP# code reaches it from the namespace or one below it. Plain PHP
+/// code reaches it as the engine lets it when the code runs: from code whose [`code_name`] continues the namespace past
+/// a backslash, so top-level code and a closure outside any class never do.
 pub(crate) fn reaches_internal<A>(
     context: &Context<'_, '_, A>,
+    scope: &ScopeContext<'_>,
     class: &ClassLikeMetadata,
-    member_is_internal: bool,
+    held: bool,
 ) -> bool
 where
     A: Arena,
 {
-    if !context.dialect.is_sharp()
-        || !class.flags.is_sharp()
-        || !(class.flags.is_internal_reach() || member_is_internal)
-    {
+    if !class.flags.is_sharp() || !held {
         return true;
     }
 
-    is_within_namespace(context.scope.namespace_name().unwrap_or_default(), declared_namespace(class))
+    let namespace = declared_namespace(class);
+    if context.dialect.is_sharp() {
+        return is_within_namespace(context.scope.namespace_name().unwrap_or_default(), namespace);
+    }
+
+    namespace.is_empty()
+        || code_name(scope).is_some_and(|code| {
+            let code = code.as_bytes();
+
+            code.len() > namespace.len()
+                && code[namespace.len()] == b'\\'
+                && code[..namespace.len()].eq_ignore_ascii_case(namespace)
+        })
+}
+
+/// The name the engine gives the code of `scope` when it checks an `internal` reach, as `zend_sharp_code_name` gives
+/// it: the class the code runs in, or else its function, and none for a closure outside any class and for top-level
+/// code, which the engine calls global scope.
+fn code_name(scope: &ScopeContext<'_>) -> Option<Word> {
+    match (scope.get_class_like(), scope.get_function_like()) {
+        (Some(class), _) => Some(class.original_name),
+        (None, Some(function)) if function.get_kind().is_function() => Some(function.original_name),
+        _ => None,
+    }
+}
+
+/// The code of `scope` as the engine names it in an `internal` refusal: "`App\Shop\Checkout`", or "global scope".
+fn engine_caller(scope: &ScopeContext<'_>) -> String {
+    code_name(scope).map_or_else(|| "global scope".to_owned(), |code| format!("`{code}`"))
 }
 
 /// The namespace the source declaration of `class` is in, as PHP writes it, which `internal` reaches, spec section 5.
@@ -164,44 +193,69 @@ where
     true
 }
 
-/// Checks that PHP# code reaches `class`, or one of its members, by [`reaches_internal`], and reports at `span` when
-/// it does not. `member` says whether the member is `internal` itself for this access, and `None` for the class.
-/// `member_name` gives the member's name as PHP# writes it, such as `Order.total` or `Order.total.set`, only when the
-/// check fails.
+/// Checks that the code of `scope` reaches `class`, or its `member`, by [`reaches_internal`], and reports at `span`
+/// when it does not. No `member` checks the class itself: its name in a PHP# import, or its `new` in plain PHP.
 pub(crate) fn check_internal_reach<A>(
     context: &mut Context<'_, '_, A>,
+    scope: &ScopeContext<'_>,
     class: &ClassLikeMetadata,
-    member: Option<bool>,
-    member_name: impl FnOnce(&Context<'_, '_, A>) -> String,
+    member: Option<Member>,
     span: Span,
 ) -> bool
 where
     A: Arena,
 {
-    if reaches_internal(context, class, member.unwrap_or(false)) {
+    let held = match member {
+        None => class.flags.is_internal_reach(),
+        Some(member) => context.codebase.is_held_to_namespace(class.name, member),
+    };
+    if reaches_internal(context, scope, class, held) {
         return true;
     }
 
     let namespace = declared_namespace(class);
-    let caller = context.scope.namespace_name().unwrap_or_default();
     let class_name = display_class_like_name(context, class.original_name);
-    let (reached, reason) = match member {
-        Some(false) => {
-            (member_name(context), format!("`{class_name}` is internal, so its members reach no further than it does."))
+    let is_constructor =
+        matches!(member, Some(Member::Method(name)) if name.as_bytes().eq_ignore_ascii_case(b"__construct"));
+    let reached = match member {
+        None => class_name.to_string(),
+        Some(_) if is_constructor && context.dialect.is_sharp() => format!("new {class_name}"),
+        Some(Member::Method(name) | Member::Property(name) | Member::Constant(name)) => {
+            display_member(context, class.original_name, name)
         }
-        Some(true) => {
-            let name = member_name(context);
-            let reason = format!("`{name}` is internal.");
-
-            (name, reason)
-        }
-        None => (class_name.to_string(), format!("`{class_name}` is internal.")),
     };
-    let (namespace, caller) = (dotted(namespace), dotted(caller));
+    let reason = match member {
+        None => format!("`{class_name}` is internal."),
+        Some(_) if class.flags.is_internal_reach() => {
+            format!("`{class_name}` is internal, so its members reach no further than it does.")
+        }
+        Some(_) => format!("`{reached}` is internal."),
+    };
+    let message = if context.dialect.is_sharp() {
+        let caller = context.scope.namespace_name().unwrap_or_default();
+
+        format!("`{reached}` is internal to `{}`, and `{}` is outside it.", dotted(namespace), dotted(caller))
+    } else {
+        // A plain PHP file reads the refusal the engine throws when the code runs, in its words. The engine creates no
+        // object of an `internal` class it refuses before it reaches the constructor.
+        let refused = match member {
+            None => format!("Cannot instantiate internal class `{class_name}`"),
+            Some(_) if is_constructor && class.flags.is_internal_reach() => {
+                format!("Cannot instantiate internal class `{class_name}`")
+            }
+            Some(_) if is_constructor => format!("Call to internal `{reached}()`"),
+            Some(Member::Method(_)) => format!("Call to internal method `{reached}()`"),
+            Some(Member::Property(_)) => format!("Cannot access internal property `{reached}`"),
+            Some(Member::Constant(_)) => format!("Cannot access internal constant `{reached}`"),
+        };
+
+        format!("{refused} from {}, outside namespace `{}`.", engine_caller(scope), BytesDisplay(namespace))
+    };
+    let namespace = dotted(namespace);
 
     context.collector.report_with_code(
         IssueCode::InternalAccess,
-        Issue::error(format!("`{reached}` is internal to `{namespace}`, and `{caller}` is outside it."))
+        Issue::error(message)
             .with_annotation(Annotation::primary(span).with_message("Reached here."))
             .with_note(reason)
             .with_note("An `internal` declaration or member reaches its namespace and every namespace below it.")
@@ -348,7 +402,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, WrittenNames<'arena>> for HeaderNames {
 /// # Arguments
 ///
 /// * `context` - The global analysis context.
-/// * `calling_class` - The class the access occurs in, or `None` for the global scope.
+/// * `scope` - The scope the access occurs in: its class, or none for a function or the global scope.
 /// * `fqcn` - The fully-qualified class name on which the method is being called.
 /// * `method_name` - The method name.
 /// * `access_span` - The span of the entire method call/access expression (e.g., `$obj->method()`).
@@ -360,7 +414,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, WrittenNames<'arena>> for HeaderNames {
 /// context buffer if the method is not visible.
 pub fn check_method_visibility<A>(
     context: &mut Context<'_, '_, A>,
-    calling_class: Option<Word>,
+    scope: &ScopeContext<'_>,
     fqcn: Word,
     method_name: Word,
     access_span: Span,
@@ -369,6 +423,7 @@ pub fn check_method_visibility<A>(
 where
     A: Arena,
 {
+    let calling_class = scope.get_class_like_name();
     let declaring_class = context.codebase.get_declaring_method_class(fqcn, method_name).unwrap_or_else(|| word(fqcn));
 
     let Some(method_metadata) = context.codebase.get_declaring_method(fqcn, method_name) else {
@@ -378,15 +433,9 @@ where
     if let Some(class) = context.codebase.get_class_like(declaring_class)
         && !check_internal_reach(
             context,
+            scope,
             class,
-            Some(method_metadata.flags.is_internal_reach()),
-            |context| {
-                if method_name.as_bytes().eq_ignore_ascii_case(b"__construct") {
-                    format!("new {}", display_class_like_name(context, class.original_name))
-                } else {
-                    display_member(context, class.original_name, BytesDisplay(method_name.as_bytes()))
-                }
-            },
+            Some(Member::Method(method_name)),
             member_span.unwrap_or(access_span),
         )
     {
@@ -512,9 +561,9 @@ where
 
     if !check_internal_reach(
         context,
+        &block_context.scope,
         declaring_class_metadata,
-        Some(property_metadata.flags.is_internal_reach()),
-        |context| display_member(context, declaring_class_metadata.original_name, property_name),
+        Some(Member::Property(property_name)),
         member_span.unwrap_or(access_span),
     ) {
         return false;
@@ -642,17 +691,19 @@ where
     let flags = property_metadata.flags;
     if !check_internal_reach(
         context,
+        &block_context.scope,
         declaring_class_metadata,
-        Some(flags.is_internal_reach()),
-        |context| display_member(context, declaring_class_metadata.original_name, property_name),
+        Some(Member::Property(property_name)),
         member_span.unwrap_or(access_span),
     ) {
         return false;
     }
 
-    if flags.is_internal_set() && !reaches_set(context, declaring_class_metadata) {
+    // Spec section 6.1: a `set` reaches its namespace at most, as an `internal` member does.
+    if flags.is_internal_set() && !reaches_internal(context, &block_context.scope, declaring_class_metadata, true) {
         report_set_outside_namespace(
             context,
+            &block_context.scope,
             declaring_class_metadata,
             property_name,
             member_span.unwrap_or(access_span),
@@ -818,21 +869,12 @@ where
     is_visible
 }
 
-/// Spec section 6.1: whether the analyzed code writes a property of `class`, a PHP# class, whose `set` reaches its
-/// namespace at most. Code of the namespace or one below it writes it, PHP# or plain PHP, since plain PHP that uses
-/// PHP# code follows PHP#'s rules.
-fn reaches_set<A>(context: &Context<'_, '_, A>, class: &ClassLikeMetadata) -> bool
-where
-    A: Arena,
-{
-    !class.flags.is_sharp()
-        || is_within_namespace(context.scope.namespace_name().unwrap_or_default(), declared_namespace(class))
-}
-
-/// Reports a write at `span`, from outside its namespace, to the property `property_name` of `class`, named as it
-/// reads: "`Transaction.status` is set only inside `App.Shop.Payments`".
+/// Reports a write at `span`, by the code of `scope` outside its namespace, to the property `property_name` of
+/// `class`, named as it reads: "`Transaction.status` is set only inside `App.Shop.Payments`", and in plain PHP in the
+/// engine's words, as the engine refuses the write when it runs.
 fn report_set_outside_namespace<A>(
     context: &mut Context<'_, '_, A>,
+    scope: &ScopeContext<'_>,
     class: &ClassLikeMetadata,
     property_name: Word,
     span: Span,
@@ -840,11 +882,19 @@ fn report_set_outside_namespace<A>(
     A: Arena,
 {
     let property = display_member(context, class.original_name, property_name);
-    let namespace = dotted(declared_namespace(class));
+    let message = if context.dialect.is_sharp() {
+        format!("`{property}` is set only inside `{}`.", dotted(declared_namespace(class)))
+    } else {
+        format!(
+            "Cannot modify internal(set) property `{property}` from {}, outside namespace `{}`.",
+            engine_caller(scope),
+            BytesDisplay(declared_namespace(class))
+        )
+    };
 
     context.collector.report_with_code(
         IssueCode::InternalAccess,
-        Issue::error(format!("`{property}` is set only inside `{namespace}`."))
+        Issue::error(message)
             .with_annotation(Annotation::primary(span).with_message("Written here."))
             .with_note(
                 "A property's `set` reaches its own namespace at most, so code outside it never changes its state.",

@@ -5,6 +5,7 @@ use foldhash::fast::RandomState;
 use indexmap::IndexMap;
 
 use mago_allocator::Arena;
+use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -18,6 +19,7 @@ use mago_codex::ttype::wrap_atomic;
 use mago_span::HasSpan;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::TypeOf;
+use mago_word::empty_word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -34,6 +36,8 @@ use crate::utils::names::display_class_like_name;
 /// class value with type arguments. Of a type parameter, it is the `Class<T>` of the type argument the code runs with.
 /// Of any other type, as `int`, `List<Order>` or `Self`, it is the `Class` of that type. A class value of a type the
 /// code runs with, a type parameter's or a generic PHP# class's, records it as a tested type, which the engine spells.
+/// A class's value that is no member receiver, or that receives `name()`, leaves the code that writes it, as a value a
+/// framework builds by its name, so it is also a use of the class from outside its namespace, spec section 5.
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for TypeOf<'arena> {
     fn analyze<'ctx, A>(
         &'ast self,
@@ -44,6 +48,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for TypeOf<'arena> {
     where
         A: Arena,
     {
+        let leaves = !block_context.flags.receives_member();
+        block_context.flags.set_receives_member(false);
         let class = match &self.r#type {
             Hint::Identifier(name) if context.resolved_names.is_type_parameter(name) => {
                 let parameter = get_type_from_hint(context, block_context, artifacts, &self.r#type);
@@ -54,9 +60,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for TypeOf<'arena> {
 
                 class
             }
-            Hint::Identifier(name) => class_value(context, block_context, artifacts, name, None),
+            Hint::Identifier(name) => class_value(context, block_context, artifacts, name, None, leaves),
             Hint::Generic(generic) if context.resolved_names.resolve(&generic.name).is_some() => {
-                class_value(context, block_context, artifacts, &generic.name, Some(&self.r#type))
+                class_value(context, block_context, artifacts, &generic.name, Some(&self.r#type), leaves)
             }
             // `Self` is the class a static method is called on, which PHP's `static::class` names.
             Hint::Self_(_) => class_of(&get_type_from_hint(context, block_context, artifacts, &self.r#type)),
@@ -85,19 +91,26 @@ fn class_of(held: &TUnion) -> TUnion {
 /// The class value of the class `name` names, with the type arguments of `generic`, its generic type, when written:
 /// `typeof(PaginatedList<Order>)` is a `Class<PaginatedList<Order>>`, spec section 25. A PHP# generic class's value
 /// carries its type arguments while the code runs, so its type is recorded as a tested type's is. A class that does
-/// not exist is reported, and its value has no type, so nothing that reads it reports again.
+/// not exist is reported, and its value has no type, so nothing that reads it reports again. A value that `leaves`
+/// the code is a use of the class from the file too, which no namespace holds.
 fn class_value<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     block_context: &BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     name: &impl HasSpan,
     generic: Option<&Hint<'_>>,
+    leaves: bool,
 ) -> TUnion
 where
     A: Arena,
 {
     let mut class = word(context.resolved_names.get(name));
-    artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, context.codebase.class_key(class), false);
+    let class_key = context.codebase.class_key(class);
+    artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, class_key, false);
+    if leaves {
+        let file = ReferenceOrigin::File(word(context.source_file.name.as_ref()));
+        artifacts.symbol_references.add_reference(file, (class_key, empty_word()), false);
+    }
     let metadata = context.codebase.get_class_like(class);
     match metadata {
         Some(metadata) => class = metadata.original_name,

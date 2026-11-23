@@ -694,6 +694,75 @@ fn a_plain_php_use_outside_the_namespace_keeps_a_public_member() {
     );
 }
 
+/// Spec sections 5 and 25: a class value handed out of the code that writes it, as `typeof(TaggedCast).name()` a
+/// framework builds the class by, is a use from outside the namespace, so `TaggedCast` stays `public`. A class value
+/// that receives a member, as `typeof(Reflected).fields()`, reflects where it is written, so `Reflected` is only its
+/// namespace's.
+#[test]
+fn a_class_value_that_leaves_its_code_keeps_its_class_public() {
+    let tagged = "namespace App.Store;\n\npublic final class TaggedCast\n{\n}\n";
+    let reflected = "namespace App.Store;\n\npublic final class Reflected\n{\n}\n";
+    let order = "namespace App.Store;\n\npublic final class Order\n{\n    public Map<string, string> casts() => [\"status\": typeof(TaggedCast).name(), \"fields\": `${typeof(Reflected).fields().count()}`];\n}\n";
+    let boot = "<?php\n\n(new \\App\\Store\\Order())->casts();\n";
+
+    assert_eq!(
+        too_wide(&[
+            ("src/App/Store/TaggedCast.sharp", tagged),
+            ("src/App/Store/Reflected.sharp", reflected),
+            ("src/App/Store/Order.sharp", order),
+            ("src/boot.php", boot),
+        ]),
+        [
+            "src/App/Store/Reflected.sharp 3:20 `Reflected` is public, and nothing outside `App.Store` uses it. | Declare it `internal`."
+        ]
+    );
+}
+
+/// Spec section 5: plain PHP code reaches what the engine holds to a namespace as the engine lets it when it runs. A
+/// framework class or a function outside `App.Store` that calls `Catalog.secret`, the `label` of the `internal` enum
+/// `Status`, or creates a `Till`, an `internal` class with no constructor, is refused in the engine's words, naming the
+/// caller the engine names. `Status.tryFrom` replaces the wider `BackedEnum::tryFrom`, so the engine holds it to no
+/// namespace.
+/// Top-level code of `App.Store` has no code name in the namespace, so the engine refuses it, and a class of `App.Store`
+/// reaches all of it.
+#[test]
+fn plain_php_outside_the_namespace_of_an_internal_member_is_refused() {
+    let catalog = (
+        "src/App/Store/Catalog.sharp",
+        "namespace App.Store;\n\npublic final class Catalog\n{\n    internal string secret() => \"secret\";\n}\n",
+    );
+    let till = ("src/App/Store/Till.sharp", "namespace App.Store;\n\nfinal class Till\n{\n}\n");
+    let status = (
+        "src/App/Store/Status.sharp",
+        "namespace App.Store;\n\nenum Status : string\n{\n    case Active = \"a\";\n\n    public string label() => this.name;\n}\n",
+    );
+    let store = [catalog, till, status];
+    let model = "<?php\n\nnamespace Illuminate\\Database\\Eloquent;\n\nfinal class Model\n{\n    public function cast(): void\n    {\n        (new \\App\\Store\\Catalog())->secret();\n        \\App\\Store\\Status::tryFrom('a')?->label();\n        new \\App\\Store\\Till();\n    }\n}\n";
+    let function = "<?php\n\nnamespace App\\Outside;\n\nfunction cast(): void\n{\n    (new \\App\\Store\\Catalog())->secret();\n}\n";
+    let boot = "<?php\n\nnamespace App\\Store;\n\n(new Catalog())->secret();\n";
+    let shelf = "<?php\n\nnamespace App\\Store;\n\nfinal class Shelf\n{\n    public function cast(): string\n    {\n        new Till();\n        return (new Catalog())->secret() . Status::tryFrom('a')?->label();\n    }\n}\n";
+
+    assert_eq!(
+        compile_errors(("src/Illuminate/Database/Eloquent/Model.php", model), &store),
+        [
+            "Call to internal method `App\\Store\\Catalog::secret()` from `Illuminate\\Database\\Eloquent\\Model`, outside namespace `App\\Store`.",
+            "Call to internal method `App\\Store\\Status::label()` from `Illuminate\\Database\\Eloquent\\Model`, outside namespace `App\\Store`.",
+            "Cannot instantiate internal class `App\\Store\\Till` from `Illuminate\\Database\\Eloquent\\Model`, outside namespace `App\\Store`.",
+        ]
+    );
+    assert_eq!(
+        compile_errors(("src/App/Outside/cast.php", function), &store),
+        [
+            "Call to internal method `App\\Store\\Catalog::secret()` from `App\\Outside\\cast`, outside namespace `App\\Store`."
+        ]
+    );
+    assert_eq!(
+        compile_errors(("src/App/Store/boot.php", boot), &store),
+        ["Call to internal method `App\\Store\\Catalog::secret()` from global scope, outside namespace `App\\Store`."]
+    );
+    assert_eq!(compile_errors(("src/App/Store/Shelf.php", shelf), &store), Vec::<String>::new());
+}
+
 /// Spec sections 5 and 15: an event's parameters are its payload, public get-only properties that take no modifier,
 /// so no use makes them too wide: `Changed`, created in another namespace that reads neither `id` nor `name`, reports
 /// nothing, and `Quiet`, which only its namespace uses, is refused as a type, as a class would be, and never for its
@@ -1397,8 +1466,7 @@ fn a_bare_constant_is_the_code_s_own_and_a_missing_one_is_refused_as_in_php() {
 
 #[test]
 fn php_calls_a_sharp_method_by_position_and_by_name() {
-    let sharp =
-        "namespace Demo;\n\nclass Report\n{\n    public int total(int extra)\n    {\n        return extra;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public int total(int extra)\n    {\n        return extra;\n    }\n}\n";
     let php = "<?php\n\nnamespace App;\n\nfunction run(\\Demo\\Report $report): int\n{\n    return $report->total(extra: 1) + $report->total(\"one\");\n}\n";
 
     let php_issues = issues(("src/App/run.php", php), &[("src/Demo/Report.sharp", sharp)]);
@@ -2091,7 +2159,7 @@ fn new_checks_the_constructor_arguments_as_in_php() {
 
 #[test]
 fn the_constructor_is_the_php_constructor() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int count;\n\n    public Report(int start)\n    {\n        this.count = start;\n    }\n\n    public int total()\n    {\n        return this.count;\n    }\n\n    public static int make()\n    {\n        return new Report(\"one\").total() + new Report(start: 2).total();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    private int count;\n\n    public Report(int start)\n    {\n        this.count = start;\n    }\n\n    public int total()\n    {\n        return this.count;\n    }\n\n    public static int make()\n    {\n        return new Report(\"one\").total() + new Report(start: 2).total();\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    private int $count;\n\n    public function __construct(int $start)\n    {\n        $this->count = $start;\n    }\n\n    public function total(): int\n    {\n        return $this->count;\n    }\n\n    public static function make(): int\n    {\n        return new Report(\"one\")->total() + new Report(start: 2)->total();\n    }\n}\n";
     let caller =
         "<?php\n\nnamespace App;\n\nfunction run(): int\n{\n    return (new \\Demo\\Report(\"one\"))->total();\n}\n";
@@ -2106,7 +2174,7 @@ fn the_constructor_is_the_php_constructor() {
 
 #[test]
 fn an_auto_property_is_the_php_property_with_its_set_visibility() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n\n    public Report(int id)\n    {\n        this.id = id;\n        this.name = \"report\";\n    }\n\n    public int bump()\n    {\n        this.views++;\n        return this.views + this.id;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n\n    public Report(int id)\n    {\n        this.id = id;\n        this.name = \"report\";\n    }\n\n    public int bump()\n    {\n        this.views++;\n        return this.views + this.id;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public private(set) int $views = 0;\n    public string $name;\n    public readonly int $id;\n\n    public function __construct(int $id)\n    {\n        $this->id = $id;\n        $this->name = \"report\";\n    }\n\n    public function bump(): int\n    {\n        $this->views++;\n        return $this->views + $this->id;\n    }\n}\n";
     let caller = "<?php\n\nnamespace App;\n\nfunction run(\\Demo\\Report $report): string\n{\n    $report->name = 'other';\n    $report->views = 2;\n    $report->id = 3;\n    return $report->name . $report->views . $report->id;\n}\n";
 
@@ -2125,7 +2193,7 @@ fn an_auto_property_is_the_php_property_with_its_set_visibility() {
 
 #[test]
 fn a_promoted_member_is_the_promoted_php_property() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public Report(private int count, public int id { get; }, public string name { get; private set; })\n    {\n    }\n\n    public int total()\n    {\n        return this.count + this.id;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public Report(private int count, public int id { get; }, public string name { get; private set; })\n    {\n    }\n\n    public int total()\n    {\n        return this.count + this.id;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public function __construct(private int $count, public readonly int $id, public private(set) string $name)\n    {\n    }\n\n    public function total(): int\n    {\n        return $this->count + $this->id;\n    }\n}\n";
     let caller = "<?php\n\nnamespace App;\n\nfunction run(\\Demo\\Report $report): string\n{\n    $report->id = 3;\n    $report->name = 'other';\n    return $report->name . $report->id;\n}\n";
 
@@ -4047,13 +4115,22 @@ fn internal_reaches_its_namespace_and_every_namespace_below_it() {
         );
     }
 
-    // Plain PHP has no namespace visibility, so a `.php` file reaches every PHP# class and member. A `set` still
-    // reaches its own namespace at most, spec section 6.1, since plain PHP that uses PHP# code follows its rules.
+    // Plain PHP that uses PHP# code is held to the same namespaces, as the engine holds it when it runs, and reads each
+    // refusal in the engine's words. A `set` reaches its own namespace at most, spec section 6.1.
     let php = "<?php\n\nnamespace App\\Tenant\\Other;\n\nuse App\\Tenant\\Store\\Hidden;\nuse App\\Tenant\\Store\\Shop;\n\nfinal class Plain\n{\n    public function run(Shop $shop, Hidden $hidden): int\n    {\n        $shop->views = 2;\n        return $shop->secret() + $hidden->total() + Shop::MAX;\n    }\n}\n";
+    let outside =
+        |refused: &str| format!("{refused} from `App\\Tenant\\Other\\Plain`, outside namespace `App\\Tenant\\Store`.");
     assert_eq!(
         reach(("src/App/Tenant/Other/Plain.php", php)),
-        ["`App\\Tenant\\Store\\Shop::$views` is set only inside `App.Tenant.Store`."]
+        [
+            outside("Cannot modify internal(set) property `App\\Tenant\\Store\\Shop::$views`"),
+            outside("Call to internal method `App\\Tenant\\Store\\Shop::secret()`"),
+            outside("Call to internal method `App\\Tenant\\Store\\Hidden::total()`"),
+            outside("Cannot access internal constant `App\\Tenant\\Store\\Shop::MAX`"),
+        ]
     );
+    let below = leak(php.replace("App\\Tenant\\Other;", "App\\Tenant\\Store\\Inner;"));
+    assert_eq!(reach(("src/App/Tenant/Store/Inner/Plain.php", below)), Vec::<String>::new());
 }
 
 /// Spec sections 5 and 10: a struct takes every visibility a class takes, so an `internal struct` reaches its
@@ -4090,7 +4167,7 @@ fn an_internal_struct_reaches_only_its_namespace() {
 /// Spec section 6.1: a property's `set` reaches its own namespace at most, so code outside the namespace never changes
 /// the state of its classes. A write from another namespace is refused at the write, a static's and an object
 /// initializer's included, and one from the namespace or one below it compiles. `init` keeps the property's level, so
-/// `new` sets it from anywhere, and a plain PHP file of another namespace is refused as PHP# is.
+/// `new` sets it from anywhere, and a plain PHP file of another namespace is refused as PHP# is, in the engine's words.
 #[test]
 fn a_set_reaches_its_own_namespace_at_most() {
     let transaction = (
@@ -4115,7 +4192,9 @@ fn a_set_reaches_its_own_namespace_at_most() {
     );
     assert_eq!(
         messages(("src/App/Web/pay.php", plain), &[transaction]),
-        ["`App\\Shop\\Payments\\Transaction::$status` is set only inside `App.Shop.Payments`."]
+        [
+            "Cannot modify internal(set) property `App\\Shop\\Payments\\Transaction::$status` from `App\\Web\\pay`, outside namespace `App\\Shop\\Payments`."
+        ]
     );
 }
 
@@ -10831,7 +10910,7 @@ fn a_named_constructor_called_without_new_is_an_error() {
 /// PHP calls a named constructor as the static method it runs as, which returns its class.
 #[test]
 fn php_calls_a_named_constructor_as_the_static_method_it_runs_as() {
-    let sharp = "namespace Demo;\n\nclass Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Artifact\n{\n    public Artifact(public int size { get; }) { }\n\n    public Artifact.sized(int size) : this(size) { }\n}\n";
     let caller = "<?php\n\nnamespace App;\n\nfunction run(): string\n{\n    return \\Demo\\Artifact::sized(2)->size . \\Demo\\Artifact::sized('two')->size;\n}\n";
 
     assert_eq!(issues(("src/App/run.php", caller), &[("src/Demo/Artifact.sharp", sharp)]), ["7:67 invalid-argument"]);
@@ -12832,7 +12911,7 @@ fn a_backed_enum_and_a_class_using_it_have_the_issues_of_their_php_twins() {
 
 #[test]
 fn php_calls_a_sharp_enum_and_sharp_calls_a_php_enum_with_no_issues() {
-    let status = "namespace Demo;\n\nenum Status : string\n{\n    case Active = \"a\";\n\n    public string label() => this.name;\n}\n";
+    let status = "namespace Demo;\n\npublic enum Status : string\n{\n    case Active = \"a\";\n\n    public string label() => this.name;\n}\n";
     let php_caller =
         "<?php\n\nnamespace App;\n\nfunction run(): string\n{\n    return \\Demo\\Status::from('a')->label();\n}\n";
     let color = "<?php\n\nnamespace Lib;\n\nenum Color: string\n{\n    case Red = 'r';\n}\n";

@@ -8,6 +8,7 @@ use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::is_sealed_class;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::Member;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::metadata::module::ModuleKind;
@@ -282,7 +283,6 @@ use types::Declaration;
 use types::DeclarationKind;
 use types::Equality;
 use types::FunctionType;
-use types::Member;
 use types::MembersByKind;
 use types::PlainParameter;
 use types::Types;
@@ -2820,10 +2820,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `ZEND_ACC_SHARP_INTERNAL` when the engine holds `member` of the class being lowered to the class's namespace, as
-    /// [`Types::is_held_to_namespace`] says, and zero otherwise. PHP has no namespace reach, so the member runs as
-    /// public, and the engine holds it by its flag.
+    /// [`CodebaseMetadata::is_held_to_namespace`] says, and zero otherwise. PHP has no namespace reach, so the member
+    /// runs as public, and the engine holds it by its flag.
     fn reach_flag(&self, member: Member) -> u32 {
-        if self.types.is_held_to_namespace(word(self.class), member) { ZEND_ACC_SHARP_INTERNAL } else { 0 }
+        if self.types.codebase().is_held_to_namespace(word(self.class), member) { ZEND_ACC_SHARP_INTERNAL } else { 0 }
     }
 
     /// `ZEND_ACC_SHARP_INTERNAL` when the class being lowered is `internal`, spec section 5, which the compiler keeps

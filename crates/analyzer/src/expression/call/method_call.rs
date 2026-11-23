@@ -254,7 +254,7 @@ where
 {
     if !check_method_visibility(
         context,
-        block_context.scope.get_class_like_name(),
+        &block_context.scope,
         method_identifier.get_class_name(),
         method_identifier.get_method_name(),
         span,

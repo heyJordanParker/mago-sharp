@@ -4632,3 +4632,22 @@ fn a_call_only_a_magic_method_answers_is_refused_in_a_library_and_a_project() {
         );
     }
 }
+
+/// Spec section 9: a named constructor takes any name but a magic method's, which the engine calls itself. One named
+/// `__construct` is refused at its name, and the lowering, which runs on a refused file too, lowers it without a panic.
+#[test]
+fn a_named_constructor_named_construct_is_refused_and_lowers_without_a_panic() {
+    let maker = "namespace App.Shop;\n\npublic class Maker\n{\n    public Maker(public int sides { get; }) { }\n\n    public Maker.__construct(int sides) : this(sides) { }\n}\n";
+    let directory = library_project(&[("app/Shop/Maker.sharp", maker)]);
+
+    let output = compile_lines(directory.path());
+
+    assert_eq!(
+        issue_lines(&output),
+        [
+            "app/Shop/Maker.sharp:7:18:error - semantics: A named constructor cannot be named `__construct`: the engine calls `__construct` itself."
+        ],
+        "{}",
+        printed(&output)
+    );
+}

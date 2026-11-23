@@ -497,7 +497,7 @@ where
     if let Some(result) = result
         && !check_method_visibility(
             context,
-            block_context.scope.get_class_like_name(),
+            &block_context.scope,
             method_id.get_class_name(),
             method_id.get_method_name(),
             access_span,
@@ -1010,7 +1010,7 @@ where
     // Check visibility
     if !check_method_visibility(
         context,
-        block_context.scope.get_class_like_name(),
+        &block_context.scope,
         method_id.get_class_name(),
         method_id.get_method_name(),
         access_span,

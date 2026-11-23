@@ -4,6 +4,7 @@ use std::rc::Rc;
 use mago_bytes::BytesDisplay;
 use mago_codex::context::ScopeContext;
 use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::Member;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
@@ -588,9 +589,11 @@ where
     let constructor = context.codebase.get_method(declaring, word("__construct"))?;
     let visibility = constructor.method_metadata.as_ref()?.visibility;
     let is_internal = constructor.flags.is_internal_reach();
+    let held = class.flags.is_internal_reach()
+        || context.codebase.is_held_to_namespace(declaring, Member::Method(word("__construct")));
     let reached =
         is_visible_from_scope(context.codebase, visibility, declaring, block_context.scope.get_class_like_name())
-            && reaches_internal(context, class, is_internal);
+            && reaches_internal(context, &block_context.scope, class, held);
 
     (!reached).then(|| if is_internal { "internal".to_owned() } else { visibility.to_string() })
 }

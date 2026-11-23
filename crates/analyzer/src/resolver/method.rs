@@ -266,6 +266,12 @@ where
     let mut asserted_descendant_method_references = Vec::new();
     let mut readonly_calls = Vec::new();
 
+    // A class value's member reflects where it is written, but `name()` hands out the class's name, spec section 25.
+    if matches!(object.unparenthesized(), Expression::TypeOf(_))
+        && !matches!(selector, ClassLikeMemberSelector::Identifier(name) if name.value == b"name")
+    {
+        block_context.flags.set_receives_member(true);
+    }
     analyze_member_object(context, block_context, artifacts, object, is_null_safe)?;
 
     let resolved_selectors = resolve_member_selector(context, block_context, artifacts, selector, false)?;
@@ -1280,7 +1286,7 @@ where
     }) {
         if !check_method_visibility(
             context,
-            block_context.scope.get_class_like_name(),
+            &block_context.scope,
             class_metadata.original_name,
             method_key,
             access_span,
@@ -1426,7 +1432,7 @@ where
 
                 if !check_method_visibility(
                     context,
-                    block_context.scope.get_class_like_name(),
+                    &block_context.scope,
                     mixin_metadata.original_name,
                     mixin_key,
                     access_span,

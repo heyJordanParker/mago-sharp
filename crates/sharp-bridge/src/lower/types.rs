@@ -15,10 +15,10 @@ use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::Member;
 use mago_codex::metadata::attribute::ConstantExpression;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
-use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::machine::MachineMetadata;
 use mago_codex::metadata::module::ModuleMetadata;
@@ -120,17 +120,9 @@ pub struct Declaration {
     /// The member's name, or a class's own name.
     pub name: Word,
     /// Whether code of any class and namespace may use it: a class, or a public member the engine doesn't hold to its
-    /// namespace, as [`Types::is_held_to_namespace`] says, so a copy of a call of it in any class reaches it, as an
+    /// namespace, as [`CodebaseMetadata::is_held_to_namespace`] says, so a copy of a call of it in any class reaches it, as an
     /// inline form's does.
     pub public: bool,
-}
-
-/// A member a class declares, by the name the codex keys it by: a property's with its `$`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Member {
-    Method(Word),
-    Property(Word),
-    Constant(Word),
 }
 
 /// The members a method call runs on a value that may hold more than one kind of collection, or a collection or an
@@ -1685,7 +1677,7 @@ impl<'analysis> Types<'analysis> {
         } else if let Some(constant) = self.codebase.get_class_constant(class, member) {
             Some(declared(
                 DeclarationKind::Constant,
-                constant.visibility.is_public() && !self.is_held_to_namespace(class, Member::Constant(member)),
+                constant.visibility.is_public() && !self.codebase.is_held_to_namespace(class, Member::Constant(member)),
             ))
         } else {
             self.property_declaration(class, member.as_bytes()).or_else(|| self.method_declaration(class, member))
@@ -2580,7 +2572,7 @@ impl<'analysis> Types<'analysis> {
             class: declaring,
             name: word(property),
             public: metadata.read_visibility.is_public()
-                && !self.is_held_to_namespace(declaring, Member::Property(word(&variable))),
+                && !self.codebase.is_held_to_namespace(declaring, Member::Property(word(&variable))),
         })
     }
 
@@ -2772,51 +2764,13 @@ impl<'analysis> Types<'analysis> {
             class: declaring.get_class_name(),
             name: word(method),
             public: metadata.visibility.is_public()
-                && !self.is_held_to_namespace(declaring.get_class_name(), Member::Method(word(method))),
+                && !self.codebase.is_held_to_namespace(declaring.get_class_name(), Member::Method(word(method))),
         })
     }
 
     /// Whether the class-like `class` is `internal`, spec section 5, as a PHP# one is unless it is `public`.
     pub(crate) fn is_internal_class(&self, class: Word) -> bool {
         self.codebase.get_class_like(class).is_some_and(|metadata| metadata.flags.is_internal_reach())
-    }
-
-    /// Whether the engine holds `member`, which `class` declares, to the namespace of `class`, spec section 5: a
-    /// member written `internal`, or a `public` one of an `internal` class, unless it replaces a member of a parent
-    /// class or an interface that reaches further, through which code reaches it, as the checker lets it.
-    pub(crate) fn is_held_to_namespace(&self, class: Word, member: Member) -> bool {
-        let Some(metadata) = self.codebase.get_class_like(class) else {
-            return false;
-        };
-        let Some((flags, public)) = self.own_member(class, member) else {
-            return false;
-        };
-
-        flags.is_internal_reach()
-            || (public
-                && metadata.flags.is_internal_reach()
-                && !metadata.all_parent_classes.iter().chain(&metadata.all_parent_interfaces).any(|ancestor| {
-                    self.own_member(*ancestor, member).is_some() && !self.is_held_to_namespace(*ancestor, member)
-                }))
-    }
-
-    /// The flags of `member` as `class` itself declares it, and whether it is `public`, or none when `class` doesn't. The
-    /// codex keeps an `extern` property as a magic property, spec section 14.3.
-    fn own_member(&self, class: Word, member: Member) -> Option<(MetadataFlags, bool)> {
-        let codebase = self.codebase;
-
-        match member {
-            Member::Method(name) => codebase.get_method(class, name).map(|method| {
-                (method.flags, method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_public()))
-            }),
-            Member::Property(name) => codebase
-                .get_property(class, name)
-                .or_else(|| codebase.get_magic_property(class, name))
-                .map(|property| (property.flags, property.read_visibility.is_public())),
-            Member::Constant(name) => codebase
-                .get_class_constant(class, name)
-                .map(|constant| (constant.flags, constant.visibility.is_public())),
-        }
     }
 }
 

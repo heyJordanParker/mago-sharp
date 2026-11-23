@@ -82,6 +82,7 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_type;
 use crate::utils::template::get_generic_parameter_for_offset;
 use crate::utils::template::written_type_argument;
+use crate::visibility::check_internal_reach;
 use crate::visibility::check_method_visibility;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
@@ -652,6 +653,13 @@ where
         is_impossible = true;
     }
 
+    // Spec section 5: plain PHP names a PHP# class with no import, so its `new` is where code outside an `internal`
+    // class's reach creates one, which the engine refuses before it calls the constructor.
+    let reaches_class = context.dialect.is_sharp()
+        || classname.is_from_class_string()
+        || check_internal_reach(context, &block_context.scope, metadata, None, class_expression_span);
+    is_impossible |= !reaches_class;
+
     if metadata.flags.is_deprecated()
         && block_context.scope.get_class_like_name().is_none_or(|self_id| self_id != metadata.original_name)
     {
@@ -830,14 +838,16 @@ where
             true,
         )?;
 
-        if !check_method_visibility(
-            context,
-            block_context.scope.get_class_like_name(),
-            constructor_declraing_id.get_class_name(),
-            constructor_declraing_id.get_method_name(),
-            instantiation_span,
-            None,
-        ) {
+        if reaches_class
+            && !check_method_visibility(
+                context,
+                &block_context.scope,
+                constructor_declraing_id.get_class_name(),
+                constructor_declraing_id.get_method_name(),
+                instantiation_span,
+                None,
+            )
+        {
             is_impossible = true;
         }
 

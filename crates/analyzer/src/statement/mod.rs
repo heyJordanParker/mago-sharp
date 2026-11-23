@@ -220,7 +220,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                         for item in &sequence.items {
                             let name = php_name(&item.name);
                             if let Some(class) = context.codebase.get_class_like(word(&name)) {
-                                check_internal_reach(context, class, None, |_| String::new(), item.name.span());
+                                check_internal_reach(context, &block_context.scope, class, None, item.name.span());
                             }
                         }
                     }

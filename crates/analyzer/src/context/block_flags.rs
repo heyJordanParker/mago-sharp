@@ -35,6 +35,10 @@ impl BlockContextFlags {
     /// Set while analyzing the left operand of a PHP# `+` that is itself a `+`, as `"a" + 1` in `"a" + 1 + "b"`. The
     /// outermost `+` of the chain reports a string joined with another value, spec section 18, for the whole chain.
     pub const INSIDE_JOIN: u32 = 1 << 22;
+    /// Set while analyzing a `typeof` that is the receiver of a member access other than `name()`, which reflects in
+    /// the code that writes it, spec section 25. Any other `typeof` hands its class to whatever receives the value, so
+    /// it is a use from outside the class's namespace, spec section 5. The `typeof` reads it and clears it.
+    pub const RECEIVES_MEMBER: u32 = 1 << 23;
 
     #[inline]
     pub const fn new() -> Self {
@@ -179,6 +183,11 @@ impl BlockContextFlags {
     }
 
     #[inline(always)]
+    pub const fn receives_member(&self) -> bool {
+        self.contains(Self::RECEIVES_MEMBER)
+    }
+
+    #[inline(always)]
     pub fn set_inside_conditional(&mut self, value: bool) {
         self.set(Self::INSIDE_CONDITIONAL, value);
     }
@@ -286,5 +295,10 @@ impl BlockContextFlags {
     #[inline(always)]
     pub fn set_inside_join(&mut self, value: bool) {
         self.set(Self::INSIDE_JOIN, value);
+    }
+
+    #[inline(always)]
+    pub fn set_receives_member(&mut self, value: bool) {
+        self.set(Self::RECEIVES_MEMBER, value);
     }
 }

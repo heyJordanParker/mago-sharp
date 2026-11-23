@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use mago_word::Word;
 
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::Member;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like_constant::ClassLikeConstantMetadata;
 use mago_codex::ttype::atomic::TAtomic;
@@ -156,7 +157,7 @@ where
                 class_expr.span(),
                 constant_selector.span(),
                 &class_resolution.origin,
-                block_context.flags.inside_class_like_attribute(),
+                block_context,
             ) {
                 result.constants.push(resolved_const);
             } else {
@@ -299,11 +300,12 @@ fn find_constant_in_class<'ctx, A>(
     class_span: Span,
     const_span: Span,
     resolution_origin: &ResolutionOrigin,
-    inside_class_like_attribute: bool,
+    block_context: &BlockContext<'_>,
 ) -> Option<ResolvedConstant>
 where
     A: Arena,
 {
+    let inside_class_like_attribute = block_context.flags.inside_class_like_attribute();
     if metadata.kind.is_trait() && !is_valid_trait_constant_access(resolution_origin, inside_class_like_attribute) {
         let constant = display_member(context, metadata.original_name, const_name);
         let trait_name = display_class_like_name(context, metadata.original_name);
@@ -338,13 +340,7 @@ where
     if let Some(constant_metadata) = metadata.constants.get(&const_name) {
         let display = display_member(context, metadata.original_name, const_name);
         crate::utils::availability::check_class_constant_availability(context, constant_metadata, &display, const_span);
-        check_internal_reach(
-            context,
-            metadata,
-            Some(constant_metadata.flags.is_internal_reach()),
-            |_| display.clone(),
-            const_span,
-        );
+        check_internal_reach(context, &block_context.scope, metadata, Some(Member::Constant(const_name)), const_span);
 
         let const_type = read_type(context.codebase, metadata, constant_metadata);
 

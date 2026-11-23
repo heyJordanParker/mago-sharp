@@ -557,7 +557,7 @@ where
     // the constructor must be reachable from the global scope.
     check_method_visibility(
         context,
-        None,
+        &ScopeContext::new(block_context.scope.get_reference_origin()),
         declaring_constructor_id.get_class_name(),
         declaring_constructor_id.get_method_name(),
         attribute.span(),

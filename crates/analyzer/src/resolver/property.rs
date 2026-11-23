@@ -179,6 +179,10 @@ where
     let for_assignment = written.is_some();
     let mut result = PropertyResolutionResult::default();
 
+    // A class value's member reflects where it is written, spec section 25.
+    if matches!(object_expression.unparenthesized(), Expression::TypeOf(_)) {
+        block_context.flags.set_receives_member(true);
+    }
     analyze_member_object(context, block_context, artifacts, object_expression, is_null_safe)?;
 
     let selectors = resolve_member_selector(context, block_context, artifacts, property_selector, true)?;
@@ -2345,14 +2349,8 @@ where
 
     let method = context.codebase.get_declaring_method_identifier(&MethodIdentifier::new(class_id, method_name));
     let class_name = method.get_class_name();
-    if !check_method_visibility(
-        context,
-        block_context.scope.get_class_like_name(),
-        class_name,
-        method.get_method_name(),
-        access_span,
-        None,
-    ) {
+    if !check_method_visibility(context, &block_context.scope, class_name, method.get_method_name(), access_span, None)
+    {
         return Some(get_never());
     }
 
