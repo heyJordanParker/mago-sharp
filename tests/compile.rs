@@ -3276,7 +3276,7 @@ fn listener_table(root: &Path, inputs: &[&str], rows: &str, dispatcher: &str) ->
     let inputs: String = inputs.iter().map(|path| input_row(root, path)).collect();
 
     format!(
-        "<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n    'dispatcher' => {dispatcher},\n    'attributes' => [\n    ],\n    'effects' => [\n    ],\n    'tags' => [\n    ],\n    'modules' => [\n    ],\n];\n"
+        "<?php\n\nreturn [\n    'inputs' => [\n{inputs}    ],\n    'listeners' => [\n{rows}    ],\n    'dispatcher' => {dispatcher},\n    'packages' => [\n    ],\n    'attributes' => [\n    ],\n    'effects' => [\n    ],\n    'tags' => [\n    ],\n    'modules' => [\n    ],\n];\n"
     )
 }
 
@@ -3407,18 +3407,18 @@ fn compile_names_the_app_module_that_binds_the_dispatcher() {
     let root = directory.path();
 
     compile_succeeds(root);
-    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => 'app\\\\shop',\n    'attributes' => [\n"));
+    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => 'app\\\\shop',\n"));
 
     write(root, "app/Module.sharp", &dispatcher_module("App"));
     let output = compile(root);
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(printed(&output).contains("Only `app/Module.sharp` binds `Dispatcher`"), "{}", printed(&output));
-    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => 'app',\n    'attributes' => [\n"));
+    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => 'app',\n"));
 
     std::fs::remove_file(root.join("app/Shop/Module.sharp")).unwrap();
     std::fs::remove_file(root.join("app/Module.sharp")).unwrap();
     compile_succeeds(root);
-    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => null,\n    'attributes' => [\n"));
+    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => null,\n"));
 }
 
 /// Spec section 32: a class's services come from the modules of its namespace and of each namespace above it, wherever
@@ -3561,6 +3561,30 @@ fn compile_lists_the_effects_each_extern_line_declares_for_a_class_and_a_method(
         read(root, ".sharp/listeners.php").ends_with(
             "    'effects' => [\n        'lib\\\\mailer' => [],\n        'lib\\\\mailer::count' => null,\n        'lib\\\\mailer::send' => ['App.Mail.Smtp'],\n    ],\n    'tags' => [\n    ],\n    'modules' => [\n    ],\n];\n"
         ),
+        "{}",
+        read(root, ".sharp/listeners.php")
+    );
+}
+
+/// Spec section 29: the listener table lists the folder Composer installs each of the project's packages in, those
+/// `composer.lock` lists, dev-only or not, under its `config.vendor-dir`, in which the engine finds a plain PHP
+/// method's own package.
+#[test]
+fn compile_lists_the_install_folder_of_each_package_under_the_vendor_dir() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "composer.json", "{\"type\": \"library\", \"config\": {\"vendor-dir\": \"libs\"}}\n");
+    write(
+        root,
+        "composer.lock",
+        "{\"packages\": [{\"name\": \"acme/money\"}], \"packages-dev\": [{\"name\": \"phpunit/phpunit\"}]}\n",
+    );
+
+    compile_succeeds(root);
+
+    assert!(
+        read(root, ".sharp/listeners.php")
+            .contains("    'dispatcher' => null,\n    'packages' => [\n        'libs/acme/money/',\n        'libs/phpunit/phpunit/',\n    ],\n    'attributes' => [\n"),
         "{}",
         read(root, ".sharp/listeners.php")
     );

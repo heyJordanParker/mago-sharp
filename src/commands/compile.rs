@@ -57,6 +57,8 @@ use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
 use mago_database::loader::Listing;
+use mago_database::loader::Manifests;
+use mago_database::loader::nearest_manifest;
 use mago_database::loader::read_listed;
 use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::Autoloader;
@@ -876,7 +878,8 @@ fn write_hosts(
         let table = folder.join(LISTENERS);
         let dispatcher = server.dispatcher_namespace();
         let modules = server.modules();
-        let bytes = listener_table(inputs, &accepted, dispatcher, &externs, &effects, &families, &modules);
+        let packages = package_folders(root);
+        let bytes = listener_table(inputs, &accepted, dispatcher, &packages, &externs, &effects, &families, &modules);
         keep(&table, unit::source_hash(&bytes), write_if_changed(&table, &bytes)?);
         written.insert(table);
     }
@@ -1612,7 +1615,8 @@ fn compiled(
         let table = compiled_folder.join(LISTENERS);
         let dispatcher = server.dispatcher_namespace();
         let modules = server.modules();
-        let bytes = listener_table(&inputs, &accepted, dispatcher, &externs, &effects, &families, &modules);
+        let packages = package_folders(&root);
+        let bytes = listener_table(&inputs, &accepted, dispatcher, &packages, &externs, &effects, &families, &modules);
         write_if_changed(&table, &bytes)?;
         if let Some(record) = record.as_mut() {
             record.output(&table, unit::source_hash(&bytes));
@@ -2448,7 +2452,9 @@ fn listener_inputs(
 /// order the engine runs them, of its class, its method, the events its `on` clause lists, and whether it takes the
 /// event. A full name holds no `'` and never ends in `\`, so each one is a single-quoted string as written. Its
 /// `dispatcher` is the namespace, in lowercase, of the app's modules whose binding of the dispatcher serves the whole
-/// app, or `null`. Its `attributes` are, for each plain PHP class, method and function an `extern` line gives attributes,
+/// app, or `null`. Its `packages` are the folders Composer installs the project's packages in, as
+/// [`package_folders`] gives them, in which the engine finds a plain PHP method's own package, spec section 29. Its
+/// `attributes` are, for each plain PHP class, method and function an `extern` line gives attributes,
 /// the files whose lines do, which the engine compiles when reflection reads its attributes, spec section 29. A class
 /// is keyed by its full name, a method as `class::method`, and a function as `function()`, each in lowercase. Its
 /// `effects` are, keyed the same way, the effects the first `extern` line of each plain PHP class and method declares,
@@ -2459,10 +2465,12 @@ fn listener_inputs(
 /// namespace in lowercase, and those of its environment modules, under the namespace, a space and the environment's
 /// name, which the engine reads for a class of the namespace or of a namespace below it wherever the class's file is,
 /// spec section 32.
+#[allow(clippy::too_many_arguments)]
 fn listener_table(
     inputs: &[unit::Input],
     listeners: &[&Listener],
     dispatcher: Option<Word>,
+    packages: &[String],
     externs: &[&ExternAttributes],
     effects: &[ExternEffects],
     families: &[&Family],
@@ -2497,6 +2505,13 @@ fn listener_table(
         }
         None => table.extend_from_slice(b"null,\n"),
     }
+    table.extend_from_slice(b"    'packages' => [\n");
+    for folder in packages {
+        table.extend_from_slice(b"        ");
+        quoted(&mut table, folder.as_bytes());
+        table.extend_from_slice(b",\n");
+    }
+    table.extend_from_slice(b"    ],\n");
     // `externs` holds each declaration's lines together.
     let mut declarations: Vec<(Word, Vec<Word>)> = Vec::new();
     for line in externs {
@@ -2580,6 +2595,14 @@ fn listener_table(
     table.extend_from_slice(b"    ],\n];\n");
 
     table
+}
+
+/// The folder Composer installs each package of the project at `root` in, as its nearest `composer.json` and
+/// `composer.lock` list them under its `config.vendor-dir`, from `root` and ending in `/`, as `vendor/acme/format/`.
+fn package_folders(root: &Path) -> Vec<String> {
+    nearest_manifest(root, &mut Manifests::default()).map_or_else(Vec::new, |manifest| {
+        manifest.package_folders().map(|folder| format!("{}/", source_name(root, &folder))).collect()
+    })
 }
 
 /// The PHP source of `autoload.php`, spec section 27, which requires the Composer autoloader of the vendor folder of

@@ -665,11 +665,26 @@ pub struct Manifest {
     is_project: bool,
     /// Its PSR-4 folders, `autoload`'s and `autoload-dev`'s.
     folders: Vec<Psr4Folder>,
-    /// Its dev-only packages, each by name and the folder Composer installs it in, from `directory`.
-    dev_packages: Vec<(String, PathBuf)>,
+    /// The packages its project installs.
+    packages: Vec<InstalledPackage>,
+}
+
+/// A package a project installs: its name, as `acme/format`, the folder Composer installs it in, from the folder of
+/// the project's `composer.json`, under its `config.vendor-dir`, and whether it is dev-only, one a production install
+/// leaves out.
+#[derive(Debug)]
+struct InstalledPackage {
+    name: String,
+    folder: PathBuf,
+    is_dev: bool,
 }
 
 impl Manifest {
+    /// The folder Composer installs each package of its project in, as `/app/vendor/acme/format`.
+    pub fn package_folders(&self) -> impl Iterator<Item = PathBuf> {
+        self.packages.iter().map(|package| self.directory.join(&package.folder))
+    }
+
     /// The package it names, as `acme/format`.
     #[must_use]
     pub fn name(&self) -> Option<&str> {
@@ -748,11 +763,12 @@ pub(crate) fn mark_package(file: &mut File, workspace: &Path, manifests: &mut Ma
         return;
     };
     file.dev_packages = manifest
-        .dev_packages
+        .packages
         .iter()
-        .map(|(name, folder)| DevPackage {
-            name: name.as_str().into(),
-            folder: folder_name(&package_root.join(folder)),
+        .filter(|package| package.is_dev)
+        .map(|package| DevPackage {
+            name: package.name.as_str().into(),
+            folder: folder_name(&package_root.join(&package.folder)),
         })
         .collect();
 }
@@ -842,41 +858,45 @@ fn read_manifest(directory: &Path, package: &serde_json::Value) -> Manifest {
         is_standard_library,
         is_project: !is_standard_library && package.get("type").and_then(serde_json::Value::as_str) != Some("library"),
         folders,
-        dev_packages: dev_package_names(directory, package)
+        packages: installed_packages(directory, package)
             .into_iter()
-            .map(|name| {
-                let folder = vendor.join(&name);
-
-                (name, folder)
-            })
+            .map(|(name, is_dev)| InstalledPackage { folder: vendor.join(&name), name, is_dev })
             .collect(),
     }
 }
 
-/// The names of the dev-only packages of the `composer.json` `package` in `directory`: those its `composer.lock` lists
-/// under `packages-dev`, a package another dev-only package requires among them, or, with no `composer.lock` it can
-/// read, the packages it lists under `require-dev`, PHP and its extensions left out.
-fn dev_package_names(directory: &Path, package: &serde_json::Value) -> Vec<String> {
+/// The name of each package the `composer.json` `package` in `directory` installs, and whether it is dev-only: those its
+/// `composer.lock` lists under `packages`, and under `packages-dev` the dev-only ones, a package another dev-only
+/// package requires among them, or, with no `composer.lock` it can read, those it lists under `require` and
+/// `require-dev`, PHP and its extensions left out.
+fn installed_packages(directory: &Path, package: &serde_json::Value) -> Vec<(String, bool)> {
     let lock = std::fs::read(directory.join("composer.lock"))
         .ok()
         .and_then(|contents| serde_json::from_slice::<serde_json::Value>(&contents).ok());
     if let Some(lock) = lock {
-        return lock
-            .get("packages-dev")
-            .and_then(serde_json::Value::as_array)
+        return [("packages", false), ("packages-dev", true)]
             .into_iter()
-            .flatten()
-            .filter_map(|locked| locked.get("name").and_then(serde_json::Value::as_str).map(str::to_owned))
+            .flat_map(|(section, is_dev)| {
+                lock.get(section)
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(move |locked| Some((locked.get("name")?.as_str()?.to_owned(), is_dev)))
+            })
             .collect();
     }
 
-    package
-        .get("require-dev")
-        .and_then(serde_json::Value::as_object)
+    [("require", false), ("require-dev", true)]
         .into_iter()
-        .flat_map(serde_json::Map::keys)
-        .filter(|name| name.contains('/'))
-        .cloned()
+        .flat_map(|(section, is_dev)| {
+            package
+                .get(section)
+                .and_then(serde_json::Value::as_object)
+                .into_iter()
+                .flat_map(serde_json::Map::keys)
+                .filter(|name| name.contains('/'))
+                .map(move |name| (name.clone(), is_dev))
+        })
         .collect()
 }
 
@@ -1700,6 +1720,26 @@ mod tests {
                     vec![package("mockery/mockery", "unlocked/libs/mockery/mockery/")]
                 ),
             ]
+        );
+    }
+
+    /// A manifest lists the folder Composer installs each package of its project in, dev-only or not, under the
+    /// project's `config.vendor-dir`.
+    #[test]
+    fn a_manifest_lists_the_install_folder_of_each_package_under_its_vendor_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "composer.json", r#"{"config": {"vendor-dir": "libs"}}"#);
+        create_test_file(
+            &temp_dir,
+            "composer.lock",
+            r#"{"packages": [{"name": "acme/report"}], "packages-dev": [{"name": "phpunit/phpunit"}]}"#,
+        );
+
+        let manifest = nearest_manifest(temp_dir.path(), &mut Manifests::default()).unwrap();
+
+        assert_eq!(
+            manifest.package_folders().collect::<Vec<_>>(),
+            [temp_dir.path().join("libs/acme/report"), temp_dir.path().join("libs/phpunit/phpunit")]
         );
     }
 
