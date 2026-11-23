@@ -340,7 +340,9 @@ where
 /// `PaymentResult.Paid(…)` calls. A plain case is one object: its class has a private constructor and a static
 /// `instance()` that gives the object, and the enum has a constant of the case's name typed as the case, which
 /// `CheckoutState.Open` reads. The enum permits only its cases as subclasses, so a `match` that handles each is
-/// covered. A case whose class another file declares registers nothing, and the analyzer reports the clash.
+/// covered. A machine's case's block holds members of its class, spec section 20.2: the walker registers its methods,
+/// and the case's class scans the rest as a class scans its own. A case whose class another file declares registers
+/// nothing, and the analyzer reports the clash.
 fn register_case_classes<'arena, A>(
     codebase: &mut CodebaseMetadata,
     r#enum: &'arena Enum<'arena>,
@@ -461,6 +463,7 @@ fn register_case_classes<'arena, A>(
         if let Some(factory) = factory {
             add_method(codebase, case_name.value, enum_metadata, factory);
         }
+        scan_members(&mut case_metadata, case.members(), &case_templates, context, scope);
 
         codebase.class_likes.insert(name, case_metadata.into());
     }
@@ -1829,26 +1832,7 @@ where
         class_like_metadata.add_template_extended_offset(parent_name, arguments);
     }
 
-    for member in members {
-        let ClassLikeMember::Constant(constant) = member else {
-            continue;
-        };
-
-        for constant_metadata in scan_class_like_constants(
-            &mut class_like_metadata,
-            constant,
-            Some(original_name),
-            &type_context,
-            context,
-            scope,
-        ) {
-            if class_like_metadata.constants.contains_key(&constant_metadata.name) {
-                continue;
-            }
-
-            class_like_metadata.constants.insert(constant_metadata.name, constant_metadata);
-        }
-    }
+    scan_members(&mut class_like_metadata, members.as_slice(), &type_context, context, scope);
 
     // An enum with a case that carries data registers as a class, and `register_enum` registers each case as a class.
     for member in members.iter().filter(|_| class_like_metadata.kind.is_enum()) {
@@ -1862,15 +1846,6 @@ where
         }
 
         class_like_metadata.enum_cases.insert(case_metadata.name, case_metadata);
-    }
-
-    for member in members {
-        let ClassLikeMember::Law(law) = member else {
-            continue;
-        };
-
-        let law_metadata = scan_law(law, &class_like_metadata, context, scope, &type_context);
-        class_like_metadata.laws.entry(law_metadata.name).or_insert(law_metadata);
     }
 
     if class_like_metadata.kind.is_enum()
@@ -1928,6 +1903,51 @@ where
 
             class_like_metadata.add_property_metadata(property_metadata);
         }
+    }
+
+    if class_like_metadata.attributes.iter().any(|attr| attr.name.as_bytes().eq_ignore_ascii_case(b"Deprecated")) {
+        class_like_metadata.flags |= MetadataFlags::DEPRECATED;
+    }
+
+    Some(class_like_metadata)
+}
+
+/// Scans the members of a class-like's body that neither the walker nor the enum's scan registers: its constants, its
+/// laws, the traits it uses and its properties. A machine's case holds members of the machine's kinds in its block, spec
+/// section 20.2, which `register_case_classes` scans into the class the case runs as.
+fn scan_members<'arena, A>(
+    class_like_metadata: &mut ClassLikeMetadata,
+    members: &'arena [ClassLikeMember<'arena>],
+    type_context: &TypeResolutionContext,
+    context: &Context<'_, 'arena, A>,
+    scope: &NamespaceScope,
+) where
+    A: Arena,
+{
+    let (name, original_name) = (class_like_metadata.name, class_like_metadata.original_name);
+    for member in members {
+        let ClassLikeMember::Constant(constant) = member else {
+            continue;
+        };
+
+        for constant_metadata in
+            scan_class_like_constants(class_like_metadata, constant, Some(original_name), type_context, context, scope)
+        {
+            if class_like_metadata.constants.contains_key(&constant_metadata.name) {
+                continue;
+            }
+
+            class_like_metadata.constants.insert(constant_metadata.name, constant_metadata);
+        }
+    }
+
+    for member in members {
+        let ClassLikeMember::Law(law) = member else {
+            continue;
+        };
+
+        let law_metadata = scan_law(law, class_like_metadata, context, scope, type_context);
+        class_like_metadata.laws.entry(law_metadata.name).or_insert(law_metadata);
     }
 
     for member in members {
@@ -2021,7 +2041,7 @@ where
                     let template_use_type = match builder::get_union_from_type(
                         template_use.r#type,
                         scope,
-                        &type_context,
+                        type_context,
                         Some(original_name),
                     ) {
                         Ok(template_use_type) => template_use_type,
@@ -2150,14 +2170,13 @@ where
                 }
             }
             ClassLikeMember::Property(property) => {
-                let properties =
-                    scan_properties(property, &mut class_like_metadata, name, &type_context, context, scope);
+                let properties = scan_properties(property, class_like_metadata, name, type_context, context, scope);
                 let is_extern = property.modifiers().iter().any(|modifier| matches!(modifier, Modifier::Extern(_)));
                 let writes = matches!(property, Property::Hooked(hooked) if hooked.hook_list.setter().is_some());
 
                 for property_metadata in properties {
                     if is_extern {
-                        add_extern_property(&mut class_like_metadata, property_metadata, writes);
+                        add_extern_property(class_like_metadata, property_metadata, writes);
                     } else {
                         class_like_metadata.add_property_metadata(property_metadata);
                     }
@@ -2166,12 +2185,6 @@ where
             _ => {}
         }
     }
-
-    if class_like_metadata.attributes.iter().any(|attr| attr.name.as_bytes().eq_ignore_ascii_case(b"Deprecated")) {
-        class_like_metadata.flags |= MetadataFlags::DEPRECATED;
-    }
-
-    Some(class_like_metadata)
 }
 
 /// Adds `function_like_metadata`, a method no source declares, to `class_like_metadata` under `name`.

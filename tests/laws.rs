@@ -4570,3 +4570,32 @@ fn a_law_reaching_an_extension_member_lean_cannot_see_is_refused() {
         "Law summed reaches a loop in ShapeMath.sum. Write the method as recursion that calls itself on a smaller value.",
     );
 }
+
+/// `app/Readiness.sharp`, a machine whose final case's block holds a computed property over the case's data.
+const READINESS: &str = "namespace App;\n\npublic machine Readiness\n{\n    case Active\n    {\n        public Readiness.Inactive stop(string reason) => Readiness.Inactive(reason);\n    }\n\n    final case Inactive(string reason)\n    {\n        public string failureMessage => this.reason;\n    }\n\n    public static Readiness.Active open() => Readiness.Active;\n}\n";
+
+/// Spec section 20.2: a computed property in a case's block is a member of that case's class, so the machine compiles.
+#[test]
+fn a_computed_property_in_a_machine_case_s_block_compiles() {
+    let directory = library_project(&[("app/Readiness.sharp", READINESS)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Readiness.sharp").exists());
+}
+
+/// Spec section 20.2: a law reads a computed property of a case's block on a value of the case.
+#[test]
+fn compile_proves_a_law_over_a_computed_property_in_a_machine_case_s_block() {
+    let law = "    law readsItsReason(string reason) => Readiness.open().stop(reason).failureMessage == reason;\n}\n";
+    let machine = format!("{}\n{law}", READINESS.strip_suffix("}\n").unwrap_or(READINESS));
+    let directory = library_project(&[("app/Readiness.sharp", &machine)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Readiness.sharp").exists());
+}

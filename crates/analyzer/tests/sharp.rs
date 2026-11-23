@@ -37454,6 +37454,23 @@ fn a_move_is_called_on_the_case_it_moves_from() {
     );
 }
 
+/// Spec section 20.2: a property of a case's block is a member of that case's class alone, as a move of it is, so a
+/// read through the machine's type is refused with the test to write.
+#[test]
+fn a_case_s_property_is_read_on_a_value_of_its_case() {
+    let readiness = (
+        "src/App/Readiness.sharp",
+        "namespace App;\n\npublic machine Readiness\n{\n    case Active\n    {\n        public Readiness.Inactive stop(string reason) => Readiness.Inactive(reason);\n    }\n\n    final case Inactive(string reason)\n    {\n        public string failureMessage => this.reason;\n    }\n\n    public static Readiness.Active open() => Readiness.Active;\n\n    public static string reads()\n    {\n        Readiness r = Readiness.open();\n        return r.failureMessage;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        refusals(readiness, &[]),
+        [
+            "20:18 invalid-machine `failureMessage` belongs to `Readiness.Inactive`, and `r` may be `Active`: test it first, as in `if (r is Readiness.Inactive inactive)`. | Read `failureMessage` on the name the test binds, as `inactive.failureMessage`.",
+        ]
+    );
+}
+
 /// Spec section 20.2: a `late` machine property takes its first value from an entry point in any method of its class,
 /// and every later write is a move. A property that isn't `late` takes an entry point only in its constructor.
 #[test]

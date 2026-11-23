@@ -254,15 +254,24 @@ where
         && context.pattern_tests.get(&test).is_some_and(|tested| quoted_source(context, *tested) == place)
 }
 
-/// Spec section 20.2: a move belongs to the case it moves from. A move of a case's block is a member of that case's
-/// class alone, and one of the machine's body of every case that isn't `final`, so a call of `name` at `span` on
-/// `object`, whose type `receiver` is the machine or a union of its cases, is refused when a case the value may be
-/// lacks the move, with the test that narrows it to a case that has it. Returns whether it refused the call.
-pub(crate) fn check_move_call<A>(
+/// A member a call or a read names on a value of a machine, spec section 20.2.
+#[derive(Clone, Copy)]
+pub(crate) enum CaseMember {
+    /// A move, which belongs to the cases it moves from.
+    Move(Word),
+    /// A property, which belongs to the class of each case that has it.
+    Property(Word),
+}
+
+/// Spec section 20.2: a member of a case's block belongs to that case's class alone, and a move of the machine's body
+/// to every case that isn't `final`, so `member` at `span` on `object`, whose type `receiver` is the machine or a union
+/// of its cases, is refused when a case the value may be lacks it, with the test that narrows it to a case that has
+/// it. Returns whether it refused the member.
+pub(crate) fn check_case_member<A>(
     context: &mut Context<'_, '_, A>,
     object: &Expression<'_>,
     receiver: &TUnion,
-    name: Word,
+    member: CaseMember,
     span: Span,
 ) -> bool
 where
@@ -304,13 +313,20 @@ where
     let Some(graph) = &machine.machine else {
         return false;
     };
-    let moves: Vec<&MachineMove> = graph.moves.iter().filter(|r#move| r#move.name == name).collect();
-    if moves.is_empty() {
-        return false;
-    }
-
     let cases = graph.cases.iter().map(|case| case.name);
-    let from: Vec<Word> = cases.clone().filter(|case| moves.iter().any(|r#move| r#move.from.contains(case))).collect();
+    let from: Vec<Word> = match member {
+        CaseMember::Move(name) => {
+            let moves: Vec<&MachineMove> = graph.moves.iter().filter(|r#move| r#move.name == name).collect();
+
+            cases.clone().filter(|case| moves.iter().any(|r#move| r#move.from.contains(case))).collect()
+        }
+        CaseMember::Property(name) => {
+            let property = php_variable_name(name.as_bytes());
+            let class = |case: &Word| word([machine.original_name.as_bytes(), b"\\", case.as_bytes()].concat());
+
+            cases.clone().filter(|case| context.codebase.property_exists(class(case), property)).collect()
+        }
+    };
     let lacking: Vec<Word> = cases.filter(|case| held.contains(case) && !from.contains(case)).collect();
     let Some(first) = from.first() else {
         return false;
@@ -324,16 +340,25 @@ where
     let bound = bound_name(first.as_bytes());
     let from = listed(from.iter().map(|case| format!("`{machine_name}.{}`", BytesDisplay(case.as_bytes()))).collect());
     let lacking = listed(lacking.iter().map(|case| format!("`{}`", BytesDisplay(case.as_bytes()))).collect());
-    let name = BytesDisplay(name.as_bytes());
-    report(
-        context,
-        span,
-        format!(
-            "`{name}` moves from {from}, and `{receiver}` may be {lacking}: test it first, as in `if ({receiver} is {machine_name}.{} {bound})`.",
-            BytesDisplay(first.as_bytes())
-        ),
-        format!("Call `{name}` on the name the test binds, as `{bound}.{name}(…)`."),
-    );
+    let first = BytesDisplay(first.as_bytes());
+    let test = format!("test it first, as in `if ({receiver} is {machine_name}.{first} {bound})`");
+    let (message, fix) = match member {
+        CaseMember::Move(name) => {
+            let name = BytesDisplay(name.as_bytes());
+            (
+                format!("`{name}` moves from {from}, and `{receiver}` may be {lacking}: {test}."),
+                format!("Call `{name}` on the name the test binds, as `{bound}.{name}(…)`."),
+            )
+        }
+        CaseMember::Property(name) => {
+            let name = BytesDisplay(name.as_bytes());
+            (
+                format!("`{name}` belongs to {from}, and `{receiver}` may be {lacking}: {test}."),
+                format!("Read `{name}` on the name the test binds, as `{bound}.{name}`."),
+            )
+        }
+    };
+    report(context, span, message, fix);
 
     true
 }

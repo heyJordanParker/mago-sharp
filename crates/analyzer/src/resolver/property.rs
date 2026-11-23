@@ -88,6 +88,8 @@ use crate::resolver::method::get_receiver_atomics;
 use crate::resolver::method::object_member_issue;
 use crate::resolver::method::run_forwarded_methods;
 use crate::resolver::selector::resolve_member_selector;
+use crate::statement::class_like::machine::CaseMember;
+use crate::statement::class_like::machine::check_case_member;
 use crate::statement::function_like::closure_parameter_types;
 use crate::statement::function_like::get_this_type;
 use crate::statement::function_like::known_type_or_error;
@@ -203,6 +205,21 @@ where
     } else {
         (*object_type).clone()
     };
+    // Spec section 20.2: a property of a case's block is read on a value of that case.
+    if context.dialect.is_sharp()
+        && let ClassLikeMemberSelector::Identifier(name) = property_selector
+        && check_case_member(
+            context,
+            object_expression,
+            &object_type,
+            CaseMember::Property(word(name.value)),
+            property_selector.span(),
+        )
+    {
+        result.has_error_path = true;
+
+        return Ok(result);
+    }
     // Spec section 26: an extension member is read on the parts of the receiver that declare no member of its name,
     // alone when no part declares one, and beside each other part's own member otherwise, as `caption` on an
     // `Order|string` reads `Order`'s property on an `Order` and the extension's on a `string`.
