@@ -364,6 +364,7 @@ final class AnalyzerCodeModuleGenerator
         'unlisted-import',
         'import-cycle',
         'production-uses-test-code',
+        'production-uses-dev-package',
         'duplicate-extern',
         'extern-on-sharp',
         'getter-writes-this',

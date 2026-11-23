@@ -812,7 +812,9 @@ fn namespace_types(codebase: &CodebaseMetadata, uses_on: &HashMap<(Word, Word), 
 /// method and each that declares `main`, which runs as a program, plain PHP calls an `[Export]` method by the name of
 /// its global function, and the code that reads a marked attribute of a class or of one of its members reaches the
 /// class through reflection, which no use records, so none of them is refused. A class in one of `test_files`, the files of an
-/// `autoload-dev` folder, runs under its test runner, as PHPUnit creates a test class, so it is never refused either.
+/// `autoload-dev` folder, runs under its test runner, as PHPUnit creates a test class, so it is never refused either,
+/// nor is a class that extends or implements a class-like of a dev-only package, which `production-uses-dev-package`
+/// already refuses with where tests go.
 #[must_use]
 pub fn unused_classes(
     codebase: &CodebaseMetadata,
@@ -843,6 +845,11 @@ pub fn unused_classes(
             || class.flags.is_module()
             || class.flags.is_enum_case_class()
             || test_files.contains(&class.span.file_id)
+            || class.direct_parent_class.iter().chain(&class.direct_parent_interfaces).any(|parent| {
+                codebase
+                    .get_class_like(*parent)
+                    .is_some_and(|parent| codebase.dev_package(class.span.file_id, parent.span.file_id).is_some())
+            })
             || used.contains(class_name)
             || is_dynamically_accessed(codebase, &class.attributes)
             || is_reached_by_its_members(codebase, *class_name, class)

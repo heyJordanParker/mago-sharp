@@ -5,6 +5,7 @@ use std::collections::hash_map::Entry;
 use foldhash::HashMap;
 use foldhash::HashSet;
 
+use mago_database::file::DevPackage;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
@@ -194,6 +195,10 @@ pub struct CodebaseMetadata {
     /// class one declares, spec sections 23 and 32.
     #[cfg_attr(feature = "serde", serde(default))]
     test_files: HashSet<FileId>,
+    /// The dev-only packages each production PHP# file can't use, since a production install leaves them out, by the
+    /// file, spec section 5.
+    #[cfg_attr(feature = "serde", serde(default))]
+    dev_packages: HashMap<FileId, Vec<DevPackage>>,
     /// Each user-defined class-like population filled, as its scan gave it, by its key. Population fills such a
     /// class-like again from it, as a full analysis does, so nothing an earlier fill derived stays.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -942,8 +947,11 @@ impl CodebaseMetadata {
     }
 
     /// Records the name of the scanned file `file`, when it is a host or a vendored file, whether the standard library
-    /// holds it, and whether it is a test file.
+    /// holds it, whether it is a test file, and the dev-only packages it can't use.
     pub(crate) fn add_file(&mut self, file: &File) {
+        if !file.dev_packages.is_empty() {
+            self.dev_packages.insert(file.id, file.dev_packages.to_vec());
+        }
         if matches!(file.file_type, FileType::Host | FileType::Vendored) {
             self.file_names.insert(file.id, word(&file.name));
         }
@@ -984,6 +992,16 @@ impl CodebaseMetadata {
     #[must_use]
     pub fn is_test_file(&self, file_id: FileId) -> bool {
         self.test_files.contains(&file_id)
+    }
+
+    /// The name of the dev-only package that installs the file `declared_in`, when the production PHP# file `user`
+    /// can't use what it declares, since a production install leaves the package out, spec section 5.
+    #[must_use]
+    pub fn dev_package(&self, user: FileId, declared_in: FileId) -> Option<&str> {
+        let packages = self.dev_packages.get(&user)?;
+        let name = self.file_name(declared_in)?;
+
+        packages.iter().find(|package| name.as_bytes().starts_with(&package.folder)).map(|package| &*package.name)
     }
 
     /// The folder whose classes, functions and constants of PHP's root namespace `declaration` gives its namespace, spec
@@ -1957,6 +1975,7 @@ impl CodebaseMetadata {
         self.file_signatures.extend(other.file_signatures);
         self.standard_library_files.extend(other.standard_library_files);
         self.test_files.extend(other.test_files);
+        self.dev_packages.extend(other.dev_packages);
         self.safe_symbols.extend(other.safe_symbols);
         self.safe_symbol_members.extend(other.safe_symbol_members);
         self.infer_types_from_usage |= other.infer_types_from_usage;
@@ -2064,6 +2083,7 @@ impl CodebaseMetadata {
         }
         self.standard_library_files.extend(other.standard_library_files.iter().copied());
         self.test_files.extend(other.test_files.iter().copied());
+        self.dev_packages.extend(other.dev_packages.iter().map(|(file, packages)| (*file, packages.clone())));
         self.safe_symbols.extend(other.safe_symbols.iter().copied());
         self.safe_symbol_members.extend(other.safe_symbol_members.iter().copied());
         self.infer_types_from_usage |= other.infer_types_from_usage;
@@ -2417,6 +2437,7 @@ impl CodebaseMetadata {
             self.file_names.remove(k);
             self.standard_library_files.remove(k);
             self.test_files.remove(k);
+            self.dev_packages.remove(k);
         }
 
         // Drop any patch entry that originated from a file signature we just removed; a patch

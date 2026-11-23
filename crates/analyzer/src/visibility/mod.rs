@@ -14,8 +14,17 @@ use mago_php_version::PHPVersion;
 use mago_php_version::feature::Feature;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
+use mago_span::HasSpan;
 use mago_span::Position;
 use mago_span::Span;
+use mago_syntax::cst::Class;
+use mago_syntax::cst::Enum;
+use mago_syntax::cst::Inheritance;
+use mago_syntax::cst::Interface;
+use mago_syntax::cst::LocalIdentifier;
+use mago_syntax::cst::Program;
+use mago_syntax::cst::Use;
+use mago_syntax::walker::Walker;
 
 use crate::code::IssueCode;
 use crate::context::Context;
@@ -238,6 +247,98 @@ where
                 )
                 .with_help(format!("Declare `{class_name}` in production code, or use it only in a test.")),
         );
+    }
+}
+
+/// Refuses, at the name, each name of the analyzed PHP# file that names a class-like of a dev-only package, when the
+/// file is production code, spec section 5: a production install leaves the package out, so the class-like is missing
+/// where the code runs. A name of a class-like's `:` header says which class-like extends or implements it, and the
+/// name of an import line is left to the names that use it.
+pub(crate) fn check_dev_package_classes<A>(context: &mut Context<'_, '_, A>, program: &Program<'_>)
+where
+    A: Arena,
+{
+    let file = context.source_file.id;
+    let mut names: Vec<(u32, u32, &str, &ClassLikeMetadata)> = context
+        .resolved_names
+        .iter()
+        .filter_map(|(start, end, name, _)| {
+            let class = context.codebase.get_class_like(word(name))?;
+
+            Some((start, end, context.codebase.dev_package(file, class.span.file_id)?, class))
+        })
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+
+    names.sort_unstable_by_key(|(start, ..)| *start);
+    let mut written = WrittenNames::default();
+    HeaderNames.walk_program(program, &mut written);
+    for (start, end, package, class) in names {
+        if written.imports.iter().any(|import| import.start.offset <= start && end <= import.end.offset) {
+            continue;
+        }
+
+        let class_name = display_class_like_name(context, class.original_name);
+        let use_of = match written.headers.iter().find(|(at, ..)| *at == start) {
+            Some((_, declared, is_interface)) => {
+                let verb = if class.kind.is_interface() && !is_interface { "implements" } else { "extends" };
+
+                format!("`{}` {verb} `{class_name}`", BytesDisplay(declared))
+            }
+            None => format!("Production code uses `{class_name}`"),
+        };
+        context.collector.report_with_code(
+            IssueCode::ProductionUsesDevPackage,
+            Issue::error(format!(
+                "{use_of}, from {package}, a dev-only package that a production install leaves out. Tests go in a folder composer.json lists under autoload-dev, such as tests/."
+            ))
+            .with_annotation(
+                Annotation::primary(Span::new(file, Position::new(start), Position::new(end))).with_message("Used here."),
+            ),
+        );
+    }
+}
+
+/// The spans of a program's import lines, and the start of each name of a class-like's `:` header with the name of the
+/// class-like it declares and whether that is an interface.
+#[derive(Default)]
+struct WrittenNames<'arena> {
+    imports: Vec<Span>,
+    headers: Vec<(u32, &'arena [u8], bool)>,
+}
+
+impl<'arena> WrittenNames<'arena> {
+    fn header(
+        &mut self,
+        declared: &LocalIdentifier<'arena>,
+        inheritance: Option<&Inheritance<'arena>>,
+        is_interface: bool,
+    ) {
+        for name in inheritance.into_iter().flat_map(Inheritance::names) {
+            self.headers.push((name.span().start.offset, declared.value, is_interface));
+        }
+    }
+}
+
+struct HeaderNames;
+
+impl<'ast, 'arena> Walker<'ast, 'arena, WrittenNames<'arena>> for HeaderNames {
+    fn walk_in_use(&self, r#use: &'ast Use<'arena>, written: &mut WrittenNames<'arena>) {
+        written.imports.push(r#use.span());
+    }
+
+    fn walk_in_class(&self, class: &'ast Class<'arena>, written: &mut WrittenNames<'arena>) {
+        written.header(&class.name, class.inheritance.as_ref(), false);
+    }
+
+    fn walk_in_interface(&self, interface: &'ast Interface<'arena>, written: &mut WrittenNames<'arena>) {
+        written.header(&interface.name, interface.inheritance.as_ref(), true);
+    }
+
+    fn walk_in_enum(&self, r#enum: &'ast Enum<'arena>, written: &mut WrittenNames<'arena>) {
+        written.header(&r#enum.name, r#enum.inheritance.as_ref(), false);
     }
 }
 

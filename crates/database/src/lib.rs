@@ -332,6 +332,7 @@ impl<'config> Database<'config> {
             file.is_standard_library = old.is_standard_library;
             file.folder_namespace.clone_from(&old.folder_namespace);
             file.is_project = old.is_project;
+            file.dev_packages = Arc::clone(&old.dev_packages);
             *arc = Arc::new(file);
         }
 

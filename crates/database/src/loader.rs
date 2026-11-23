@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::ffi::OsString;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use crate::DatabaseConfiguration;
 use crate::error::DatabaseError;
 use crate::error::IOAction;
 use crate::exclusion::Exclusion;
+use crate::file::DevPackage;
 use crate::file::File;
 use crate::file::FileId;
 use crate::file::FileType;
@@ -653,6 +655,8 @@ pub type Manifests = HashMap<PathBuf, Option<Arc<Manifest>>>;
 /// What a file's nearest `composer.json` says about it.
 #[derive(Debug, Default)]
 pub struct Manifest {
+    /// The folder that holds it.
+    directory: PathBuf,
     /// The package it names.
     name: Option<String>,
     /// Whether it names the standard library's package.
@@ -661,6 +665,8 @@ pub struct Manifest {
     is_project: bool,
     /// Its PSR-4 folders, `autoload`'s and `autoload-dev`'s.
     folders: Vec<Psr4Folder>,
+    /// Its dev-only packages, each by name and the folder Composer installs it in, from `directory`.
+    dev_packages: Vec<(String, PathBuf)>,
 }
 
 impl Manifest {
@@ -733,6 +739,36 @@ pub(crate) fn mark_package(file: &mut File, workspace: &Path, manifests: &mut Ma
 
             FolderNamespace::Namespace(parts.collect::<Vec<_>>().join(".").into_boxed_str())
         });
+    if file.file_type == FileType::Vendored || file.folder_namespace == Some(FolderNamespace::Test) {
+        return;
+    }
+
+    let depth = path.strip_prefix(&manifest.directory).map_or(0, |relative| relative.components().count());
+    let Some(package_root) = bytes_to_path(&file.name).ancestors().nth(depth).map(Path::to_path_buf) else {
+        return;
+    };
+    file.dev_packages = manifest
+        .dev_packages
+        .iter()
+        .map(|(name, folder)| DevPackage {
+            name: name.as_str().into(),
+            folder: folder_name(&package_root.join(folder)),
+        })
+        .collect();
+}
+
+/// The name of `folder`, a folder below the workspace, as a file's name starts with it: its parts, each followed by
+/// `/`, as `vendor/phpunit/phpunit/`.
+fn folder_name(folder: &Path) -> Box<[u8]> {
+    let mut name = Vec::new();
+    for part in folder.components() {
+        if let Component::Normal(part) = part {
+            name.extend_from_slice(part.as_encoded_bytes());
+            name.push(b'/');
+        }
+    }
+
+    name.into_boxed_slice()
 }
 
 /// The facts of the nearest `composer.json` at or above `directory`, each directory's looked up once in `manifests`.
@@ -797,13 +833,51 @@ fn read_manifest(directory: &Path, package: &serde_json::Value) -> Manifest {
 
     let name = package.get("name").and_then(serde_json::Value::as_str);
     let is_standard_library = name == Some(STANDARD_LIBRARY_PACKAGE);
+    let vendor =
+        Path::new(package.pointer("/config/vendor-dir").and_then(serde_json::Value::as_str).unwrap_or("vendor"));
 
     Manifest {
+        directory: directory.to_path_buf(),
         name: name.map(str::to_owned),
         is_standard_library,
         is_project: !is_standard_library && package.get("type").and_then(serde_json::Value::as_str) != Some("library"),
         folders,
+        dev_packages: dev_package_names(directory, package)
+            .into_iter()
+            .map(|name| {
+                let folder = vendor.join(&name);
+
+                (name, folder)
+            })
+            .collect(),
     }
+}
+
+/// The names of the dev-only packages of the `composer.json` `package` in `directory`: those its `composer.lock` lists
+/// under `packages-dev`, a package another dev-only package requires among them, or, with no `composer.lock` it can
+/// read, the packages it lists under `require-dev`, PHP and its extensions left out.
+fn dev_package_names(directory: &Path, package: &serde_json::Value) -> Vec<String> {
+    let lock = std::fs::read(directory.join("composer.lock"))
+        .ok()
+        .and_then(|contents| serde_json::from_slice::<serde_json::Value>(&contents).ok());
+    if let Some(lock) = lock {
+        return lock
+            .get("packages-dev")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|locked| locked.get("name").and_then(serde_json::Value::as_str).map(str::to_owned))
+            .collect();
+    }
+
+    package
+        .get("require-dev")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(serde_json::Map::keys)
+        .filter(|name| name.contains('/'))
+        .cloned()
+        .collect()
 }
 
 /// Picks the final [`FileType`] for a file that matched configured base paths in one or
@@ -1561,6 +1635,70 @@ mod tests {
                 ("lib/Other.sharp".to_owned(), None),
                 ("root/Plain/Tool.sharp".to_owned(), namespace("Plain")),
                 ("tests/Tenant/OrderTest.sharp".to_owned(), Some(FolderNamespace::Test)),
+            ]
+        );
+    }
+
+    /// Spec section 5: a production `.sharp` file can't use the dev-only packages, those `composer.lock` lists under
+    /// `packages-dev`, PHPUnit that Pest requires included, or, with no `composer.lock`, those `composer.json` lists
+    /// under `require-dev`, PHP and its extensions left out, each installed in the project's vendor folder. A test file
+    /// may use them all.
+    #[test]
+    fn a_production_sharp_file_takes_the_dev_only_packages_of_its_project() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(
+            &temp_dir,
+            "locked/composer.json",
+            r#"{"require-dev": {"pestphp/pest": "^3.0"}, "autoload-dev": {"psr-4": {"Tests\\": "tests/"}}}"#,
+        );
+        create_test_file(
+            &temp_dir,
+            "locked/composer.lock",
+            r#"{"packages": [{"name": "acme/report"}], "packages-dev": [{"name": "pestphp/pest"}, {"name": "phpunit/phpunit"}]}"#,
+        );
+        create_test_file(
+            &temp_dir,
+            "unlocked/composer.json",
+            r#"{"require-dev": {"php": "^8.4", "ext-json": "*", "mockery/mockery": "^1.6"}, "config": {"vendor-dir": "libs"}}"#,
+        );
+        for name in ["locked/app/Order.sharp", "locked/tests/OrderTest.sharp", "unlocked/src/Invoice.sharp"] {
+            create_test_file(&temp_dir, name, "");
+        }
+
+        let mut config = create_test_config(&temp_dir, vec!["locked", "unlocked"], vec![]);
+        config.extensions = vec![Cow::Borrowed(b"sharp")];
+        let db = DatabaseLoader::new(config).load().unwrap();
+
+        let mut packages: Vec<(String, Vec<(String, String)>)> = db
+            .files()
+            .map(|file| {
+                let packages = file
+                    .dev_packages
+                    .iter()
+                    .map(|package| (package.name.to_string(), name_str(&package.folder).into_owned()))
+                    .collect();
+
+                (name_str(&file.name).into_owned(), packages)
+            })
+            .collect();
+        packages.sort();
+        let package = |name: &str, folder: &str| (name.to_owned(), folder.to_owned());
+
+        assert_eq!(
+            packages,
+            [
+                (
+                    "locked/app/Order.sharp".to_owned(),
+                    vec![
+                        package("pestphp/pest", "locked/vendor/pestphp/pest/"),
+                        package("phpunit/phpunit", "locked/vendor/phpunit/phpunit/"),
+                    ]
+                ),
+                ("locked/tests/OrderTest.sharp".to_owned(), vec![]),
+                (
+                    "unlocked/src/Invoice.sharp".to_owned(),
+                    vec![package("mockery/mockery", "unlocked/libs/mockery/mockery/")]
+                ),
             ]
         );
     }

@@ -248,6 +248,7 @@ where
             effects::check::check_uses(&mut context, &block_context, &mut artifacts, program);
             readonly_types::check_readonly_types(&mut context, program);
             visibility::check_test_file_classes(&mut context);
+            visibility::check_dev_package_classes(&mut context, program);
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(start) = statements_start {

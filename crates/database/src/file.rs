@@ -4,6 +4,7 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -85,6 +86,12 @@ pub struct File {
     /// library's, and it is not installed in `vendor/`. The loader sets it, with `is_standard_library`.
     pub is_project: bool,
 
+    /// The dev-only packages a production `.sharp` file can't use, which a production install leaves out: those its
+    /// nearest `composer.lock` lists under `packages-dev`, or its `composer.json` under `require-dev` when no
+    /// `composer.lock` is beside it. Empty for a file of an `autoload-dev` folder. The loader sets it, with
+    /// `is_standard_library`.
+    pub dev_packages: Arc<[DevPackage]>,
+
     /// The contents of the file, if available.
     pub contents: Cow<'static, [u8]>,
 
@@ -112,6 +119,15 @@ pub enum FolderNamespace {
     Namespace(Box<str>),
     /// An `autoload-dev` folder holds the file, which may declare any namespace.
     Test,
+}
+
+/// A dev-only package of a project: its name, as `phpunit/phpunit`, and the folder Composer installs it in, from the
+/// workspace and ending in `/`, as `vendor/phpunit/phpunit/`.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DevPackage {
+    pub name: Box<str>,
+    pub folder: Box<[u8]>,
 }
 
 pub trait HasFileId {
@@ -143,6 +159,7 @@ impl File {
             is_standard_library: false,
             folder_namespace: None,
             is_project: false,
+            dev_packages: Arc::default(),
             contents,
             modified_ns: None,
             size,
