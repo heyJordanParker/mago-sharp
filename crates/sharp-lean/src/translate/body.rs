@@ -1244,6 +1244,9 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// The test and the branch of each arm of `r#match`, in order, each branch as `translate` gives it, and the branch
     /// that runs when no arm matches: the `default` arm's, else a throw. `None` after recording why an arm has no test.
+    /// An arm with no guard whose pattern joins alternatives with `or` is an arm for each alternative, with the same
+    /// branch, so [`choice`] joins a case's alternative to the `match` of the arms after it, and no arm before it runs
+    /// the whole `or` again in each case it leaves out.
     fn arms(
         &mut self,
         r#match: &PatternMatch,
@@ -1265,10 +1268,17 @@ impl<'body, 'program> Body<'body, 'program> {
                 continue;
             };
 
+            let Some(guard) = &arm.guard else {
+                let mut tests = Vec::new();
+                for alternative in alternatives(arm.pattern) {
+                    tests.push(self.test(&subject, None, r#type, alternative)?);
+                }
+                let branch = self.under(path, |body| translate(body, &arm.body));
+                arms.extend(tests.into_iter().map(|test| (test, branch.clone())));
+                continue;
+            };
             let mut test = self.test(&subject, None, r#type, arm.pattern)?;
-            if let Some(guard) = &arm.guard {
-                test.conditions.push(self.pure(guard.condition, "a guard that can throw", issues::GUARD)?);
-            }
+            test.conditions.push(self.pure(guard.condition, "a guard that can throw", issues::GUARD)?);
             arms.push((test, self.under(path, |body| translate(body, &arm.body))));
         }
 
@@ -1593,20 +1603,27 @@ impl<'body, 'program> Body<'body, 'program> {
         translated
     }
 
+    /// Spec section 20.2: the test of `pattern`, a case of an enum whose cases run as classes, as a machine's do, which
+    /// tests which case `subject`, a value of `r#type`, is, whatever fields the case holds. `None` for any other pattern.
+    pub(super) fn case_test(&mut self, subject: &str, r#type: &TUnion, pattern: &Pattern) -> Option<Test> {
+        let Pattern::Value(value) = pattern else {
+            return None;
+        };
+        if self.kind(r#type) != Kind::Enum {
+            return None;
+        }
+        let (r#enum, case) = self.case_pattern(value)?;
+
+        Some(Test::case(subject, case, self.constructors(r#enum), r#type.is_nullable()))
+    }
+
     /// The condition that `subject`, a value of `r#type`, matches `pattern`, or `None` after recording why it has none.
     /// A type or list pattern's is the test [`Self::test`] gives it, so `or`, `and` and `not` combine it as any other,
     /// unless it names a value, which only an arm's own match binds.
     pub(super) fn pattern(&mut self, subject: &str, r#type: &TUnion, pattern: &Pattern) -> Option<String> {
         let kind = self.kind(r#type);
         match pattern {
-            // Spec section 20.2: a case of an enum whose cases run as classes, as a machine's do, tests which case the
-            // subject is, whatever fields the case holds.
-            Pattern::Value(value)
-                if kind == Kind::Enum
-                    && let Some((r#enum, case)) = self.case_pattern(value) =>
-            {
-                Some(Test::case(subject, case, self.constructors(r#enum), r#type.is_nullable()).condition())
-            }
+            Pattern::Value(_) if let Some(test) = self.case_test(subject, r#type, pattern) => Some(test.condition()),
             // A value an object is compared with is `null`: a pattern takes constants, and an object's identity is
             // nothing a law reasons about.
             Pattern::Value(value)
@@ -2950,6 +2967,21 @@ fn returns(statement: &Statement) -> bool {
         Statement::Return(_) => true,
         Statement::Block(block) => block.statements.last().is_some_and(returns),
         _ => false,
+    }
+}
+
+/// The alternatives `pattern` joins with `or`, outside any `and` or `not`, in order: the pattern alone when it joins
+/// none.
+fn alternatives<'pattern, 'arena>(pattern: &'pattern Pattern<'arena>) -> Vec<&'pattern Pattern<'arena>> {
+    match pattern {
+        Pattern::Binary(binary) if !binary.is_and() => {
+            let mut joined = alternatives(binary.left);
+            joined.extend(alternatives(binary.right));
+
+            joined
+        }
+        Pattern::Parenthesized(parenthesized) => alternatives(parenthesized.pattern),
+        _ => vec![pattern],
     }
 }
 

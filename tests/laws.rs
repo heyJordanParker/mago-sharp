@@ -1679,6 +1679,50 @@ fn a_false_law_over_a_chain_of_tests_on_one_value_is_not_proven() {
     assert!(!compiled(root, "app/Offers/OfferAvailability.sharp").exists());
 }
 
+/// `app/Plans/PlanState.sharp`, a machine of seven cases whose fields carry `[Key]`, with a move that gives one of two
+/// cases through `?:`, and two predicates that `match (this)` whose last arm names each other case with `or`, the
+/// second calling the first.
+const PLAN_STATE: &str = "namespace App.Plans;\n\nimport Sharp.Key;\nimport Sharp.Tag;\nimport Sharp.Time.Instant;\n\n[Tag(\"state\")]\npublic machine PlanState\n{\n    [Key(\"draft\")]\n    case Draft\n    {\n        public PlanState.Live start(Instant chargeAt) => PlanState.Live(false, chargeAt);\n\n        public PlanState.Trial try(Instant chargeAt, Instant trialEndsAt) => PlanState.Trial(chargeAt, trialEndsAt);\n    }\n\n    [Key(\"trial\")]\n    case Trial([Key(\"charge_at\")] Instant chargeAt, [Key(\"trial_ends_at\")] Instant trialEndsAt)\n    {\n        public PlanState.Live convert() => PlanState.Live(false, this.chargeAt);\n    }\n\n    [Key(\"live\")]\n    case Live([Key(\"stops_at_end\")] bool stopsAtEnd, [Key(\"charge_at\")] Instant chargeAt)\n    {\n        public PlanState.Overdue|PlanState.Lapsed lapse(Instant retryAt, int maxTries, string why, Instant failedAt)\n            => PlanState.triesLeft(0, maxTries) ? PlanState.Overdue(1, retryAt, why, failedAt) : PlanState.Lapsed(failedAt);\n\n        public PlanState.Held hold(Instant? resumesAt) => PlanState.Held(resumesAt);\n\n        public PlanState.Closed close(Instant at) => PlanState.Closed(at);\n    }\n\n    [Key(\"held\")]\n    case Held([Key(\"resumes_at\")] Instant? resumesAt)\n    {\n        public PlanState.Live resume(Instant chargeAt) => PlanState.Live(false, chargeAt);\n    }\n\n    [Key(\"overdue\")]\n    case Overdue(\n        [Key(\"tries\")] int tries,\n        [Key(\"retry_at\")] Instant retryAt,\n        [Key(\"why\")] string why,\n        [Key(\"failed_at\")] Instant failedAt,\n    ) {\n        public PlanState.Live recover(Instant chargeAt) => PlanState.Live(false, chargeAt);\n\n        public PlanState.Lapsed lapse(Instant at) => PlanState.Lapsed(at);\n    }\n\n    [Key(\"lapsed\")]\n    case Lapsed([Key(\"lapsed_at\")] Instant lapsedAt)\n    {\n        public PlanState.Closed close(Instant at) => PlanState.Closed(at);\n    }\n\n    [Key(\"closed\")]\n    final case Closed([Key(\"closed_at\")] Instant closedAt);\n\n    public static PlanState.Draft enter() => PlanState.Draft;\n\n    public bool charges() => match (this) {\n        PlanState.Trial => true,\n        PlanState.Live live => !live.stopsAtEnd,\n        PlanState.Draft or PlanState.Held or PlanState.Overdue or PlanState.Lapsed or PlanState.Closed => false,\n    };\n\n    public bool chargeable() => match (this) {\n        PlanState.Overdue => true,\n        PlanState.Draft or PlanState.Trial or PlanState.Live or PlanState.Held or PlanState.Lapsed or PlanState.Closed => this.charges(),\n    };\n\n    law anOverduePlanIsChargeable(Instant chargeAt, Instant retryAt, string why, Instant failedAt)\n        => PlanState.enter().start(chargeAt).lapse(retryAt, 2, why, failedAt).chargeable();\n\n    public static bool triesLeft(int tries, int maxTries) => maxTries >= 1 && tries < maxTries - 1;\n}\n";
+
+/// A law that walks a machine's entry point through two moves and ends in a predicate whose `match` names its last
+/// cases with `or` proves within its time, as it did in 0.6.49, where 0.6.52 wrote that arm again for each case an arm
+/// before it left out, and ran out of time.
+#[test]
+fn a_law_over_a_match_whose_last_arm_names_each_other_case_with_or_proves_in_time() {
+    let directory = library_project(&[("app/Plans/PlanState.sharp", PLAN_STATE)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Plans/PlanState.sharp").exists());
+}
+
+/// Each case of the `or` arm runs that arm's branch, so a live plan that stops at its period's end charges nothing, and
+/// a law that it is chargeable is refused with its claim still to show.
+#[test]
+fn a_false_law_over_a_match_whose_last_arm_names_each_other_case_with_or_is_not_proven() {
+    let plan = PLAN_STATE.replace(
+        "law anOverduePlanIsChargeable(Instant chargeAt, Instant retryAt, string why, Instant failedAt)\n        => PlanState.enter().start(chargeAt).lapse(retryAt, 2, why, failedAt).chargeable();",
+        "law aStoppingPlanIsChargeable(Instant chargeAt) => PlanState.Live(true, chargeAt).chargeable();",
+    );
+    assert_ne!(plan, PLAN_STATE, "the machine states the law the test replaces");
+    let directory = library_project(&[("app/Plans/PlanState.sharp", &plan)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: law aStoppingPlanIsChargeable is not proven\n = still to show: PlanState.Live(true, chargeAt).chargeable()\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+    assert!(!compiled(root, "app/Plans/PlanState.sharp").exists());
+}
+
 /// A struct's precondition holds what each value its fields hold keeps, so a law over a `Slot` reads that the
 /// `Instant` it holds has a nanosecond in range.
 #[test]

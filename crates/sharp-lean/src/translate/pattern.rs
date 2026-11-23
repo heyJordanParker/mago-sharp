@@ -129,6 +129,7 @@ impl Body<'_, '_> {
             Pattern::Type(pattern) => self.type_test(subject, r#type, pattern),
             Pattern::List(list) => self.list_test(subject, written, r#type, list),
             Pattern::Parenthesized(parenthesized) => self.test(subject, written, r#type, parenthesized.pattern),
+            Pattern::Value(_) if let Some(test) = self.case_test(subject, r#type, pattern) => Some(test),
             _ => {
                 let condition = self.pattern(subject, r#type, pattern)?;
 

@@ -546,17 +546,13 @@ fn steps(lemmas: &[&str], plain: &[&str], recursive: &[&str]) -> String {
     format!("first | (unfold {}; {}; {close}; done) | {rewritten}", recursive.join(" "), simp(&[plain]))
 }
 
-/// `laws`, each with the translation that states it, by file, in the order of each file's first law.
-fn by_file<'work>(laws: Vec<(&'work Translation, &'work Law)>) -> Vec<(&'work Translation, Vec<&'work Law>)> {
-    let mut files: Vec<(&Translation, Vec<&Law>)> = Vec::new();
-    for (translation, law) in laws {
-        match files.iter_mut().find(|(file, _)| file.file == translation.file) {
-            Some((_, laws)) => laws.push(law),
-            None => files.push((translation, vec![law])),
-        }
-    }
-
-    files
+/// `laws`, each with the translation that states it, one law to an entry, in order, so each is a check of its own,
+/// which a runner's threads judge beside every other law's, its own file's too: one check of a file's laws judged them
+/// one after another on one thread, so a compile whose slowest laws shared a file ran on one core.
+fn by_law<'work>(
+    laws: impl IntoIterator<Item = (&'work Translation, &'work Law)>,
+) -> Vec<(&'work Translation, Vec<&'work Law>)> {
+    laws.into_iter().map(|(translation, law)| (translation, vec![law])).collect()
 }
 
 /// What proving the laws of the stale files reads: the runtime library, the threads a runner proves them on, every
@@ -622,6 +618,7 @@ impl Proofs<'_> {
             .flat_map(|(_, laws)| laws)
             .flat_map(|law| self.laws.closure(law))
             .any(|position| self.laws.ordered[position].1.proof.opening.is_none());
+        let work = by_law(work.iter().flat_map(|(translation, laws)| laws.iter().map(|law| (*translation, *law))));
         let mut stopped: Vec<(String, Stop)> = Vec::new();
         let mut spent: HashMap<&str, (Duration, u64)> = HashMap::default();
         let mut ended = Vec::new();
@@ -643,7 +640,7 @@ impl Proofs<'_> {
                 ended.len(),
                 unproven.len()
             );
-            ended.extend(self.run(by_file(unproven), Form::Search, &mut stopped, &mut spent)?);
+            ended.extend(self.run(by_law(unproven), Form::Search, &mut stopped, &mut spent)?);
         }
         ended.sort_by_key(|(_, law, _)| order[law.statement.as_str()]);
         let mut slowest: Vec<(&str, (Duration, u64))> = spent.into_iter().collect();
@@ -677,9 +674,9 @@ impl Proofs<'_> {
     }
 
     /// Proves the laws of `work` with their theorems in the `form` form, in one runner after another, and gives how
-    /// each law's proof ended. Each file's laws are elaborated with the theorem of each law they call, transitively,
+    /// each law's proof ended. Each entry's laws are elaborated with the theorem of each law they call, transitively,
     /// before them. A law that calls a law that cannot be proven is not proven. A generated module Lean does not
-    /// elaborate refuses each law of the check that reaches it, and the next runner checks the file's other laws
+    /// elaborate refuses each law of the check that reaches it, and the next runner checks the entry's other laws
     /// without it. Each law's time and heartbeats in the runners join its own in `spent`, and each runner logs how long
     /// it took.
     fn run<'work>(
