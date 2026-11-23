@@ -2,7 +2,6 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::Duration;
 
 use mago_linter::external::ExternalLinter;
 use mago_php_version::PHPVersion;
@@ -29,7 +28,7 @@ fn worker_reducers_merge_every_interpreter_in_one() -> Result<(), Box<dyn std::e
     let temporary = tempfile::tempdir()?;
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/worker-reducer.php"),
-        Duration::from_secs(30),
+        common::NO_DEADLINE,
         &[("MAGO_REDUCTION_AUDIT_DIRECTORY", temporary.path().to_str().expect("a UTF-8 path"))],
     );
     let pool = rayon::ThreadPoolBuilder::new().num_threads(3).build()?;

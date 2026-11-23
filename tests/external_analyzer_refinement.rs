@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
@@ -160,7 +159,7 @@ fn registry(repository: &Path) -> Arc<PluginRegistry> {
 fn registry_of(repository: &Path, environment: &[(&str, &str)]) -> Arc<PluginRegistry> {
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-refinement-worker.php"),
-        Duration::from_secs(30),
+        common::NO_DEADLINE,
         environment,
     );
     let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)

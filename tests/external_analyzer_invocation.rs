@@ -3,7 +3,6 @@
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
@@ -1237,7 +1236,7 @@ fn fixture_registry(audit: &Path, switches: &[&str]) -> Result<PluginRegistry, B
     environment.extend(switches.iter().map(|switch| (*switch, "1")));
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-invocation-worker.php"),
-        Duration::from_secs(30),
+        common::NO_DEADLINE,
         &environment,
     );
     let external = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)?;

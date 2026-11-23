@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
@@ -83,7 +82,7 @@ fn selected_declarations_refresh_every_worker_incrementally() {
     std::fs::write(&audit_log, []).expect("scan audit should be initialized");
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-scan-worker.php"),
-        Duration::from_secs(30),
+        common::NO_DEADLINE,
         &[("MAGO_SCAN_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
     );
     let analyzer =
@@ -191,7 +190,7 @@ fn attribute_scan(database: &Database<'static>, audit_log: &Path) -> Option<Incr
     std::fs::write(audit_log, []).expect("scan audit should be initialized");
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-attribute-scan-worker.php"),
-        Duration::from_secs(30),
+        common::NO_DEADLINE,
         &[("MAGO_SCAN_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
     );
     let analyzer =

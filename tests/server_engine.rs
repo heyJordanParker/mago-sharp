@@ -4,7 +4,6 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
@@ -55,7 +54,7 @@ fn server(repository: &Path, database: Database<'static>) -> Server {
 fn server_with(repository: &Path, database: Database<'static>, analyzer_settings: AnalyzerSettings) -> Server {
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-server-worker.php"),
-        Duration::from_secs(30),
+        common::NO_DEADLINE,
         &[],
     );
     let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)

@@ -2,7 +2,6 @@
 
 use std::borrow::Cow;
 use std::path::Path;
-use std::time::Duration;
 
 use mago_allocator::LocalArena;
 use mago_database::file::File;
@@ -23,7 +22,7 @@ fn external_linter_issue_preserves_suggested_edits() -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    let host = common::host(&repository.join("composer/tests/Sdk/worker.php"), Duration::from_secs(30), &[]);
+    let host = common::host(&repository.join("composer/tests/Sdk/worker.php"), common::NO_DEADLINE, &[]);
     let external = ExternalLinter::initialize([host], PHPVersion::PHP85)?;
 
     let source = b"<?php\n\nPsl\\Iter\\any([1], static fn(int $value): bool => $value > 0);\n";

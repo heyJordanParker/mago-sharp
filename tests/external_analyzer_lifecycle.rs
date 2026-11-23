@@ -390,7 +390,7 @@ fn orchestrator_loads_initialization_stubs_into_the_source_database() {
 
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-lifecycle-worker.php"),
-        Duration::from_secs(30),
+        common::NO_DEADLINE,
         &[("MAGO_LIFECYCLE_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
     );
     let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)

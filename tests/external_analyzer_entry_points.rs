@@ -3,7 +3,6 @@
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
@@ -135,7 +134,7 @@ fn service(
 
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-entry-point-worker.php"),
-        Duration::from_secs(30),
+        common::NO_DEADLINE,
         &[],
     );
     let external = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)?;
