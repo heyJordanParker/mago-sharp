@@ -32,6 +32,7 @@
 //! - **`compile`** ([`CompileCommand`]): Compile every PHP# file into the `.sharp` folder
 //! - **`move`** ([`MoveCommand`]): Move a PHP# class, or every class of a namespace, into another namespace
 //! - **`machine`** ([`MachineCommand`]): Print a PHP# machine's graph as a Mermaid state diagram
+//! - **`effects`** ([`EffectsCommand`]): Check each `extern` line's `uses` against what a test run's calls ran
 //! - **`format`** ([`FormatCommand`]): Format PHP code
 //! - **`guard`** ([`GuardCommand`]): Enforce architectural rules
 //! - **`inspect-baseline`** ([`InspectBaselineCommand`]): Visualize a baseline file
@@ -66,6 +67,7 @@ use crate::commands::compile::CompileCommand;
 use crate::commands::config::ConfigCommand;
 use crate::commands::convert::ConvertCommand;
 use crate::commands::cst::CstCommand;
+use crate::commands::effects::EffectsCommand;
 use crate::commands::extension::ExtensionCommand;
 use crate::commands::fix::FixCommand;
 use crate::commands::format::FormatCommand;
@@ -88,6 +90,7 @@ pub mod compile;
 pub mod config;
 pub mod convert;
 pub mod cst;
+pub mod effects;
 pub mod extension;
 pub mod fix;
 pub mod format;
@@ -268,6 +271,16 @@ pub enum MagoCommand {
     /// **Usage**: `mago machine <NAME>`
     #[command(name = "machine")]
     Machine(MachineCommand),
+
+    /// Check each `extern` line's `uses` against what a test run's calls ran.
+    ///
+    /// Reads the report the engine writes under `-d sharp.effect_report=<file>`. A line
+    /// whose calls ran a built-in with an effect it doesn't list is an error, and a `uses
+    /// any` line gets the `uses` its calls needed.
+    ///
+    /// **Usage**: `mago effects <REPORT>`
+    #[command(name = "effects")]
+    Effects(EffectsCommand),
 
     /// Enforce architectural rules and layer dependencies.
     ///

@@ -519,6 +519,78 @@ fn machine_prints_a_machine_s_graph_as_a_mermaid_state_diagram() {
     );
 }
 
+/// A project whose `app/Stubs/Libraries.sharp` declares four plain PHP methods, `Formatter.format` and `Ticker.tick`
+/// `uses any`, `Reader.read` `uses Files` and `Validator.check` `uses none`, with the standard library's package in
+/// `vendor/`, and `report` as `effects.json`, the report a test run wrote under `sharp.effect_report`.
+fn effects_workspace(report: &str) -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
+    write(root, "composer.json", LIBRARY);
+    write_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
+    write(
+        root,
+        "app/Stubs/Libraries.sharp",
+        "namespace App.Stubs;\n\nimport Acme.Formatter;\nimport Acme.Reader;\nimport Acme.Ticker;\nimport Acme.Validator;\n\nextern Formatter.format uses any;\nextern Reader.read uses Files;\nextern Ticker.tick uses any;\nextern Validator.check uses none;\n",
+    );
+    for (class, method) in [("Formatter", "format"), ("Reader", "read"), ("Ticker", "tick"), ("Validator", "check")] {
+        write(
+            root,
+            &format!("app/Lib/{class}.php"),
+            &format!(
+                "<?php\n\nnamespace Acme;\n\nclass {class}\n{{\n    public function {method}(): void\n    {{\n    }}\n}}\n"
+            ),
+        );
+    }
+    write(root, "effects.json", report);
+    directory
+}
+
+/// `mago effects` reads the report of a test run, summed over the requests that wrote it, and checks each `extern`
+/// line's `uses` against the built-ins its calls ran, each built-in's effect as the standard library's line gives
+/// it: a line whose calls ran an effect it doesn't list fails, naming the line, the built-in and the effect, and a
+/// `uses any` line gets the `uses` its calls needed.
+#[test]
+fn effects_refuses_a_line_whose_calls_ran_an_effect_it_does_not_list_and_suggests_the_uses_a_uses_any_line_needs() {
+    let directory = effects_workspace(concat!(
+        "{\"Acme\\\\Formatter::format\": {\"calls\": 10, \"ran\": {\"strlen\": 10}}, \"Acme\\\\Validator::check\": {\"calls\": 2, \"ran\": {\"PDO::query\": 1, \"strlen\": 4}}}\n",
+        "{\"Acme\\\\Formatter::format\": {\"calls\": 4, \"ran\": {}}, \"Acme\\\\Reader::read\": {\"calls\": 1, \"ran\": {\"file_get_contents\": 1}}, \"Acme\\\\Ticker::tick\": {\"calls\": 3, \"ran\": {\"time\": 3}}}\n",
+    ));
+
+    let output = run(directory.path(), "effects", &["effects.json"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        concat!(
+            "help: `Formatter.format` is declared `uses any`, and used nothing in 14 calls: declare it `uses none`.\n",
+            "help: `Ticker.tick` is declared `uses any`, and used Clock in 3 calls: declare it `uses Clock`.\n",
+            "error: `Validator.check` is declared `uses none` (app/Stubs/Libraries.sharp:11), but it ran PDO::query, which has the effect Database.\n",
+        )
+    );
+}
+
+/// A report whose calls ran only what their lines list passes with nothing to say, and a report that can't be read
+/// fails, naming it.
+#[test]
+fn effects_passes_a_report_whose_lines_list_every_effect_their_calls_ran() {
+    let directory = effects_workspace(
+        "{\"Acme\\\\Reader::read\": {\"calls\": 2, \"ran\": {\"file_get_contents\": 2, \"strlen\": 1}}}\n",
+    );
+
+    let output = run(directory.path(), "effects", &["effects.json"]);
+    let missing = run(directory.path(), "effects", &["missing.json"]);
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("Can't read the effect report `missing.json`:"),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+}
+
 /// The standard library's members of `string`, with a native body, spec section 29, and the `split` `Http` calls.
 const STRING_MEMBERS: &str = include_str!("../../composer/library/Sharp/Text/StringMembers.sharp");
 
