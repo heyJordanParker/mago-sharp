@@ -39,6 +39,15 @@ pub(crate) struct Theorem<'theorem> {
     pub(crate) search: Option<&'theorem str>,
 }
 
+/// What the runner gave for one judged theorem: its judgment, how long it took to elaborate and judge it, and the
+/// thousands of heartbeats Lean counted elaborating it, which are the same on every run of the same request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Judged {
+    pub(crate) judgment: Judgment,
+    pub(crate) took: Duration,
+    pub(crate) heartbeats: u32,
+}
+
 /// How the runner judged one law's theorem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Judgment {
@@ -88,8 +97,8 @@ pub(crate) struct Check<'check> {
 /// The runner's answer to one check.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
-    /// The judgment of each judged theorem, in order, with how long the runner took to elaborate and judge it.
-    Judged(Vec<(Judgment, Duration)>),
+    /// What the runner gave for each judged theorem, in order.
+    Judged(Vec<Judged>),
     /// The generated module of this name, which the check reaches, did not elaborate.
     Refused(String, Refusal),
 }
@@ -348,8 +357,8 @@ fn answer(
     Ok((index, answer))
 }
 
-/// The next `count` judgments of `reader`, each with the milliseconds its theorem took.
-fn judgments(reader: &mut PayloadReader<'_>, count: usize) -> Result<Vec<(Judgment, Duration)>, String> {
+/// The next `count` judgments of `reader`, each with the milliseconds and the thousands of heartbeats its theorem took.
+fn judgments(reader: &mut PayloadReader<'_>, count: usize) -> Result<Vec<Judged>, String> {
     let error = |error: mago_extension::PayloadError| error.to_string();
     let mut judgments = Vec::with_capacity(count);
     for _ in 0..count {
@@ -384,7 +393,8 @@ fn judgments(reader: &mut PayloadReader<'_>, count: usize) -> Result<Vec<(Judgme
             code => return Err(format!("the runner answered with the unknown judgment {code}")),
         };
         let took = Duration::from_millis(u64::from(reader.read_u32("judgment milliseconds").map_err(error)?));
-        judgments.push((judgment, took));
+        let heartbeats = reader.read_u32("judgment heartbeats").map_err(error)?;
+        judgments.push(Judged { judgment, took, heartbeats });
     }
 
     Ok(judgments)
@@ -426,7 +436,7 @@ mod tests {
         answers
             .iter()
             .map(|answer| match answer {
-                Answer::Judged(judged) => Some(judged.iter().map(|(judgment, _)| judgment.clone()).collect()),
+                Answer::Judged(judged) => Some(judged.iter().map(|judged| judged.judgment.clone()).collect()),
                 Answer::Refused(..) => None,
             })
             .collect()
@@ -591,7 +601,11 @@ mod tests {
         let Some(Answer::Judged(judged)) = answers.first() else {
             return Err(io::Error::other(format!("the first check was answered {answers:?}")));
         };
-        assert!(judged[0].1 > Duration::ZERO, "the theorem that ran out of time took no time: {judged:?}");
+        assert!(judged[0].took > Duration::ZERO, "the theorem that ran out of time took no time: {judged:?}");
+        assert!(
+            judged[0].heartbeats >= 100,
+            "the theorem that ran out of time counted under its 100 thousand heartbeats: {judged:?}"
+        );
 
         Ok(())
     }
@@ -653,9 +667,10 @@ mod tests {
         writer
     }
 
-    /// Each judgment of an answer ends with the milliseconds its theorem took, which the answer gives beside it.
+    /// Each judgment of an answer ends with the milliseconds and the thousands of heartbeats its theorem took, which the
+    /// answer gives beside it.
     #[test]
-    fn each_judgment_comes_with_the_milliseconds_its_theorem_took() {
+    fn each_judgment_comes_with_the_milliseconds_and_the_heartbeats_its_theorem_took() {
         let check = Check {
             modules: vec!["Code.App.Fine".to_owned()],
             theorems: vec![
@@ -669,19 +684,64 @@ mod tests {
         writer.write_u32(2);
         writer.write_u8(0);
         writer.write_u32(12);
+        writer.write_u32(340);
         writer.write_u8(4);
         writer.write_u32(1_500);
+        writer.write_u32(100_000);
 
         assert_eq!(
             decode(&writer.finish(), &[&check], true, &[]),
             Ok(vec![(
                 0,
                 Answer::Judged(vec![
-                    (Judgment::Proved, Duration::from_millis(12)),
-                    (Judgment::OutOfTime, Duration::from_millis(1_500)),
+                    Judged { judgment: Judgment::Proved, took: Duration::from_millis(12), heartbeats: 340 },
+                    Judged { judgment: Judgment::OutOfTime, took: Duration::from_millis(1_500), heartbeats: 100_000 },
                 ])
             )])
         );
+    }
+
+    /// Lean counts the same heartbeats for a theorem on every run of the same request, whichever check of the runner
+    /// elaborated it first: here a theorem one check judges and the other elaborates before its own.
+    #[test]
+    fn a_theorem_counts_the_same_heartbeats_on_every_run() -> io::Result<()> {
+        let library = library()?;
+        let modules = [module("Code.App.Fine", "import Sharp.Lean.Law\n\ndef App.Fine.one : Nat := 1\n")];
+        let summed = |judged: bool| Theorem {
+            statement: "App.Fine.summed",
+            text: "theorem App.Fine.summed.proof : (List.range 40).foldl (· + ·) 0 = 780 := by decide",
+            steps: None,
+            judged,
+            search: None,
+        };
+        let after = Theorem {
+            statement: "App.Fine.isOne",
+            text: "theorem App.Fine.isOne.proof : App.Fine.one = 1 := rfl",
+            steps: None,
+            judged: true,
+            search: None,
+        };
+        let checks = [
+            Check { modules: vec!["Code.App.Fine".to_owned()], theorems: vec![summed(true)] },
+            Check { modules: vec!["Code.App.Fine".to_owned()], theorems: vec![summed(false), after] },
+        ];
+        let heartbeats = |answers: Vec<Answer>| -> Vec<Vec<u32>> {
+            answers
+                .into_iter()
+                .map(|answer| match answer {
+                    Answer::Judged(judged) => judged.iter().map(|judged| judged.heartbeats).collect(),
+                    Answer::Refused(..) => Vec::new(),
+                })
+                .collect()
+        };
+
+        let first = heartbeats(check(&library, &modules.each_ref(), &checks, THREADS, HEARTBEATS, &mut Vec::new())?);
+        let second = heartbeats(check(&library, &modules.each_ref(), &checks, THREADS, HEARTBEATS, &mut Vec::new())?);
+
+        assert_eq!(first, second);
+        assert!(first[0][0] > 0, "the summed theorem counted no heartbeats: {first:?}");
+
+        Ok(())
     }
 
     /// A check's last line of progress names the generated module the runner was elaborating for it when Mago stopped

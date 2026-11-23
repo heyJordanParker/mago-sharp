@@ -609,7 +609,7 @@ impl Proofs<'_> {
     /// the runtime library and proves them with the fixed steps, and each law they leave unproven, apart from one a
     /// generated module refuses or one that calls a law that cannot be proven, which ends the same either way, then
     /// proves with Lean's search in a runner after it, so its proof ends as that search ends it. It logs how long each
-    /// law took in the runners, the slowest first.
+    /// law took in the runners and the heartbeats Lean counted for it, the most first.
     fn prove<'work>(&self, work: Vec<(&'work Translation, Vec<&'work Law>)>) -> io::Result<Vec<Proven<'work>>> {
         let order: HashMap<&str, usize> = work
             .iter()
@@ -623,7 +623,7 @@ impl Proofs<'_> {
             .flat_map(|law| self.laws.closure(law))
             .any(|position| self.laws.ordered[position].1.proof.opening.is_none());
         let mut stopped: Vec<(String, Stop)> = Vec::new();
-        let mut spent: HashMap<&str, Duration> = HashMap::default();
+        let mut spent: HashMap<&str, (Duration, u64)> = HashMap::default();
         let mut ended = Vec::new();
         if searched {
             ended.extend(self.run(work, Form::StepsThenSearch, &mut stopped, &mut spent)?);
@@ -646,10 +646,31 @@ impl Proofs<'_> {
             ended.extend(self.run(by_file(unproven), Form::Search, &mut stopped, &mut spent)?);
         }
         ended.sort_by_key(|(_, law, _)| order[law.statement.as_str()]);
-        let mut slowest: Vec<(&str, Duration)> = spent.into_iter().collect();
-        slowest.sort_unstable_by(|(law, took), (other, other_took)| other_took.cmp(took).then_with(|| law.cmp(other)));
-        for (law, took) in slowest {
-            tracing::debug!("The law {} took {:.2} s of the provers' time.", names::unescaped(law), took.as_secs_f64());
+        let mut slowest: Vec<(&str, (Duration, u64))> = spent.into_iter().collect();
+        slowest.sort_unstable_by(|(law, (_, heartbeats)), (other, (_, other_heartbeats))| {
+            other_heartbeats.cmp(heartbeats).then_with(|| law.cmp(other))
+        });
+        let outcomes: HashMap<&str, &'static str> = ended
+            .iter()
+            .map(|(_, law, ended)| {
+                let outcome = match ended {
+                    Ok(Judgment::Proved) => "proved",
+                    Ok(Judgment::Open(..)) => "unproven",
+                    Ok(Judgment::Through(_)) => "unproven through another law",
+                    Ok(Judgment::Rejected(_)) => "rejected",
+                    Ok(Judgment::OutOfTime) => "out of time",
+                    Err(_) => "refused",
+                };
+                (law.statement.as_str(), outcome)
+            })
+            .collect();
+        for (law, (took, heartbeats)) in slowest {
+            tracing::debug!(
+                "The law {} ended {} after {:.2} s and {heartbeats} thousand heartbeats of the provers' time.",
+                names::unescaped(law),
+                outcomes.get(law).unwrap_or(&"unjudged"),
+                took.as_secs_f64(),
+            );
         }
 
         Ok(ended)
@@ -659,13 +680,14 @@ impl Proofs<'_> {
     /// each law's proof ended. Each file's laws are elaborated with the theorem of each law they call, transitively,
     /// before them. A law that calls a law that cannot be proven is not proven. A generated module Lean does not
     /// elaborate refuses each law of the check that reaches it, and the next runner checks the file's other laws
-    /// without it. Each law's time in the runners joins its time in `spent`, and each runner logs how long it took.
+    /// without it. Each law's time and heartbeats in the runners join its own in `spent`, and each runner logs how long
+    /// it took.
     fn run<'work>(
         &self,
         work: Vec<(&'work Translation, Vec<&'work Law>)>,
         form: Form,
         stopped: &mut Vec<(String, Stop)>,
-        spent: &mut HashMap<&'work str, Duration>,
+        spent: &mut HashMap<&'work str, (Duration, u64)>,
     ) -> io::Result<Vec<Proven<'work>>> {
         let mut ended: Vec<Proven<'work>> = Vec::new();
         let mut pending = work;
@@ -694,10 +716,12 @@ impl Proofs<'_> {
                         );
                         let order =
                             check.theorems.iter().filter(|theorem| theorem.judged).map(|theorem| theorem.statement);
-                        for (statement, (judgment, took)) in order.zip(answered) {
+                        for (statement, judged) in order.zip(answered) {
                             if let Some(&law) = laws.iter().find(|law| law.statement == statement) {
-                                *spent.entry(law.statement.as_str()).or_default() += took;
-                                ended.push((translation, law, Ok(judgment)));
+                                let (took, heartbeats) = spent.entry(law.statement.as_str()).or_default();
+                                *took += judged.took;
+                                *heartbeats += u64::from(judged.heartbeats);
+                                ended.push((translation, law, Ok(judged.judgment)));
                             }
                         }
                     }

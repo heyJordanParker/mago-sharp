@@ -198,14 +198,16 @@ def reachedOf (env : Environment) (name : Name) (targets : Array Name) : Option 
 
 /-- What elaborating one theorem gave: each step whose goal stayed open, as its kind, its index and its goal, whether it
 ran out of the heartbeats of its theorem outside those steps, the first other error, whether Lean declared the theorem,
-and the axioms it rests on. With them, the declaration Lean added for it and each constant that declaration uses, when
-they were all there before it, so no other declaration its elaboration added is part of it. -/
+the axioms it rests on, and the heartbeats its elaboration counted, in thousands. With them, the declaration Lean added
+for it and each constant that declaration uses, when they were all there before it, so no other declaration its
+elaboration added is part of it. -/
 structure Elaborated where
   steps : Array (UInt8 × Nat × String)
   outOfTime : Bool
   rejected : Option String
   declared : Bool
   axioms : Array Name
+  heartbeats : Nat
   declaration : Option (Declaration × NameSet)
 
 /-- Whether `env` holds each constant of `names`. -/
@@ -214,19 +216,46 @@ def holdsAll (env : Environment) (names : NameSet) : Bool := Id.run do
     unless env.contains name do return false
   return true
 
+/-- The command state after each command of `input` from `parserState` on, elaborated from `commandState` on this
+thread, with the messages of `commandState` and of every command: Lean's frontend clears the messages before it
+elaborates each command, so its state after the last holds only the last one's. Nothing of it runs in a task, so a
+generated module is whole before any theorem elaborates in its environment, and each theorem's heartbeats are the same
+on every run, whichever threads elaborated the modules: with the modules elaborated in tasks, one law of 1,330 counted
+one thousand heartbeats fewer in one compile of two. -/
+def elaborateCommands (input : Parser.InputContext) (parserState : Parser.ModuleParserState)
+    (commandState : Command.State) : IO Command.State := do
+  let mut state : Frontend.State := { commandState, parserState, cmdPos := parserState.pos }
+  let mut messages := commandState.messages
+  repeat
+    let scope := state.commandState.scopes.head!
+    let parsing := { env := state.commandState.env, options := scope.opts, currNamespace := scope.currNamespace,
+                     openDecls := scope.openDecls }
+    let (command, parserState, parsed) := Parser.parseCommand input parsing state.parserState {}
+    messages := messages ++ parsed
+    let ((), next) ← (Frontend.elabCommandAtFrontend command { inputCtx := input }).run
+      { state with parserState, cmdPos := state.parserState.pos }
+    messages := messages ++ next.commandState.messages
+    state := next
+    if Parser.isTerminalCommand command then break
+  return { state.commandState with messages }
+
 /-- Elaborates the theorem `text` of the law `statement` in `env`, within `heartbeats` thousand heartbeats, and gives
 the environment with its theorem and what elaborating it gave. The steps `Sharp/Lean/Proof.lean` runs share that budget,
 so a theorem that runs out of it fails alone, and the other checks of the runner go on. -/
 def elaborate (env : Environment) (statement : Name) (text : String) (heartbeats : Nat) :
     IO (Environment × Elaborated) := do
   let input := Parser.mkInputContext s!"open Sharp\n{text}" "<law>"
-  let state ← IO.processCommands input {} (Command.mkState env {} (maxHeartbeats.set unlinted heartbeats))
-  let elaborated := state.commandState.env
+  -- Each command elaborates on this thread, so the thread's heartbeats count the theorem's own work, where
+  -- `IO.processCommands` elaborates it in tasks on other threads.
+  let started ← IO.getNumHeartbeats
+  let commandState ← elaborateCommands input {} (Command.mkState env {} (maxHeartbeats.set unlinted heartbeats))
+  let spent := ((← IO.getNumHeartbeats) - started) / 1000
+  let elaborated := commandState.env
   let name := statement ++ `proof
   let mut steps := #[]
   let mut outOfTime := false
   let mut rejected := none
-  for message in state.commandState.messages.toList do
+  for message in commandState.messages.toList do
     if message.severity != .error then continue
     let text ← message.data.toString
     match openStep text with
@@ -241,7 +270,7 @@ def elaborate (env : Environment) (statement : Name) (text : String) (heartbeats
       let uses := (ConstantInfo.thmInfo val).getUsedConstantsAsSet
       if holdsAll env uses then some (.thmDecl val, uses) else none
     | _ => none
-  return (elaborated, { steps, outOfTime, rejected, declared, axioms, declaration })
+  return (elaborated, { steps, outOfTime, rejected, declared, axioms, heartbeats := spent, declaration })
 
 /-- Whether elaborating a theorem proved it: Lean declared it, with no step left open, no error and no gap. -/
 def Elaborated.proved (elaborated : Elaborated) : Bool :=
@@ -305,10 +334,10 @@ def elaborateIn (env : Environment) (module : Name)
     (parsed : Parser.InputContext × Parser.ModuleParserState × MessageLog × Array Name) : ModulesM Environment := do
   let (input, parserState, messages, _) := parsed
   let main := env.mainModule
-  let state ← IO.processCommands input parserState (Command.mkState (env.setMainModule module) messages unlinted)
-  if let some error := state.commandState.messages.toList.find? (·.severity == .error) then
+  let state ← elaborateCommands input parserState (Command.mkState (env.setMainModule module) messages unlinted)
+  if let some error := state.messages.toList.find? (·.severity == .error) then
     throwThe Refusal (.rejected module error.pos.line)
-  return state.commandState.env.setMainModule main
+  return state.env.setMainModule main
 
 /-- `env`, which holds the generated modules `present`, with `module` and each generated module it imports,
 transitively, elaborated in it, each after the modules it imports, and the modules it then holds. Each of them was
@@ -378,12 +407,16 @@ partial def withImports (check : Nat) (modules : Array Name) : ModulesM (Environ
 end
 
 /-- `env` with `item`'s theorem elaborated in it, and what that gave: with its fixed steps when it has them, and with
-Lean's search when it has none or they leave it unproven and the runner holds that search. -/
+Lean's search when it has none or they leave it unproven and the runner holds that search, whose heartbeats then count
+the fixed steps' too. -/
 def proved (env : Environment) (item : Theorem) (shared : Shared) : IO (Environment × Elaborated) := do
+  let mut before := 0
   unless item.steps.isEmpty do
     let fixed ← elaborate env item.statement item.steps shared.heartbeats
     if fixed.2.proved || !shared.searches then return fixed
-  elaborate env item.statement item.text shared.heartbeats
+    before := fixed.2.heartbeats
+  let (env, searched) ← elaborate env item.statement item.text shared.heartbeats
+  return (env, { searched with heartbeats := before + searched.heartbeats })
 
 /-- `env` with `item`'s theorem, and what elaborating it gave: what a check of the runner gave before, when `env` holds
 each constant its declaration uses, so the runner adds the declaration Lean already checked, and else elaborated in
@@ -455,7 +488,8 @@ its kind, its index and its goal, then what the search for the small values that
 `1` when it found none, or `2` and the values it found; `2` and the statement of the law not proven that it holds
 through; `3` and Lean's first error, when Lean rejected the theorem, or the axioms it rests on, when it has a gap no law
 it holds through explains; or `4` when it ran out of its heartbeats outside the steps of its proof. Each answer ends with
-the milliseconds the theorem took, from the start of its elaboration to the end of its judgment. -/
+the milliseconds the theorem took, from the start of its elaboration to the end of its judgment, and the thousands of
+heartbeats its elaboration counted, which a check that reuses another's theorem reports the same. -/
 def answer (env : Environment) (request : Check) (b : ByteArray) (shared : Shared) : IO ByteArray := do
   let mut env := env
   let mut gaps : Array Name := #[]
@@ -489,6 +523,7 @@ def answer (env : Environment) (request : Check) (b : ByteArray) (shared : Share
     else
       b := putU8 b 0
     b := putU32 b (((← IO.monoNanosNow) - started) / 1000000).toUInt32
+    b := putU32 b elaborated.heartbeats.toUInt32
   return b
 
 /-- The answer of the check of index `index`: its index, then `0` and the judgments of its theorems, `1`, a generated
