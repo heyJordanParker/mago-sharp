@@ -370,14 +370,11 @@ impl Lean {
             None => match library::toolchain() {
                 Toolchain::Ready(lake) => library::build(&lake)?,
                 toolchain => {
-                    if let Toolchain::Failed(failure) = &toolchain {
-                        tracing::debug!("The law checker could not be installed: {failure}");
-                    }
                     for (translation, span) in
                         work.iter().filter_map(|(translation, _)| Some((*translation, translation.laws.first()?.span)))
                     {
                         let issue = match &toolchain {
-                            Toolchain::Failed(_) => issues::uninstalled_checker(span),
+                            Toolchain::Failed(failure) => issues::uninstalled_checker(span, failure),
                             _ => issues::uninstallable_lean(span),
                         };
                         report(&mut issues, translation, issue);

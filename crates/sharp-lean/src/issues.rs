@@ -265,14 +265,12 @@ fn stopped(stop: Stop, what: &str) -> String {
     }
 }
 
-/// The law checker could not be installed or does not start. The message names it only as the law checker, which is
-/// all a PHP# developer needs to know of it, and the debug log holds what failed.
-pub(crate) fn uninstalled_checker(span: Span) -> Issue {
-    Issue::error(
-        "The law checker could not be installed. Run vendor/bin/mago compile again to retry, with MAGO_LOG=debug to see why.",
-    )
-    .with_code(IssueCode::LawCheckerUnavailable.as_str())
-    .with_annotation(Annotation::primary(span))
+/// The law checker could not be installed, for `failure`, the step of the install that failed and its cause. The
+/// install already tried again what a new try can pass, so the message names the cause a PHP# developer fixes.
+pub(crate) fn uninstalled_checker(span: Span, failure: &str) -> Issue {
+    Issue::error(format!("The law checker could not be installed: {failure}."))
+        .with_code(IssueCode::LawCheckerUnavailable.as_str())
+        .with_annotation(Annotation::primary(span))
 }
 
 /// No Lean is installed, and the Mago build pins no Lean archive for its target, so it cannot install Lean. The

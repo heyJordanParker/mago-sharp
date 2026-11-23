@@ -3922,14 +3922,24 @@ fn compile_names_the_cache_folder_the_law_checker_cannot_create() {
 }
 
 /// A file whose law needs proving needs the law checker; with no Lean installed and none Mago can install, each such
-/// file is refused with `law-checker-unavailable`, a fixed sentence that names no tool and no folder of one, and every
-/// other file compiles. The debug log holds what failed.
+/// file is refused with `law-checker-unavailable`, which names the step of the install that failed and its cause, and
+/// every other file compiles. Here the install can't create Mago's cache folder, which is a file.
 #[test]
 fn compile_reports_an_unavailable_law_checker_on_each_file_that_needs_it_and_whose_compiled_file_is_not_current() {
-    let unavailable = if cfg!(target_env = "musl") {
-        "error - law-checker-unavailable: Laws need the law checker, and this musl build of the checker can't install it, because the law checker has no musl build. On glibc Linux, the checker's glibc build installs it itself."
+    let cache = unwritable_cache().join("mago");
+    let (unavailable, cause) = if cfg!(target_env = "musl") {
+        (
+            "error - law-checker-unavailable: Laws need the law checker, and this musl build of the checker can't install it, because the law checker has no musl build. On glibc Linux, the checker's glibc build installs it itself.".to_owned(),
+            String::new(),
+        )
     } else {
-        "error - law-checker-unavailable: The law checker could not be installed. Run vendor/bin/mago compile again to retry, with MAGO_LOG=debug to see why."
+        (
+            format!(
+                "error - law-checker-unavailable: The law checker could not be installed: {}",
+                cache.join("lean/lean-4.34.1-").display()
+            ),
+            format!(": can't create the folder `{}`: File exists (os error 17).", cache.display()),
+        )
     };
     let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Order.sharp", ORDER)]);
     let root = directory.path();
@@ -3937,7 +3947,10 @@ fn compile_reports_an_unavailable_law_checker_on_each_file_that_needs_it_and_who
     let output = compile_without_lean(root);
 
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
-    assert_eq!(issue_lines(&output), [format!("app/Shared/Money.sharp:8:5:{unavailable}")], "{}", printed(&output));
+    let issues = issue_lines(&output);
+    let [issue] = issues.as_slice() else { panic!("one issue: {}", printed(&output)) };
+    assert!(issue.starts_with(&format!("app/Shared/Money.sharp:8:5:{unavailable}")), "{}", printed(&output));
+    assert!(issue.ends_with(&cause), "{}", printed(&output));
     assert!(!printed(&output).contains("elan"), "{}", printed(&output));
     assert!(compiled(root, "app/Order.sharp").exists());
     assert!(!root.join(".sharp/inputs.json").exists(), "the next compile tries to install the law checker again");

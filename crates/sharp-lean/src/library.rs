@@ -640,11 +640,18 @@ fn url(archive: &Archive) -> String {
     format!("https://github.com/leanprover/lean4/releases/download/{release}/{}.tar.zst", archive.name)
 }
 
+/// How many times an install downloads Lean when each download fails for a cause a new download can pass.
+const DOWNLOADS: u32 = 3;
+
+/// The pause before an install downloads Lean again, which grows by itself with each download.
+const DOWNLOAD_PAUSE: Duration = Duration::from_secs(1);
+
 /// Installs Lean from the archive at `url` into the folder of its name in `lean/` in `cache`, once, and returns its
 /// `lake`. Installs take turns under `install_lock`, across threads and processes alike, and the first one prints what
 /// it downloads. The archive unpacks into a staging folder while it downloads, and the staging folder moves into place
 /// only when the archive has its pinned size and SHA-256, so a dead or failed install leaves no Lean behind. An install
-/// first deletes the staging folder a dead install left.
+/// first deletes the staging folder a dead install left. A download the network drops, or the server fails for now, is
+/// tried again, up to [`DOWNLOADS`] times in all.
 fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> {
     let _lock = install_lock(cache)?;
     let builds = cache.join("lean");
@@ -660,10 +667,22 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
     );
     tracing::debug!("The law checker installs into {}.", lean.display());
     let staging = builds.join(format!("{}.staging", archive.name));
-    remove_folder(&staging)?;
-    let unpacked = unpack(url, archive, &staging)
-        .and_then(|()| fs::rename(staging.join(archive.name), &lean))
-        .and_then(|()| remove_folder(&staging));
+    let mut downloads = 1;
+    let unpacked = loop {
+        remove_folder(&staging)?;
+        match unpack(url, archive, &staging) {
+            Ok(()) => break fs::rename(staging.join(archive.name), &lean).and_then(|()| remove_folder(&staging)),
+            Err(InstallFailure::Transient(cause)) if downloads < DOWNLOADS => {
+                tracing::info!("The law checker's download failed ({cause}), so it downloads again.");
+                thread::sleep(DOWNLOAD_PAUSE * downloads);
+                downloads += 1;
+            }
+            Err(InstallFailure::Transient(cause)) => {
+                break Err(io::Error::other(format!("downloading {url} failed on each of {DOWNLOADS} tries: {cause}")));
+            }
+            Err(InstallFailure::Permanent(error)) => break Err(error),
+        }
+    };
     if let Err(error) = unpacked {
         remove_folder(&staging)?;
 
@@ -673,15 +692,54 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
     Ok(lake)
 }
 
+/// What stopped an install's download and unpack.
+enum InstallFailure {
+    /// The download failed for this cause, which a new download can pass: the network dropped or stalled it, or the
+    /// server failed for now.
+    Transient(String),
+    /// A failure no new download passes, as a refusal of the server, an archive of another size or SHA-256 than its
+    /// pin, or a disk that can't hold it, with what failed.
+    Permanent(io::Error),
+}
+
+impl From<io::Error> for InstallFailure {
+    fn from(error: io::Error) -> Self {
+        Self::Permanent(error)
+    }
+}
+
+/// Whether a download that failed with `error` can pass when tried again: the network dropped, stalled or never made
+/// the connection, or the server failed for now with a 5xx or 429 status. A body over the pinned size, a refusal such
+/// as a 404, and an address or TLS setup that is wrong fail the same way on every try.
+fn passes_on_a_retry(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::StatusCode(status) => *status == 429 || *status >= 500,
+        ureq::Error::Io(_)
+        | ureq::Error::Timeout(_)
+        | ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::Protocol(_)
+        | ureq::Error::BodyStalled => true,
+        _ => false,
+    }
+}
+
 /// Downloads the archive at `url` and unpacks it into `staging`, each step on a thread of its own: the download, which
-/// hashes what it reads, the unzip, and the unpack. An archive of another size or SHA-256 than `archive` pins fails. An error names the first step that failed: a step that stops reading stops the steps before
-/// it, whose error then names no cause of its own.
-fn unpack(url: &str, archive: &Archive, staging: &Path) -> io::Result<()> {
-    let failed = |error: &dyn std::fmt::Display| io::Error::other(format!("downloading {url} failed: {error}"));
+/// hashes what it reads, the unzip, and the unpack. An archive of another size or SHA-256 than `archive` pins fails. An
+/// error names the first step that failed: a step that stops reading stops the steps before it, whose error then names
+/// no cause of its own.
+fn unpack(url: &str, archive: &Archive, staging: &Path) -> Result<(), InstallFailure> {
+    let failed = |cause: String, transient: bool| {
+        if transient {
+            InstallFailure::Transient(cause)
+        } else {
+            InstallFailure::Permanent(io::Error::other(format!("downloading {url} failed: {cause}")))
+        }
+    };
     let body = ureq::get(url)
         .header("User-Agent", "mago")
         .call()
-        .map_err(|error| failed(&error))?
+        .map_err(|error| failed(error.to_string(), passes_on_a_retry(&error)))?
         .into_body()
         .into_with_config()
         // ureq refuses any read once its limit is reached, the read that finds the end too.
@@ -700,15 +758,22 @@ fn unpack(url: &str, archive: &Archive, staging: &Path) -> io::Result<()> {
     .map_err(|error| io::Error::other(format!("{url} can't be unpacked: {}", with_causes(&error))));
     let hashed = match joined(download) {
         Ok(hashed) => hashed,
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return unpacked,
-        Err(error) => return Err(failed(&error)),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(unpacked?),
+        Err(error) => {
+            // A read of the body fails with ureq's own error inside, as a body over the limit does, or with the error
+            // of the connection it reads.
+            let ureq = error.get_ref().and_then(|inner| inner.downcast_ref::<ureq::Error>());
+            return Err(failed(error.to_string(), ureq.is_none_or(passes_on_a_retry)));
+        }
     };
     let digest = hex(&hashed.sha256.finalize());
     if digest != archive.sha256 {
-        return Err(io::Error::other(format!("{url} has the SHA-256 {digest}, not the pinned {}", archive.sha256)));
+        return Err(
+            io::Error::other(format!("{url} has the SHA-256 {digest}, not the pinned {}", archive.sha256)).into()
+        );
     }
 
-    unpacked
+    Ok(unpacked?)
 }
 
 /// A reader that hashes what it reads.
@@ -847,6 +912,8 @@ mod tests {
     use std::io::BufRead;
     use std::io::BufReader;
     use std::net::TcpListener;
+    use std::net::TcpStream;
+    use std::ops::RangeBounds;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -957,11 +1024,36 @@ mod tests {
 
     /// `served` over HTTP on a local port, and how many requests it answered.
     fn serve(served: Vec<u8>) -> io::Result<(String, Arc<AtomicUsize>)> {
+        serve_dropping(served, 0..0)
+    }
+
+    /// `served` over HTTP on a local port, where the connection of each response whose number `dropped` holds drops
+    /// halfway through its body, as a network that drops a download does, and how many requests it answered.
+    fn serve_dropping(
+        served: Vec<u8>,
+        dropped: impl RangeBounds<usize> + Send + 'static,
+    ) -> io::Result<(String, Arc<AtomicUsize>)> {
+        listen(move |request, stream| {
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", served.len())?;
+            let sent = if dropped.contains(&request) { served.len() / 2 } else { served.len() };
+            stream.write_all(&served[..sent])
+        })
+    }
+
+    /// A local port that answers each request with `status` and no body, and how many requests it answered.
+    fn serve_status(status: &'static str) -> io::Result<(String, Arc<AtomicUsize>)> {
+        listen(move |_, stream| write!(stream, "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+    }
+
+    /// A local port whose server reads each request and answers it with `answer`, given the request's number from 0,
+    /// and how many requests it answered. A request the server fails to answer fails the install that sent it.
+    fn listen(
+        answer: impl Fn(usize, &mut TcpStream) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<(String, Arc<AtomicUsize>)> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let url = format!("http://{}/lean-test.tar.zst", listener.local_addr()?);
         let requests = Arc::new(AtomicUsize::new(0));
         let answered = Arc::clone(&requests);
-        // A request the server fails to answer fails the install that sent it.
         std::thread::spawn(move || -> io::Result<()> {
             for stream in listener.incoming() {
                 let mut stream = stream?;
@@ -970,9 +1062,7 @@ mod tests {
                 while reader.read_line(&mut line)? > 2 {
                     line.clear();
                 }
-                answered.fetch_add(1, Ordering::SeqCst);
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", served.len())?;
-                stream.write_all(&served)?;
+                answer(answered.fetch_add(1, Ordering::SeqCst), &mut stream)?;
             }
 
             Ok(())
@@ -1034,6 +1124,64 @@ mod tests {
             assert_eq!(lake.lean, cache.path().join("lean/lean-test"));
         }
         assert!(!cache.path().join("lean/lean-test.staging").exists());
+
+        Ok(())
+    }
+
+    /// Installs that start together on an empty cache, as the compiles of `sharp/bin/spec` do, each get Lean when the
+    /// network drops the first download: the install that took the lock downloads again, and the others use its Lean.
+    #[test]
+    fn installs_that_start_together_each_get_lean_when_the_first_download_drops() -> io::Result<()> {
+        let bytes = lean_archive()?;
+        let archive = archive(&bytes);
+        let (url, requests) = serve_dropping(bytes, 0..1)?;
+        let cache = tempfile::tempdir()?;
+
+        let installed: Vec<Result<PathBuf, String>> = std::thread::scope(|scope| {
+            #[allow(clippy::needless_collect)]
+            let installs: Vec<_> =
+                std::iter::repeat_with(|| scope.spawn(|| install_from(&url, &archive, cache.path()))).take(4).collect();
+            installs
+                .into_iter()
+                .map(|install| match install.join() {
+                    Ok(installed) => installed.map(|lake| lake.lean).map_err(|error| error.to_string()),
+                    Err(_) => Err("an install panicked".to_owned()),
+                })
+                .collect()
+        });
+
+        assert_eq!(installed, vec![Ok(cache.path().join("lean/lean-test")); 4]);
+        assert_eq!(requests.load(Ordering::SeqCst), 2, "the dropped download and the one after it");
+        assert_eq!(lean_in(cache.path())?, "lake\n");
+        assert!(!cache.path().join("lean/lean-test.staging").exists());
+
+        Ok(())
+    }
+
+    /// A download that drops on every try fails the install once its three tries are spent, and a download the server
+    /// refuses is not tried again. Each error names the step and its cause, and leaves no Lean and no staging folder.
+    #[test]
+    fn a_download_that_drops_every_time_or_is_refused_fails_the_install_with_its_cause() -> io::Result<()> {
+        let bytes = lean_archive()?;
+        let archive = archive(&bytes);
+        for (failure, (url, requests), tries, cause) in [
+            (
+                "a download that drops on every try",
+                serve_dropping(bytes, ..)?,
+                3,
+                "failed on each of 3 tries: Peer disconnected",
+            ),
+            ("a download the server refuses", serve_status("404 Not Found")?, 1, "failed: http status: 404"),
+        ] {
+            let cache = tempfile::tempdir()?;
+
+            let failed = install_from(&url, &archive, cache.path()).err().map(|failed| failed.to_string());
+
+            assert_eq!(failed, Some(format!("downloading {url} {cause}")), "{failure}");
+            assert_eq!(requests.load(Ordering::SeqCst), tries, "{failure}");
+            assert!(!cache.path().join("lean/lean-test").exists(), "{failure}");
+            assert!(!cache.path().join("lean/lean-test.staging").exists(), "{failure}");
+        }
 
         Ok(())
     }
