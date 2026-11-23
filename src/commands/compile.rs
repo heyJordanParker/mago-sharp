@@ -973,10 +973,103 @@ fn host_compiled_path(
     sources: &BTreeMap<String, Found>,
     file: &File,
 ) -> Result<Option<PathBuf>, DatabaseError> {
-    let compiled_folder = root.join(unit::COMPILED_FOLDER);
+    Ok(compiled_path_of(root, sources, file)?.and_then(|compiled| in_hosts_folder(root, folder, &compiled)))
+}
 
-    Ok(compiled_path_of(root, sources, file)?
-        .and_then(|compiled| compiled.strip_prefix(&compiled_folder).ok().map(|relative| folder.join(relative))))
+/// Where the hosts' `folder` of the project at `root` keeps the compiled file the project's `.sharp` folder keeps at
+/// `compiled`, or none when `compiled` is outside that folder.
+fn in_hosts_folder(root: &Path, folder: &Path, compiled: &Path) -> Option<PathBuf> {
+    compiled.strip_prefix(root.join(unit::COMPILED_FOLDER)).ok().map(|relative| folder.join(relative))
+}
+
+/// Whether the hosts' `folder` of the project at `root` holds, for each standard library file among `sources`, a
+/// compiled file the engine runs: one this checker build wrote from the file as it is now, none of whose inputs changed
+/// since. A standard library file is one whose nearest `composer.json` names the library's package, as the loader
+/// marks it.
+fn holds_the_standard_library(root: &Path, folder: &Path, sources: &BTreeMap<String, Found>) -> bool {
+    let mut manifests = Manifests::default();
+    let library: Vec<(&String, &Found)> = sources
+        .iter()
+        .filter(|(name, _)| {
+            name.ends_with(".sharp")
+                && root
+                    .join(name)
+                    .parent()
+                    .and_then(|directory| nearest_manifest(directory, &mut manifests))
+                    .is_some_and(|manifest| manifest.name() == Some(STANDARD_LIBRARY_PACKAGE))
+        })
+        .collect();
+
+    library.par_iter().all(|(name, Found(_, real))| {
+        let real = root.join(real.as_deref().unwrap_or(name));
+        let Some(compiled) =
+            unit::compiled_path_of_real(root, &real).and_then(|compiled| in_hosts_folder(root, folder, &compiled))
+        else {
+            return false;
+        };
+        let (Ok(Some(bytes)), Ok(Some(source))) = (read_listed(&compiled), read_listed(&real)) else {
+            return false;
+        };
+
+        unit::header(&bytes).is_ok_and(|header| {
+            header.checker == BUILD_ID.to_be_bytes() && header.source_hash == unit::source_hash(&source)
+        }) && unit::inputs_changed(root, &bytes).is_ok_and(|changed| !changed)
+    })
+}
+
+/// Lowers the standard library alone into the hosts' `folder` of the project at `root`, whose source files are
+/// `sources`, against `library`: the compiled file of each library file of `database`, the project's database as
+/// [`with_packages`] gives it, written only when its bytes changed, and no other file, so the compile of the whole
+/// project that follows writes the rest of the folder and its record. The library reads none of the project's files,
+/// so its analysis holds the library and Composer's packages alone, and runs as the hosts' compile does, without the
+/// hosts, on an orchestrator of its own, since the compile's orchestrator records what the hosts are asked.
+///
+/// # Errors
+///
+/// Returns the error of analyzing the library or of writing a compiled file.
+fn write_standard_library(
+    configuration: &Configuration,
+    root: &Path,
+    folder: &Path,
+    sources: &BTreeMap<String, Found>,
+    database: &Database<'static>,
+    library: &unit::Library,
+) -> Result<(), Error> {
+    let mut alone = database.clone();
+    let project: Vec<FileId> = alone
+        .files()
+        .filter(|file| file.file_type == FileType::Host && !file.is_standard_library)
+        .map(|file| file.id)
+        .collect();
+    for id in project {
+        alone.delete(id);
+    }
+    let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
+    let mut server = Server::new(alone, decode_prelude, server_settings(&orchestrator)).keeping_lowering_inputs();
+    server.analyze()?;
+    let held = server.database().read_only();
+    let (compiled, write) = (host_compiled(root, folder, sources), host_write(root, folder, sources));
+    // A file whose errors the lowering does not survive is refused, whatever panic message its lowering printed, and the
+    // compile of the whole project reports it.
+    let printing = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|panic| tracing::debug!("{panic}")));
+    let compilations = server.compile(
+        Folder { last: &CompiledFiles::default(), compiled: &compiled, intact: &mut |_: &File| false, write: &write },
+        None,
+        |path| stamp_of(root, &held, path),
+        |_, _, _| Ok(Default::default()),
+        library,
+        |_| IssueCollection::default(),
+    );
+    std::panic::set_hook(printing);
+    let ((compilations, _), _) = compilations?;
+    for (_, compilation) in compilations {
+        if let Compilation::Accepted(written) = compilation {
+            written?;
+        }
+    }
+
+    Ok(())
 }
 
 /// The project's database: every file the analyzer loads with the prelude, and each `.sharp` file of a package as a
@@ -1152,7 +1245,7 @@ fn is_lowered(file: &File) -> bool {
 /// analysis over: their rules only report, and each error they report in a PHP# file fails the run.
 fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
     if !configuration.extension_hosts.values().any(|host| host.enabled) {
-        let (outcome, database, _) = compiled(configuration, color_choice, None, Keeping::Nothing, None)?;
+        let (outcome, database, ..) = compiled(configuration, color_choice, None, Keeping::Nothing)?;
 
         return outcome.print(database, configuration, color_choice);
     }
@@ -1296,14 +1389,17 @@ enum Keeping {
     Hosted,
 }
 
+/// The extension hosts a run started, or none when it enables no host.
+pub(crate) type Started = Option<Arc<ExternalAnalyzerHandle>>;
+
 /// Compiles the project as `mago analyze` does before it analyzes with the hosts: into the `.sharp` folder as
 /// `mago compile --no-extensions` does, and into the hosts' folder as [`compile_for_hosts`] does while it is out of
-/// date, from one analysis without the hosts and one lowering. The project's hosts start beside the compile, which
-/// reads what they register before it analyzes. Returns the started hosts, the outcome of the compile into the `.sharp`
-/// folder, and what the run reports from when `analysis` is set, as a run that analyzes the files as the compile reads
-/// them sets it: the compile's analysis when no host is enabled, and that analysis with the return-type requests it
-/// recorded, which the run takes over with the hosts, when one is. With `analysis` unset, the run reports from the files
-/// it loaded.
+/// date, from one analysis without the hosts and one lowering. The project's hosts start beside the compile once the
+/// hosts' folder holds the standard library, and the compile reads what they register before it analyzes. Returns the
+/// started hosts, the outcome of the compile into the `.sharp` folder, and what the run reports from when `analysis` is
+/// set, as a run that analyzes the files as the compile reads them sets it: the compile's analysis when no host is
+/// enabled, and that analysis with the return-type requests it recorded, which the run takes over with the hosts, when
+/// one is. With `analysis` unset, the run reports from the files it loaded.
 ///
 /// # Errors
 ///
@@ -1312,17 +1408,8 @@ pub(crate) fn compile_with_hosts(
     configuration: &Configuration,
     color_choice: ColorChoice,
     analysis: bool,
-) -> Result<(Option<Arc<ExternalAnalyzerHandle>>, Outcome, Loaded), Error> {
+) -> Result<(Started, Outcome, Loaded), Error> {
     let hosts = HostsCompile::new(configuration)?;
-    // Each host's interpreters start on the threads that send it requests, after the compile wrote the hosts' folder,
-    // so the classes they load are the ones it wrote.
-    let started = start_external_analyzer(
-        &hosts.extension_hosts,
-        configuration.php_version,
-        &configuration.analyzer.plugins,
-        configuration.analyzer.disable_default_plugins,
-        &configuration.environment,
-    );
     let mut without_hosts = configuration.clone();
     without_hosts.extension_hosts.clear();
     let keeping = match (analysis, hosts.enabled) {
@@ -1330,8 +1417,8 @@ pub(crate) fn compile_with_hosts(
         (true, true) => Keeping::Hosted,
         (false, _) => Keeping::Files,
     };
-    let (outcome, _, loaded) =
-        compiled(&without_hosts, color_choice, hosts.enabled.then_some(&hosts), keeping, started.as_ref())?;
+    let (outcome, _, loaded, started) =
+        compiled(&without_hosts, color_choice, hosts.enabled.then_some(&hosts), keeping)?;
 
     Ok((started, outcome, loaded))
 }
@@ -1340,11 +1427,16 @@ pub(crate) fn compile_with_hosts(
 /// does, and into the folder of `hosts`, when given, while that folder is out of date, under the folder's lock as
 /// [`compile_for_hosts`] takes it. Each folder is current by its own record, so a `.sharp` folder whose record holds is
 /// left as it is, and a hosts' folder out of date beside it, as a cleared cache leaves it, compiles alone as
-/// [`compile_for_hosts`] compiles it. Else both compile from the same analysis and lowerings. With `keeping`
-/// [`Keeping::Hosted`], what `started` registers decides whether the compile records the hosts' return-type requests
-/// or keeps its scans. Returns the outcome of the compile into the `.sharp` folder, with the database its issues point
-/// into, and what `keeping` names, nothing when the compile had nothing to do or when its analysis reports in no file
-/// of the project.
+/// [`compile_for_hosts`] compiles it. Else both compile from the same analysis and lowerings.
+///
+/// The hosts of `hosts` start beside the compile, once their folder holds the compiled file of each standard library
+/// file, since a host's file runs as its worker starts, before the compile reads what the host registers, and may
+/// construct a library class there, as a host that builds its services does. A folder that lacks one, as a clean tree
+/// or a cleared cache leaves it, gets the standard library lowered alone into it first. With `keeping`
+/// [`Keeping::Hosted`], what the hosts register decides whether the compile records their return-type requests or keeps
+/// its scans. Returns the outcome of the compile into the `.sharp` folder, with the database its issues point into,
+/// what `keeping` names, nothing when the compile had nothing to do or when its analysis reports in no file of the
+/// project, and the started hosts.
 ///
 /// # Errors
 ///
@@ -1354,8 +1446,18 @@ fn compiled(
     color_choice: ColorChoice,
     hosts: Option<&HostsCompile>,
     keeping: Keeping,
-    started: Option<&Arc<ExternalAnalyzerHandle>>,
-) -> Result<(Outcome, ReadDatabase, Loaded), Error> {
+) -> Result<(Outcome, ReadDatabase, Loaded, Started), Error> {
+    let start = || {
+        hosts.and_then(|hosts| {
+            start_external_analyzer(
+                &hosts.extension_hosts,
+                configuration.php_version,
+                &configuration.analyzer.plugins,
+                configuration.analyzer.disable_default_plugins,
+                &configuration.environment,
+            )
+        })
+    };
     let workspace = configuration.source.workspace.as_path();
     let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.to_path_buf(), error))?;
     let compiled_folder = root.join(unit::COMPILED_FOLDER);
@@ -1404,12 +1506,16 @@ fn compiled(
             hosts.hold(lock, held, exclusive, compiled)?;
         }
 
-        return Ok((std::mem::take(&mut record.outcome), database, Loaded::Nothing));
+        return Ok((std::mem::take(&mut record.outcome), database, Loaded::Nothing, start()));
     }
     let (hosts, held) = match hosts {
         Some((hosts, (lock, held, exclusive, stale))) => (stale.then_some(hosts), Some((hosts, lock, held, exclusive))),
         None => (None, None),
     };
+    // A stale hosts' folder that holds each standard library file's compiled file lets the hosts start while the
+    // compile loads the project. Else they start once the library is lowered into it.
+    let library_compiled = hosts.is_none_or(|hosts| holds_the_standard_library(&root, &hosts.folder, &sources));
+    let mut started = library_compiled.then(start).flatten();
     // The last compile's outputs, which this one keeps unread while their status holds.
     let outputs = last.map(|mut record| std::mem::take(&mut record.outputs)).unwrap_or_default();
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
@@ -1440,13 +1546,6 @@ fn compiled(
         (hosts, outputs, last, record)
     });
 
-    // The run takes this analysis over with the hosts, so the analysis records what it would ask them, unless they
-    // reach every file, which the run then analyzes from scratch from this analysis's scans.
-    let records = match started.filter(|_| keeping == Keeping::Hosted) {
-        Some(started) => orchestrator.record_return_type_requests(Arc::clone(started)).map_err(AnalysisError::from)?,
-        None => false,
-    };
-
     let database = orchestrator.load_listed(workspace, &listing)?.into_static();
     let loaded_files = (keeping == Keeping::Files).then(|| database.clone());
     let (database, included) = with_packages(database);
@@ -1468,8 +1567,24 @@ fn compiled(
                 outcome,
                 database,
                 loaded_files.map_or(Loaded::Nothing, |files| Loaded::Files(Box::new(files), Scans::default())),
+                started.or_else(start),
             ));
         }
+    };
+    if !library_compiled {
+        if let Some((hosts, ..)) = &hosts {
+            let phase = Phase::start("hosts");
+            silenced(|| write_standard_library(configuration, &root, &hosts.folder, &sources, &database, &library))?;
+            phase.end();
+        }
+        started = start();
+    }
+
+    // The run takes this analysis over with the hosts, so the analysis records what it would ask them, unless they
+    // reach every file, which the run then analyzes from scratch from this analysis's scans.
+    let records = match started.as_ref().filter(|_| keeping == Keeping::Hosted) {
+        Some(started) => orchestrator.record_return_type_requests(Arc::clone(started)).map_err(AnalysisError::from)?,
+        None => false,
     };
     let package_files = package_files(&database, &included);
     let reports = matches!(keeping, Keeping::Analysis | Keeping::Hosted)
@@ -1726,7 +1841,7 @@ fn compiled(
         None => Loaded::Nothing,
     };
 
-    Ok((outcome, database, loaded))
+    Ok((outcome, database, loaded, started))
 }
 
 /// Keeps `record` at `path`, the record of a compile whose `outcome` it prints again while every input is as it was,

@@ -606,6 +606,97 @@ fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
     assert_eq!(std::fs::read(compiled(root, "app/Word.sharp")).unwrap(), compiled_by_analyze);
 }
 
+/// An extension host whose file constructs the standard library's `SystemFiles` as it loads, through an autoloader that
+/// maps `Sharp\` to the installed library, as a host that builds the project's services at its start does.
+const HOST_CONSTRUCTING_SYSTEM_FILES: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+spl_autoload_register(static function (string $class): void {
+    $file = dirname(__DIR__) . '/vendor/heyjordanparker/php-sharp-composer/library/' . str_replace('\\', '/', $class) . '.sharp';
+    if (is_file($file)) {
+        require $file;
+    }
+});
+
+new Sharp\IO\SystemFiles();
+
+(new Worker(new Extension('files', 'Files', '0.0.0')))->run();
+"#;
+
+/// A project that installs the standard library, with the host [`HOST_CONSTRUCTING_SYSTEM_FILES`].
+fn project_with_a_host_constructing_system_files() -> tempfile::TempDir {
+    let directory = library_project(&[("app/Order.sharp", ORDER), ("tools/host.php", HOST_CONSTRUCTING_SYSTEM_FILES)]);
+    write(
+        directory.path(),
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.files]\nfile = \"tools/host.php\"\n",
+    );
+    directory
+}
+
+/// The standard library's `SystemFiles`, as the project installs it.
+const SYSTEM_FILES: &str = "vendor/heyjordanparker/php-sharp-composer/library/Sharp/IO/SystemFiles.sharp";
+
+/// A host loads the standard library's classes from the compile for the hosts, so a host that constructs one as it
+/// loads starts on a tree `mago --no-extensions compile` compiled.
+#[test]
+fn a_host_that_constructs_a_standard_library_class_starts_on_a_tree_compiled_without_hosts() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the host compile test") {
+        return;
+    }
+    let directory = project_with_a_host_constructing_system_files();
+    let root = directory.path();
+    let without_hosts = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "--no-extensions", "compile"])
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root),
+    )
+    .unwrap();
+    assert!(without_hosts.status.success(), "{}", printed(&without_hosts));
+    assert!(compiled(root, SYSTEM_FILES).is_file(), "the compile without hosts wrote {SYSTEM_FILES}");
+
+    compile_succeeds(root);
+}
+
+/// A host that constructs a standard library class as it loads starts on a tree no compile ran on, in one
+/// `mago compile`, and the next compile of that tree writes nothing.
+#[test]
+fn a_host_that_constructs_a_standard_library_class_starts_on_a_clean_tree_and_the_next_compile_writes_nothing() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the host compile test") {
+        return;
+    }
+    let directory = project_with_a_host_constructing_system_files();
+    let root = directory.path();
+
+    let project: String = source_hash(root.canonicalize().unwrap().as_os_str().as_encoded_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let hosts = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache/mago/hosts").join(project);
+    let written_at = || {
+        [
+            compiled(root, "app/Order.sharp"),
+            compiled(root, SYSTEM_FILES),
+            hosts.join(SYSTEM_FILES).with_extension("sharpc"),
+        ]
+        .map(|path| std::fs::metadata(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())).modified())
+        .map(Result::unwrap)
+    };
+
+    compile_succeeds(root);
+    let written = written_at();
+    compile_succeeds(root);
+
+    assert_eq!(written_at(), written, "the compile wrote nothing");
+}
+
 /// `mago analyze` compiles the project's `.sharp` folder and the hosts' folder from one analysis without the hosts and
 /// one lowering before it analyzes with the hosts, so on a fresh tree its log holds one compile, and the host and the
 /// `.sharp` folder each get every file.
