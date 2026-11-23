@@ -39,7 +39,8 @@ impl<S: Subscriber> Layer<S> for CountWarnings {
     }
 }
 
-/// Initializes the logger with the specified directive and environment variable.
+/// Initializes the logger with the specified directive and environment variable. Every build prints each line as a
+/// release build does: its level and its message, with no time, target or thread name.
 ///
 /// # Arguments
 ///
@@ -47,18 +48,19 @@ impl<S: Subscriber> Layer<S> for CountWarnings {
 /// * `env_var` - The environment variable used to override log filtering rules.
 /// * `color_choice` - The color choice for log output.
 pub fn initialize_logger(directive: impl Into<Directive>, env_var: impl Into<String>, color_choice: ColorChoice) {
-    let logger = fmt()
+    fmt()
         .with_env_filter(
             EnvFilter::builder().with_default_directive(directive.into()).with_env_var(env_var.into()).from_env_lossy(),
         )
         .with_ansi(should_use_colors(color_choice))
-        .with_writer(LoggerWriter::stderr);
-
-    if cfg!(debug_assertions) {
-        logger.with_target(true).with_thread_names(true).finish().with(CountWarnings).init();
-    } else {
-        logger.without_time().with_target(false).with_thread_names(false).compact().finish().with(CountWarnings).init();
-    }
+        .with_writer(LoggerWriter::stderr)
+        .without_time()
+        .with_target(false)
+        .with_thread_names(false)
+        .compact()
+        .finish()
+        .with(CountWarnings)
+        .init();
 }
 
 /// A writer that allows feedback output to be redirected to the specified writer,

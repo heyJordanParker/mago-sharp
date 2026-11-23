@@ -38,10 +38,9 @@ fn printed(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// Whether `output` logged exactly `message` at `level`, after the timestamp, thread and target each log line starts
-/// with.
+/// Whether `output` logged exactly `message` at `level`, as each log line gives its level and then its message.
 fn logged(output: &Output, level: &str, message: &str) -> bool {
-    printed(output).lines().any(|line| line.contains(&format!(" {level} ")) && line.ends_with(&format!(": {message}")))
+    printed(output).lines().any(|line| line.trim_start() == format!("{level} {message}"))
 }
 
 /// A linked worktree whose `.git` file names a git folder that isn't there, as in a container that mounts the worktree

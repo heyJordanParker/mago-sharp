@@ -14,6 +14,7 @@ use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_bridge::unit::stamp;
 
 use crate::common;
+use crate::common::Watch;
 use crate::common::compiling::LAWFUL_MONEY;
 use crate::common::compiling::LEGACY;
 use crate::common::compiling::MONEY;
@@ -1420,35 +1421,24 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
         "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nfile = \"tools/host.php\"\n",
     );
     let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
-    let wait_for_lines = |lines: usize| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while log().lines().count() < lines && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    };
 
-    // The watch's own log, outside the watched project, so a failure shows what the watch saw.
-    let watch_log = tempfile::NamedTempFile::new().unwrap();
-    let mut watch = process::spawn(
+    let watch = Watch::start(
         Command::new(env!("CARGO_BIN_EXE_mago"))
             .args(["--no-version-check", "--colors", "never", "analyze", "--watch"])
             .env("MAGO_LOG", "info,mago=debug,mago_database=debug")
             .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
             .current_dir(root)
-            .stdout(std::process::Stdio::null())
-            .stderr(watch_log.reopen().unwrap()),
-    )
-    .unwrap();
-    wait_for_lines(1);
+            .stdout(Stdio::null()),
+    );
+    let started = watch.until(|seen| seen.contains("Initial analysis complete"));
     write(root, "app/Word.sharp", &word("second"));
-    wait_for_lines(2);
-    watch.kill().unwrap();
-    watch.wait().unwrap();
+    let rechecked = started && watch.until(|seen| seen.contains("Analysis complete."));
+    let seen = watch.stop();
 
     let hosts = log();
     let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.split_once(' ')).collect();
-    let failure = format!("{hosts}\n{}", std::fs::read_to_string(watch_log.path()).unwrap());
-    assert!(runs.len() >= 2, "{failure}");
+    let failure = format!("{hosts}\n{seen}");
+    assert!(rechecked && runs.len() >= 2, "{failure}");
     assert_eq!(runs[0].1, "first", "{failure}");
     assert_eq!(runs[1].1, "second", "{failure}");
     assert_ne!(runs[0].0, runs[1].0, "{failure}");
@@ -1518,36 +1508,24 @@ fn a_watch_keeps_a_worker_that_never_loaded_the_edited_class() {
         "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.rule]\nfile = \"tools/host.php\"\n",
     );
     let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
-    let watch_log = tempfile::NamedTempFile::new().unwrap();
-    let seen = || std::fs::read_to_string(watch_log.path()).unwrap();
-    let within = |done: &dyn Fn() -> bool| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while !done() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        done()
-    };
 
-    let mut watch = process::spawn(
+    let watch = Watch::start(
         Command::new(env!("CARGO_BIN_EXE_mago"))
             .args(["--no-version-check", "--colors", "never", "analyze", "--watch"])
             .env("MAGO_LOG", "info")
             .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
             .current_dir(root)
-            .stdout(Stdio::null())
-            .stderr(watch_log.reopen().unwrap()),
-    )
-    .unwrap();
-    let started = within(&|| seen().contains("Initial analysis complete"));
+            .stdout(Stdio::null()),
+    );
+    let started = watch.until(|seen| seen.contains("Initial analysis complete"));
     let first = log();
     write(root, "app/Word.sharp", &word("second"));
-    let rechecked = within(&|| seen().contains("Analysis complete."));
-    watch.kill().unwrap();
-    watch.wait().unwrap();
+    let rechecked = started && watch.until(|seen| seen.contains("Analysis complete."));
+    let seen = watch.stop();
 
-    let failure = format!("{}\n{}", log(), seen());
-    assert!(started && rechecked, "{failure}");
-    assert!(!seen().contains("Restarting analysis"), "{failure}");
+    let failure = format!("{}\n{seen}", log());
+    assert!(rechecked, "{failure}");
+    assert!(!seen.contains("Restarting analysis"), "{failure}");
     let after = log();
     let recheck: Vec<&str> = after.strip_prefix(first.as_str()).unwrap_or_default().lines().collect();
     let process = first.lines().next().and_then(|line| line.split_once(' ')).map(|(process, _)| process);
@@ -1599,27 +1577,16 @@ fn a_watch_reports_an_issue_that_points_into_a_vendor_file_the_autoload_maps_ser
     );
 
     let reports = tempfile::NamedTempFile::new().unwrap();
-    let watch_log = tempfile::NamedTempFile::new().unwrap();
-    let mut watch =
-        process::spawn(analyze(true).stdout(reports.reopen().unwrap()).stderr(watch_log.reopen().unwrap())).unwrap();
-    let seen = || std::fs::read_to_string(watch_log.path()).unwrap();
-    let within = |done: &dyn Fn() -> bool| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while !done() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        done()
-    };
-    let started = within(&|| seen().contains("Initial analysis complete") || seen().contains("ERROR"));
+    let mut watch = Watch::start(analyze(true).stdout(reports.reopen().unwrap()));
+    let started = watch.until(|seen| seen.contains("Initial analysis complete") || seen.contains("ERROR"));
     let first = std::fs::read_to_string(reports.path()).unwrap();
     write(root, "app/Order.php", &order(6));
-    let rechecked = within(&|| seen().contains("Analysis complete.") || seen().contains("ERROR"));
-    let running = watch.try_wait().unwrap().is_none();
-    watch.kill().unwrap();
-    watch.wait().unwrap();
+    let rechecked = watch.until(|seen| seen.contains("Analysis complete.") || seen.contains("ERROR"));
+    let running = watch.running();
+    let seen = watch.stop();
 
-    let failure = format!("{}{}", std::fs::read_to_string(reports.path()).unwrap(), seen());
-    assert!(started && !seen().contains("ERROR"), "{failure}");
+    let failure = format!("{}{seen}", std::fs::read_to_string(reports.path()).unwrap());
+    assert!(started && !seen.contains("ERROR"), "{failure}");
     assert_eq!(first, report, "the watch's first report is the one-shot command's: {failure}");
     assert!(rechecked && running, "{failure}");
     let second = std::fs::read_to_string(reports.path()).unwrap().split_off(first.len());
@@ -1744,48 +1711,29 @@ fn a_watch_whose_changes_hold_a_deleted_file_reports_its_dependents_and_keeps_wa
         "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nfile = \"tools/host.php\"\n",
     );
 
-    // The watch's reports and log, outside the watched project, so a failure shows what the watch saw.
+    // The watch's reports, outside the watched project, so a failure shows what the watch saw.
     let reports = tempfile::NamedTempFile::new().unwrap();
-    let watch_log = tempfile::NamedTempFile::new().unwrap();
-    let mut watch = process::spawn(
+    let mut watch = Watch::start(
         Command::new(env!("CARGO_BIN_EXE_mago"))
             .args(["--no-version-check", "--colors", "never", "analyze", "--watch"])
             .env("MAGO_LOG", "info")
             .env("MAGO_REPORTING_FORMAT", "medium")
             .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
             .current_dir(root)
-            .stdout(reports.reopen().unwrap())
-            .stderr(watch_log.reopen().unwrap()),
-    )
-    .unwrap();
-    let seen = || {
-        format!(
-            "{}{}",
-            std::fs::read_to_string(reports.path()).unwrap(),
-            std::fs::read_to_string(watch_log.path()).unwrap()
-        )
-    };
-    let analyses = || seen().matches("nalysis complete").count();
-    let within = |done: &dyn Fn() -> bool| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while !done() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        done()
-    };
+            .stdout(reports.reopen().unwrap()),
+    );
+    let report = || std::fs::read_to_string(reports.path()).unwrap();
+    let rounds = |seen: &str| seen.matches("Analysis complete.").count();
     let missing = "Cannot find type `App.Price`";
 
-    let started = within(&|| analyses() >= 1);
+    let started = watch.until(|seen| seen.contains("Initial analysis complete"));
     std::fs::remove_file(root.join("app/Price.sharp")).unwrap();
-    let reported = within(&|| seen().contains(missing));
-    let running = watch.try_wait().unwrap().is_none();
-    let before = analyses();
+    let reported = started && watch.until(|seen| rounds(seen) >= 1) && report().contains(missing);
+    let running = watch.running();
     write(root, "app/Price.sharp", price);
-    let analyzed_again = within(&|| analyses() > before);
-    watch.kill().unwrap();
-    watch.wait().unwrap();
+    let analyzed_again = running && watch.until(|seen| rounds(seen) >= 2);
+    let failure = format!("{}{}", report(), watch.stop());
 
-    let failure = seen();
     assert!(started, "{failure}");
     assert!(reported, "{failure}");
     assert!(running, "{failure}");
@@ -1817,47 +1765,27 @@ fn a_watch_starts_the_hosts_again_when_another_run_compiled_an_edit_while_it_wai
     );
     let cache = tempfile::tempdir().unwrap();
     let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
-    let within = |done: &dyn Fn() -> bool| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        loop {
-            if done() {
-                return true;
-            }
-            if std::time::Instant::now() > deadline {
-                return false;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-    };
 
-    let watch_log = tempfile::NamedTempFile::new().unwrap();
-    let mut watch = process::spawn(
+    let watch = Watch::start(
         Command::new(env!("CARGO_BIN_EXE_mago"))
             .args(["--no-version-check", "--colors", "never", "analyze", "--watch"])
             .env("MAGO_LOG", "info,mago=debug,mago_database=debug")
             .env("XDG_CACHE_HOME", cache.path())
             .current_dir(root)
-            .stdout(Stdio::null())
-            .stderr(watch_log.reopen().unwrap()),
-    )
-    .unwrap();
+            .stdout(Stdio::null()),
+    );
     let watch_id = libc::pid_t::try_from(watch.id()).unwrap();
     // SAFETY: `kill` only sends a signal, to the watch alone.
     let signal = |signal| unsafe { libc::kill(watch_id, signal) } == 0;
-    let lock = || {
-        let hosts = std::fs::read_dir(cache.path().join("mago/hosts")).ok()?.next()?.ok()?.path();
-        std::fs::File::options().write(true).open(hosts.join("compile.lock")).ok()
+    let started = watch.until(|seen| seen.contains("Initial analysis complete"));
+    // The watch lets the hosts' folder go once it waits for a change, so the exclusive lock is taken then, and the
+    // watch is stopped while it waits.
+    let idle = started && {
+        let hosts = std::fs::read_dir(cache.path().join("mago/hosts")).unwrap().next().unwrap().unwrap().path();
+        let lock = std::fs::File::options().write(true).open(hosts.join("compile.lock")).unwrap();
+        lock.lock().unwrap();
+        signal(libc::SIGSTOP)
     };
-    let started = within(&|| log().lines().count() == 1);
-    // Stopped while it waits for a change, the watch holds no lock of the hosts' folder.
-    let idle = started
-        && within(&|| {
-            let free = signal(libc::SIGSTOP) && lock().is_some_and(|lock| lock.try_lock().is_ok());
-            if !free {
-                signal(libc::SIGCONT);
-            }
-            free
-        });
     let terminal = idle.then(|| {
         write(root, "app/Word.sharp", &word("second"));
         process::output(
@@ -1869,14 +1797,13 @@ fn a_watch_starts_the_hosts_again_when_another_run_compiled_an_edit_while_it_wai
         .unwrap()
     });
     signal(libc::SIGCONT);
-    let restarted = idle && within(&|| log().lines().count() == 3);
-    watch.kill().unwrap();
-    watch.wait().unwrap();
+    let restarted = idle && watch.until(|seen| seen.contains("Analysis complete."));
+    let seen = watch.stop();
 
     let hosts = log();
     let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.split_once(' ')).collect();
-    let failure = format!("{hosts}\n{}", std::fs::read_to_string(watch_log.path()).unwrap());
-    assert!(idle, "the watch never let the hosts' folder go: {failure}");
+    let failure = format!("{hosts}\n{seen}");
+    assert!(idle, "the watch never waited for a change: {failure}");
     let terminal = terminal.unwrap();
     assert!(terminal.status.success(), "{}", printed(&terminal));
     assert!(restarted, "{failure}");
@@ -3338,7 +3265,7 @@ fn compile_names_the_folder_of_the_sharp_folder_it_cannot_create() {
     assert!(!output.status.success(), "{}", printed(&output));
     assert!(
         printed(&output)
-            .contains(&format!("mago: can't create the folder `{}`: Permission denied (os error 13)", app.display())),
+            .contains(&format!("can't create the folder `{}`: Permission denied (os error 13)", app.display())),
         "{}",
         printed(&output)
     );
