@@ -16,6 +16,7 @@ use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::metadata::module::Lifetime;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
+use mago_codex::metadata::module::STANDARD_LIBRARY_NAMESPACE;
 use mago_codex::metadata::module::service_id;
 use mago_codex::metadata::module::top_dispatcher_namespaces;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
@@ -470,16 +471,22 @@ impl<'ctx> Services<'ctx> {
     }
 
     /// The binding that serves the service of the id `service` to `requester`, a class of `namespace`: the nearest
-    /// namespace's module first, an override before its base module, and in one module a binding `for` the requester
-    /// before one for any class.
+    /// namespace's module first, up to the root namespace's, then the standard library's module, as the container
+    /// reads them, an override before its base module, and in one module a binding `for` the requester before one for
+    /// any class.
     fn binding_for(
         &self,
         namespace: &[u8],
         service: Word,
         requester: Option<Word>,
     ) -> Option<(&'ctx ModuleMetadata, &'ctx BindingMetadata)> {
-        let mut namespace = namespace;
-        loop {
+        let namespaces = std::iter::successors(Some(namespace), |namespace| {
+            let above = namespace.iter().rposition(|byte| *byte == b'\\').unwrap_or(0);
+
+            (!namespace.is_empty()).then(|| &namespace[..above])
+        })
+        .chain([STANDARD_LIBRARY_NAMESPACE.as_bytes()]);
+        for namespace in namespaces {
             let modules = self
                 .overrides
                 .iter()
@@ -498,12 +505,9 @@ impl<'ctx> Services<'ctx> {
                     return Some((module, binding));
                 }
             }
-
-            if namespace.is_empty() {
-                return None;
-            }
-            namespace = namespace.iter().rposition(|byte| *byte == b'\\').map_or(&[], |end| &namespace[..end]);
         }
+
+        None
     }
 }
 

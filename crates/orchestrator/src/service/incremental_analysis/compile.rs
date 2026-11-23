@@ -26,6 +26,7 @@ use mago_codex::graph::strongly_connected_parts;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
+use mago_codex::metadata::module::STANDARD_LIBRARY_NAMESPACE;
 use mago_codex::metadata::module::top_dispatcher_namespaces;
 use mago_codex::reference::CascadeEdge;
 use mago_codex::reference::ReferenceOrigin;
@@ -544,7 +545,7 @@ impl IncrementalAnalysisService {
             .codebase
             .modules
             .iter()
-            .filter(|module| !module.namespace.as_bytes().is_empty())
+            .filter(|module| module.namespace.as_bytes() != STANDARD_LIBRARY_NAMESPACE.as_bytes())
             .filter_map(|module| {
                 let environment = match module.kind {
                     ModuleKind::Base => None,
@@ -1852,8 +1853,8 @@ struct ModuleFiles {
 
 impl ModuleFiles {
     /// The files of the modules that serve `namespace`, in lowercase as PHP writes it, and each namespace above it but
-    /// the root one, whose modules are the standard library's: each recorded base module of them, and each of
-    /// `environments`', and the `Module.sharp` and `Module.<Environment>.sharp` of each of their folders.
+    /// the root one: each recorded base module of them, and each of `environments`', and the `Module.sharp` and
+    /// `Module.<Environment>.sharp` of each of their folders.
     fn paths(&self, namespace: &[u8], environments: &[Word]) -> Vec<Vec<u8>> {
         let names: Vec<Vec<u8>> = std::iter::once(MODULE_FILE.as_bytes().to_vec())
             .chain(environments.iter().map(|environment| [b"Module.", environment.as_bytes(), b".sharp"].concat()))

@@ -697,12 +697,6 @@ where
     };
     let namespace = match &module.parent {
         Some(parent) => context.resolved_names.get(&parent.name),
-        // The standard library's module, `Sharp`'s, serves the root namespace, so its bindings reach every class after
-        // the bindings of the class's own namespaces. Another module of the library's package, as a project's on a
-        // fresh clone of the package, serves its own namespace.
-        None if context.file.is_standard_library && scope.namespace_name() == Some(b"Sharp".as_slice()) => {
-            b"".as_slice()
-        }
         None => scope.namespace_name().unwrap_or_default(),
     };
     let imports = module

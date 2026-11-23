@@ -7,6 +7,12 @@ use crate::metadata::ttype::TypeMetadata;
 use crate::ttype::TType;
 use crate::ttype::union::TUnion;
 
+/// The namespace of the standard library's module, in lowercase, as a module keeps it.
+///
+/// Spec section 32: its bindings serve every class, after the bindings of the class's own namespaces, and the
+/// library's autoloader reads it, so no listener table records it.
+pub const STANDARD_LIBRARY_NAMESPACE: &str = "sharp";
+
 /// A PHP# module, spec section 32: the services it binds for the classes of one namespace and the namespaces below it.
 ///
 /// Modules order by their file's name, then by where the file declares them, so the order is the same whatever order
@@ -20,8 +26,7 @@ pub struct ModuleMetadata {
     /// The declaration, from `module` to its closing brace.
     pub span: Span,
     /// The full name of the namespace whose classes it serves, in lowercase: its own namespace for a base module, the
-    /// root namespace for the standard library's, and the namespace its header names for an environment or test
-    /// module.
+    /// standard library's included, and the namespace its header names for an environment or test module.
     pub namespace: Word,
     pub kind: ModuleKind,
     /// The namespaces its `imports` line lists, each by its full name as written and with where it is written. Empty
@@ -147,13 +152,15 @@ pub(crate) fn populate_service_ids(codebase: &mut CodebaseMetadata) {
 /// The namespaces of the app's top modules that bind the dispatcher, spec section 15.
 ///
 /// Of the base and environment modules outside `vendor/` that bind it, they are the namespaces with the fewest parts,
-/// in order. The standard library's module, the one module of the root namespace, is never the app's. "An app replaces
-/// the dispatcher once at startup", so one namespace is the app's dispatcher, and two are an error.
+/// in order. The standard library's module is never the app's. "An app replaces the dispatcher once at startup", so
+/// one namespace is the app's dispatcher, and two are an error.
 #[must_use]
 pub fn top_dispatcher_namespaces(modules: &[ModuleMetadata], codebase: &CodebaseMetadata) -> Vec<Word> {
     let mut binding: Vec<Word> = modules
         .iter()
-        .filter(|module| module.kind != ModuleKind::Test && !module.namespace.as_bytes().is_empty())
+        .filter(|module| {
+            module.kind != ModuleKind::Test && module.namespace.as_bytes() != STANDARD_LIBRARY_NAMESPACE.as_bytes()
+        })
         .filter(|module| !module.file.as_bytes().starts_with(b"vendor/"))
         .filter(|module| module.bindings.iter().any(|binding| binding.binds_dispatcher(codebase)))
         .map(|module| module.namespace)

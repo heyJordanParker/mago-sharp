@@ -1106,14 +1106,14 @@ fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_val
     }
 }
 
-/// Spec section 32: the standard library's module binds the services the library gives, such as `Environment`, for
-/// every namespace, so its table names the root namespace, which every class's lookup reaches last. An app's module
-/// names its own namespace. Each row is a module file, its code and the namespace its table names.
+/// Spec section 32: every base module's table names its own namespace, the standard library's too, whose bindings, as
+/// `Environment`'s, every class's lookup reaches after those of the class's own namespaces. Each row is a module file,
+/// its code and the namespace its table names.
 #[test]
-fn the_standard_library_module_binds_its_services_for_the_root_namespace() {
+fn the_standard_library_module_names_its_own_namespace_as_any_module_does() {
     let binding = "import Sharp.System.Environment;\nimport Sharp.System.SystemEnvironment;\n\nmodule\n{\n    singleton Environment = SystemEnvironment;\n}\n";
     for (path, namespace, expected) in [
-        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Module.sharp", "Sharp", "ZVAL \"\"\n"),
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Module.sharp", "Sharp", "ZVAL \"sharp\"\n"),
         ("app/Module.sharp", "App", "ZVAL \"app\"\n"),
     ] {
         let code = format!("namespace {namespace};\n\n{binding}");
