@@ -1333,11 +1333,14 @@ pub(crate) fn compile_with_hosts(
 }
 
 /// Compiles the project with `configuration`, which enables no extension host, into its `.sharp` folder, as [`compile`]
-/// does, and into the folder of `hosts`, when given, while that folder is out of date, from the same analysis and
-/// lowerings, under the folder's lock as [`compile_for_hosts`] takes it. With `keeping` [`Keeping::Hosted`], what `started` registers decides
-/// whether the compile records the hosts' return-type requests or keeps its scans. Returns the outcome of the
-/// compile into the `.sharp` folder, with the database its issues point into, and what `keeping` names, nothing when
-/// the compile had nothing to do or when its analysis reports in no file of the project.
+/// does, and into the folder of `hosts`, when given, while that folder is out of date, under the folder's lock as
+/// [`compile_for_hosts`] takes it. Each folder is current by its own record, so a `.sharp` folder whose record holds is
+/// left as it is, and a hosts' folder out of date beside it, as a cleared cache leaves it, compiles alone as
+/// [`compile_for_hosts`] compiles it. Else both compile from the same analysis and lowerings. With `keeping`
+/// [`Keeping::Hosted`], what `started` registers decides whether the compile records the hosts' return-type requests
+/// or keeps its scans. Returns the outcome of the compile into the `.sharp` folder, with the database its issues point
+/// into, and what `keeping` names, nothing when the compile had nothing to do or when its analysis reports in no file
+/// of the project.
 ///
 /// # Errors
 ///
@@ -1378,14 +1381,23 @@ fn compiled(
         .then(|| mago_database::lock::exclusive(&compiled_folder.join(WRITE_LOCK)))
         .transpose()?;
     let mut last = Record::read(&record_path);
-    if hosts.as_ref().is_none_or(|(_, (_, _, _, stale))| !stale)
-        && let Some(record) = last.as_mut()
+    if let Some(record) = last.as_mut()
         && every_input_is_current(record, configuration, &root, &sources, &mut filesystems)
         && let Some(database) = record.outcome.report_database(&root)?
     {
         drop(writing);
-        if let Some((hosts, (lock, held, exclusive, _))) = hosts {
-            hosts.hold(lock, held, exclusive, None)?;
+        if let Some((hosts, (lock, held, exclusive, stale))) = hosts {
+            let compiled = if stale {
+                let phase = Phase::start("hosts");
+                let (compiled, _) = silenced(|| {
+                    compile_into(configuration, &root, &hosts.folder, &orchestrator, &listing, &sources, filesystems)
+                })?;
+                phase.end();
+                Some(compiled)
+            } else {
+                None
+            };
+            hosts.hold(lock, held, exclusive, compiled)?;
         }
 
         return Ok((std::mem::take(&mut record.outcome), database, Loaded::Nothing));
@@ -2853,15 +2865,19 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
         files
     }
 
-    /// Spec section 27: the `.sharp` folder holds the one compile of a tree, written from the analysis without the
-    /// extension hosts whichever command writes it, so with a host that types a call, `mago compile` and the compile a
-    /// whole `mago analyze` runs each leave what the other wrote, in either order.
-    #[test]
-    fn a_compile_and_a_whole_analyze_s_compile_of_a_tree_the_other_left_current_write_nothing() {
-        if !php_sdk() {
-            return;
-        }
-        let (_directory, root, _) = project();
+    /// Each file under `folder` that `run` wrote, added or deleted.
+    fn written_under(folder: &Path, run: impl FnOnce()) -> BTreeSet<PathBuf> {
+        let before = files_as_written(folder);
+        run();
+        let after = files_as_written(folder);
+
+        before.keys().chain(after.keys()).filter(|path| before.get(*path) != after.get(*path)).cloned().collect()
+    }
+
+    /// The project of [`project`] with `App\Box`, whose `value()` the extension host [`BOX_HOST`] types, a plain PHP
+    /// function that reads it, and the host enabled, with its configuration.
+    fn boxed_project() -> (tempfile::TempDir, PathBuf, Configuration) {
+        let (directory, root, _) = project();
         write(
             &root,
             "app/Box.php",
@@ -2885,6 +2901,19 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
             ..Default::default()
         })
         .unwrap();
+
+        (directory, root, configuration)
+    }
+
+    /// Spec section 27: the `.sharp` folder holds the one compile of a tree, written from the analysis without the
+    /// extension hosts whichever command writes it, so with a host that types a call, `mago compile` and the compile a
+    /// whole `mago analyze` runs each leave what the other wrote, in either order.
+    #[test]
+    fn a_compile_and_a_whole_analyze_s_compile_of_a_tree_the_other_left_current_write_nothing() {
+        if !php_sdk() {
+            return;
+        }
+        let (_directory, root, configuration) = boxed_project();
         let folder = root.join(unit::COMPILED_FOLDER);
         let mago_compile = || {
             compile(&configuration, ColorChoice::Never).unwrap();
@@ -2892,18 +2921,30 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
         let whole_analyze = || {
             compile_with_hosts(&configuration, ColorChoice::Never, true).unwrap();
         };
-        // Each file under the `.sharp` folder that `run` wrote, added or deleted.
-        let written_by = |run: &dyn Fn()| -> BTreeSet<PathBuf> {
-            let before = files_as_written(&folder);
-            run();
-            let after = files_as_written(&folder);
-
-            before.keys().chain(after.keys()).filter(|path| before.get(*path) != after.get(*path)).cloned().collect()
-        };
 
         mago_compile();
-        assert_eq!(written_by(&whole_analyze), BTreeSet::<PathBuf>::new(), "the whole analyze after the compile");
-        assert_eq!(written_by(&mago_compile), BTreeSet::<PathBuf>::new(), "the compile after the whole analyze");
+        assert_eq!(written_under(&folder, whole_analyze), BTreeSet::new(), "the whole analyze after the compile");
+        assert_eq!(written_under(&folder, mago_compile), BTreeSet::new(), "the compile after the whole analyze");
+    }
+
+    /// Spec section 27: the hosts' folder is a cache of its own, current by its own record, so a run whose hosts'
+    /// folder lost its record, as a cleared cache leaves it, compiles the hosts' folder alone and writes nothing under
+    /// a `.sharp` folder whose record holds.
+    #[test]
+    fn a_compile_whose_hosts_folder_alone_is_stale_writes_nothing_under_sharp() {
+        if !php_sdk() {
+            return;
+        }
+        let (_directory, root, configuration) = boxed_project();
+        let hosts = HostsCompile::new(&configuration).unwrap().folder;
+        let mago_compile = || {
+            compile(&configuration, ColorChoice::Never).unwrap();
+        };
+        mago_compile();
+        std::fs::remove_file(hosts.join(INPUTS)).unwrap();
+
+        assert_eq!(written_under(&root.join(unit::COMPILED_FOLDER), mago_compile), BTreeSet::new());
+        assert!(Record::read(&hosts.join(INPUTS)).is_some(), "the hosts' folder is compiled again");
     }
 
     /// A `vendor/` file a PHP# file calls is no input of its compiled file, which `composer.lock` stands for, so the
