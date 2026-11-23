@@ -54,6 +54,10 @@ const CHUNK: u64 = 1024 * 1024;
 /// proves has a time budget of its own.
 const PROCESSOR_SECONDS: u64 = 120;
 
+/// How long Lean work writes nothing before Mago reads the processor time its group used, so a burst of output reads it
+/// once.
+const SETTLE: Duration = Duration::from_millis(100);
+
 /// The file in a library's build that names the folder of the Lean that built it, which the runner reads Lean's own
 /// modules from.
 const SYSROOT: &str = "sysroot";
@@ -254,7 +258,9 @@ pub(crate) fn output_before_deadline(command: &mut Command, input: &[u8]) -> io:
 }
 
 /// What `group`'s leader wrote and how it exited, and whether `end` ended the group once its leader wrote nothing and
-/// the group used no processor time for `deadline`. A process of the group that outlives the end, as one the kernel holds on a
+/// the group used no processor time for `deadline`. The deadline counts from the group's processor time, which it reads
+/// once the group has written nothing for [`SETTLE`]: once for each burst of writes, where it read it after each chunk
+/// of a runner's line for each module, and on Linux each read lists every process of `/proc`. A process of the group that outlives the end, as one the kernel holds on a
 /// stalled disk, keeps the group's pipes open, so the output is what the group wrote before the end, and a leader that
 /// still runs counts as ended by SIGKILL, since waiting for it could wait forever.
 fn wait_before_deadline(
@@ -273,16 +279,22 @@ fn wait_before_deadline(
     let mut open = streams.len();
     let mut waited = false;
     let mut used = processor_time(id);
+    // Whether `used` was read after the group last wrote.
+    let mut read = true;
     while open > 0 {
-        match written.recv_timeout(deadline) {
+        match written.recv_timeout(if read { deadline } else { SETTLE.min(deadline) }) {
             Ok((_, Ok(chunk))) if chunk.is_empty() => open -= 1,
             Ok((stream, Ok(chunk))) => {
                 streams[stream].extend_from_slice(&chunk);
-                used = processor_time(id);
+                read = false;
             }
             Ok((_, Err(error))) => return Err(error),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err(io::Error::other("a reader of a law checker process panicked"));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if !read => {
+                used = processor_time(id);
+                read = true;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let now = processor_time(id);
