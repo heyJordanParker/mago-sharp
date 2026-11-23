@@ -18,4 +18,13 @@ def int.text (n : int) : string := (toString n.toInt).toUTF8.toList
 #guard int.text 7 = [55]
 #guard int.text (-42) = [45, 52, 50]
 
+/-- `List<string>.join(separator)`: the strings with `separator` between each two, and nothing of no strings. -/
+@[simp] def join (separator : string) : List string → string
+  | [] => []
+  | [only] => only
+  | first :: rest@(_ :: _) => first ++ separator ++ join separator rest
+
+#guard join [44] [[97], [98], [99]] = [97, 44, 98, 44, 99]
+#guard join [44] [] = []
+
 end Sharp

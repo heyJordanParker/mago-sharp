@@ -4237,7 +4237,7 @@ fn a_law_body_s_match_on_a_value_that_runs_code_is_refused() {
 fn a_law_reaching_another_list_method_is_refused_by_name() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static bool known(List<int> items) => items.contains(3);\n\n    law knows(List<int> items) => Shape.known(items);\n}\n",
-        "Law knows reaches the List method contains in Shape.known. Hold the values in a List, and read it with `count()`, `isEmpty()`, `isNotEmpty()`, an index, `map`, `filter`, a list pattern or a spread.",
+        "Law knows reaches the List method contains in Shape.known. Hold the values in a List, and read it with `count()`, `isEmpty()`, `isNotEmpty()`, an index, `map`, `filter`, `join`, a list pattern or a spread.",
     );
 }
 
@@ -4598,4 +4598,41 @@ fn compile_proves_a_law_over_a_computed_property_in_a_machine_case_s_block() {
 
     assert!(output.status.success(), "{}", printed(&output));
     assert!(compiled(root, "app/Readiness.sharp").exists());
+}
+
+/// `app/Notice.sharp`, a class whose computed property joins a list of strings, with `laws` in its body.
+fn notice(laws: &str) -> String {
+    format!(
+        "namespace App;\n\npublic final class Notice\n{{\n    public Notice(public string reason {{ get; }}, public List<string> steps {{ get; }}) {{ }}\n\n    public string checklist => this.steps.join(\", \");\n\n{laws}}}\n"
+    )
+}
+
+/// A law states the text `join` builds: the strings with the separator between each two, and nothing of no strings.
+#[test]
+fn compile_proves_a_law_over_a_joined_list_of_strings() {
+    let laws = "    law twoStepsJoin(string a, string b) => new Notice(\"\", [a, b]).checklist == `${a}, ${b}`;\n\n    law emptyJoinsEmpty() => new Notice(\"\", []).checklist == \"\";\n";
+    let directory = library_project(&[("app/Notice.sharp", &notice(laws))]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Notice.sharp").exists());
+}
+
+/// A law that states the wrong text of a join is not proven, and names the small values that break it.
+#[test]
+fn a_false_law_over_a_join_is_not_proven() {
+    let laws = "    law joinsWithoutSpace(string a, string b) => [a, b].join(\", \") == `${a},${b}`;\n";
+    let directory = library_project(&[("app/Notice.sharp", &notice(laws))]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("error[law-unproven]: law joinsWithoutSpace is not proven\n"),
+        "{}",
+        printed(&output)
+    );
+    assert!(printed(&output).contains(" = fails for: a = \"\", b = \"\"\n"), "{}", printed(&output));
 }

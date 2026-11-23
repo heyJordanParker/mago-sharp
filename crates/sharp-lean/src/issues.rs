@@ -29,7 +29,7 @@ pub(crate) const RESERVED_NAME: &str =
     "The checker gives every class a member of that name, so a law cannot reach a member that has it.";
 pub(crate) const PLAIN_PHP: &str =
     "Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.";
-pub(crate) const COLLECTION: &str = "Hold the values in a List, and read it with `count()`, `isEmpty()`, `isNotEmpty()`, an index, `map`, `filter`, a list pattern or a spread.";
+pub(crate) const COLLECTION: &str = "Hold the values in a List, and read it with `count()`, `isEmpty()`, `isNotEmpty()`, an index, `map`, `filter`, `join`, a list pattern or a spread.";
 pub(crate) const LOOP: &str = "Write the method as recursion that calls itself on a smaller value.";
 pub(crate) const RECURSION: &str = "Write the method as recursion that calls itself on a smaller value: a list's rest from a list pattern, or an int one step towards a bound a condition tested.";
 pub(crate) const NAMED_PATTERN: &str =

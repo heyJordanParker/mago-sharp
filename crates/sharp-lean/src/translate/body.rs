@@ -1929,8 +1929,8 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// A `List` method a law reasons about, as the Lean function it is: `count()` is `int.count`, the list's length,
     /// or that length checked into the int range in a body that computes exactly, `isEmpty()` and `isNotEmpty()` are
-    /// `List.isEmpty` and its negation, and `map` and `filter` of a lambda are `List.map` and `List.filter`. Every other
-    /// method of a collection is refused by name.
+    /// `List.isEmpty` and its negation, `map` and `filter` of a lambda are `List.map` and `List.filter`, and `join` of a
+    /// list of strings is `Sharp.join`. Every other method of a collection is refused by name.
     fn list_call(&mut self, expression: &Expression, call: &MethodCall) -> String {
         let Some(method) = self.method_name(&call.method) else {
             return "default".to_owned();
@@ -1955,6 +1955,14 @@ impl<'body, 'program> Body<'body, 'program> {
                 let lean = if method == b"map" { "map" } else { "filter" };
 
                 format!("(List.{lean} {function} {list})")
+            }
+            (b"join", 1) => {
+                let list = self.value(call.object);
+                let Some(separator) = arguments.first() else {
+                    return "default".to_owned();
+                };
+
+                format!("(Sharp.join {} {list})", self.value(separator.value()))
             }
             _ => {
                 let what = format!("the List method {}", String::from_utf8_lossy(method));
