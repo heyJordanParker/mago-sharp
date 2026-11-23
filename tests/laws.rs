@@ -203,8 +203,9 @@ fn compile_proves_two_stale_law_files_and_refuses_each_one_whose_method_breaks_i
 struct RunnerRequest {
     /// Each generated module's name and source.
     modules: Vec<(String, String)>,
-    /// Each theorem's statement, text and fixed steps, the empty string when it has none.
-    theorems: Vec<(String, String, String)>,
+    /// Each theorem's statement, text, fixed steps and its law's search for the small values that break it, each the
+    /// empty string when it has none.
+    theorems: Vec<(String, String, String, String)>,
 }
 
 /// The request of the one runner `counting_cache` started in `folder`: its header and the threads and heartbeats it
@@ -236,8 +237,9 @@ fn runner_request(folder: &Path) -> RunnerRequest {
             string(&mut at);
         }
         for _ in 0..length(&mut at) {
-            theorems.push((string(&mut at), string(&mut at), string(&mut at)));
+            let (statement, text, steps) = (string(&mut at), string(&mut at), string(&mut at));
             at += 1;
+            theorems.push((statement, text, steps, string(&mut at)));
         }
     }
     assert_eq!(at, request.len(), "the request ends after its checks");
@@ -272,10 +274,35 @@ fn a_law_with_a_body_has_fixed_steps_for_each_of_its_cases() {
     let theorems = runner_request(lake.path()).theorems;
     for statement in ["«App».«Shared».«Money».«timesKeepsCurrency»", "«App».«Shared».«Money».«sumKeepsCurrency»"]
     {
-        let (_, text, steps) = theorems.iter().find(|(written, ..)| written == statement).expect("the law's theorem");
+        let (_, text, steps, _) =
+            theorems.iter().find(|(written, ..)| written == statement).expect("the law's theorem");
         assert_eq!(text.matches("sharp_close").count(), 2, "{text}");
         assert!(!steps.is_empty() && !steps.contains("sharp_close"), "{statement}: {steps}");
     }
+}
+
+/// Spec section 28: a law's search for the small values that break it travels with the law's theorem, and no generated
+/// module holds it, so a law whose proof closes never elaborates or compiles its search.
+#[cfg(unix)]
+#[test]
+fn a_law_s_search_travels_with_its_theorem_and_no_generated_module_holds_it() {
+    let directory = library_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
+
+    let output = process::output(command(root, "never").env("XDG_CACHE_HOME", counting_cache(lake.path()))).unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let request = runner_request(lake.path());
+    for (module, text) in &request.modules {
+        assert!(!text.contains("«$breaking»") && !text.contains("«$claim»"), "{module}: {text}");
+    }
+    let (_, _, _, search) = request
+        .theorems
+        .iter()
+        .find(|(statement, ..)| statement == "«App».«Shared».«Money».«addKeepsCurrency»")
+        .expect("the law's theorem");
+    assert!(search.contains("protected def «App».«Shared».«Money».«addKeepsCurrency».«$breaking»"), "{search}");
 }
 
 /// A law the fixed steps prove ends in one runner, which imports only the runtime library. A law they leave unproven

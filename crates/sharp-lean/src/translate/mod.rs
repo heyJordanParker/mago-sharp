@@ -92,12 +92,22 @@ pub(crate) struct Law {
     pub(crate) span: Span,
     /// Its theorem, `<statement>.proof`.
     pub(crate) proof: Proof,
-    /// The Lean name of the search for the small values that break it, spec section 28, `<statement>.«$breaking»`,
-    /// which the runner runs when its proof stays open. None for a law with no search.
-    pub(crate) breaking: Option<String>,
+    /// The search for the small values that break it, spec section 28, which the runner elaborates and runs only when
+    /// its proof stays open. None for a law with no search.
+    pub(crate) breaking: Option<Breaking>,
     /// For a PHP# implementer's proof of an interface's law, spec sections 22 and 28, what an open proof reports on the
     /// implementer: "`MemoryLedger.credit` breaks `Ledger.creditAdds`.". None for any other law.
     pub(crate) broken: Option<String>,
+}
+
+/// A law's search for the small values that break it, spec section 28: the Lean text of `<statement>.«$claim»` and
+/// `<statement>.«$breaking»`, which no generated module holds, so a law whose proof closes never elaborates it, and
+/// what that text uses and what of it Lean cannot model.
+#[derive(Debug, Clone)]
+pub(crate) struct Breaking {
+    pub(crate) text: String,
+    pub(crate) uses: Vec<Use>,
+    pub(crate) unmodeled: Vec<Unmodeled>,
 }
 
 /// A law's statement and what its proof needs of it.
@@ -1172,31 +1182,17 @@ impl Translator<'_, '_> {
         self.define(names::member(lean, name), variable.span, &[parameter], &returns, translated, None);
     }
 
-    /// `protected def Class.m (parameters) : M returns := do …`, a definition a law unfolds, from its translated body.
+    /// Declares the [`definition`] of `key`.
     fn define(
         &mut self,
         key: String,
         span: Span,
         parameters: &[String],
         returns: &str,
-        (lines, uses, unmodeled): (Vec<String>, Vec<Use>, Vec<Unmodeled>),
+        translated: (Vec<String>, Vec<Use>, Vec<Unmodeled>),
         measure: Option<Measure>,
     ) {
-        let text = format!(
-            "protected def {key} {} : M {returns} := do\n{}",
-            parameters.join(" "),
-            indented(&lines, 2).collect::<Vec<_>>().join("\n")
-        );
-        self.translation.declarations.push(Declaration {
-            key,
-            span,
-            text,
-            uses,
-            unmodeled,
-            role: Role::Definition,
-            measure,
-            opaque: None,
-        });
+        self.translation.declarations.push(definition(key, span, parameters, returns, translated, measure));
     }
 
     /// A law of the class-like `full`: its statement, as [`Translator::law_statement`] gives it, which assumes each law of
@@ -1490,6 +1486,24 @@ fn fields_equality(body: &mut Body<'_, '_>, full: &[u8], span: Span, fields: &[F
     }
 
     equal
+}
+
+/// `protected def key (parameters) : M returns := do …`, a definition a law unfolds, from its translated body.
+fn definition(
+    key: String,
+    span: Span,
+    parameters: &[String],
+    returns: &str,
+    (lines, uses, unmodeled): (Vec<String>, Vec<Use>, Vec<Unmodeled>),
+    measure: Option<Measure>,
+) -> Declaration {
+    let text = format!(
+        "protected def {key} {} : M {returns} := do\n{}",
+        parameters.join(" "),
+        indented(&lines, 2).collect::<Vec<_>>().join("\n")
+    );
+
+    Declaration { key, span, text, uses, unmodeled, role: Role::Definition, measure, opaque: None }
 }
 
 /// `parameter` as the binder `(name : Type)`, with its Lean type as `body` translates it.

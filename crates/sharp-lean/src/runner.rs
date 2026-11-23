@@ -18,7 +18,7 @@ use crate::package::Module;
 use crate::package::Refusal;
 
 const LAW_PROTOCOL_MAGIC: [u8; 4] = *b"MLAW";
-const LAW_PROTOCOL_MAJOR: u16 = 5;
+const LAW_PROTOCOL_MAJOR: u16 = 6;
 const LAW_PROTOCOL_MINOR: u16 = 0;
 const CHECK_REQUEST: u16 = 1;
 const CHECKED_RESPONSE: u16 = 2;
@@ -34,6 +34,9 @@ pub(crate) struct Theorem<'theorem> {
     pub(crate) steps: Option<&'theorem str>,
     /// Whether the answer judges it: a theorem of the file's own laws, after the theorems of the laws they call.
     pub(crate) judged: bool,
+    /// The Lean text of its law's search for the small values that break it, spec section 28, which the runner
+    /// elaborates and runs only when the theorem leaves a goal open.
+    pub(crate) search: Option<&'theorem str>,
 }
 
 /// How the runner judged one law's theorem.
@@ -201,7 +204,8 @@ fn run(library: &Path, request: &[u8]) -> io::Result<(Output, bool)> {
 
 /// A `Check` request: the threads to answer on, the heartbeats of each theorem in thousands, each module an earlier
 /// runner of the compile stopped in, each generated module's name and source, then for each check, each module to
-/// import, then each theorem's statement, text, fixed steps or the empty string, and whether the answer judges it.
+/// import, then each theorem's statement, text, fixed steps or the empty string, whether the answer judges it, and its
+/// law's search or the empty string.
 fn encode(
     threads: usize,
     heartbeats: u32,
@@ -238,6 +242,7 @@ fn encode(
             writer.write_string(theorem.text).map_err(io::Error::other)?;
             writer.write_string(theorem.steps.unwrap_or_default()).map_err(io::Error::other)?;
             writer.write_u8(u8::from(theorem.judged));
+            writer.write_string(theorem.search.unwrap_or_default()).map_err(io::Error::other)?;
         }
     }
 
@@ -531,7 +536,7 @@ mod tests {
         ];
         let proving = |module: &str, statement: &'static str, text: &'static str| Check {
             modules: vec![module.to_owned()],
-            theorems: vec![Theorem { statement, text, steps: None, judged: true }],
+            theorems: vec![Theorem { statement, text, steps: None, judged: true, search: None }],
         };
         let checks = [
             proving("Code.App.Fine", "App.Fine.isOne", "theorem App.Fine.isOne.proof : App.Fine.one = 1 := rfl"),
@@ -563,12 +568,14 @@ mod tests {
             text: "theorem App.Fine.isOne.proof : App.Fine.one = 1 := rfl",
             steps: None,
             judged: true,
+            search: None,
         };
         let slow = Theorem {
             statement: "App.Fine.slow",
             text: "theorem App.Fine.slow.proof : (List.range 120).foldl (· + ·) 0 = 7140 := by decide",
             steps: None,
             judged: true,
+            search: None,
         };
         let checks = [
             Check { modules: vec!["Code.App.Fine".to_owned()], theorems: vec![slow, proved()] },
@@ -601,6 +608,7 @@ mod tests {
             text: "theorem App.Fine.isOne.proof : App.Fine.one = 1 := rfl",
             steps: Some("theorem App.Fine.isOne.proof : App.Fine.one = 1 := by contradiction"),
             judged: true,
+            search: None,
         };
         let checking = |imported: &[&str]| Check {
             modules: imported.iter().map(|module| (*module).to_owned()).collect(),
@@ -651,8 +659,8 @@ mod tests {
         let check = Check {
             modules: vec!["Code.App.Fine".to_owned()],
             theorems: vec![
-                Theorem { statement: "App.Fine.isOne", text: "", steps: None, judged: true },
-                Theorem { statement: "App.Fine.slow", text: "", steps: None, judged: true },
+                Theorem { statement: "App.Fine.isOne", text: "", steps: None, judged: true, search: None },
+                Theorem { statement: "App.Fine.slow", text: "", steps: None, judged: true, search: None },
             ],
         };
         let mut writer = answer_header(1);
@@ -703,6 +711,7 @@ mod tests {
                 text: "",
                 steps: None,
                 judged: true,
+                search: None,
             }],
         };
         let checks = [check(), check(), check()];

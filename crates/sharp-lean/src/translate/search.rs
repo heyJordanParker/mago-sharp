@@ -1,7 +1,8 @@
 //! A law's claim, `<law>.«$claim»`, and the search for the small values that break a law whose proof stays open, spec
 //! section 28: `<law>.«$breaking»`, `Sharp.Law.breaking` of the claim on each list of candidate values of the law's
-//! parameters, which the law checker's runner evaluates once the law's theorem leaves a goal open. What it finds is a
-//! run of the code, so it proves nothing, and finding none proves nothing either.
+//! parameters, which the law checker's runner elaborates and evaluates once the law's theorem leaves a goal open, so a
+//! law whose proof closes never compiles it. What it finds is a run of the code, so it proves nothing, and finding none
+//! proves nothing either.
 
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::scanner::get_union_from_hint;
@@ -18,11 +19,12 @@ use mago_syntax::dialect::Dialect;
 use mago_word::word;
 
 use crate::reach::Reach;
+use crate::translate::Breaking;
 use crate::translate::Declaration;
-use crate::translate::Role;
 use crate::translate::Translator;
 use crate::translate::binder;
 use crate::translate::body::Body;
+use crate::translate::definition;
 use crate::translate::names;
 
 /// How many classes deep a candidate value of a law's parameter builds: a class whose constructor takes a class takes
@@ -36,9 +38,15 @@ const LIMIT: usize = 256;
 const VALUES: usize = 9;
 
 impl Translator<'_, '_> {
+    /// Declares `<law>.«$claim»`, as [`Self::claim_definition`] gives it, which a machine's invariant states.
+    pub(super) fn claim(&mut self, full: &[u8], lean: &str, short: &str, law: &LawNode) {
+        let claim = self.claim_definition(full, lean, short, law);
+        self.translation.declarations.push(claim);
+    }
+
     /// `<law>.«$claim»`, the claim of `law` of the class-like `full`: whether it holds of its parameters' values,
     /// computing ints exactly, as a law's claim does. A value its `when` condition is false of holds it.
-    pub(super) fn claim(&mut self, full: &[u8], lean: &str, short: &str, law: &LawNode) {
+    fn claim_definition(&self, full: &[u8], lean: &str, short: &str, law: &LawNode) -> Declaration {
         let place = format!("{short}.{}", String::from_utf8_lossy(law.name.value));
         let mut lines = Vec::new();
         let (mut uses, mut unmodeled) = (Vec::new(), Vec::new());
@@ -62,21 +70,21 @@ impl Translator<'_, '_> {
         unmodeled.extend(claim_unmodeled);
 
         let key = claim_of(&names::member(lean, law.name.value));
-        self.define(key, law.name.span, &binders, "Bool", (lines, uses, unmodeled), None);
+        definition(key, law.name.span, &binders, "Bool", (lines, uses, unmodeled), None)
     }
 
-    /// Writes `<law>.«$breaking»` for `law` of the class-like `full`, with its claim, and gives its key: the first values
-    /// of the law's parameters its claim finishes with `false` on, written as PHP# writes them, `a = new Account(0),
-    /// amount = -1`, as `Sharp.Law.first` finds them, the first parameter's values varying slowest. A parameter takes
-    /// its first candidate value alone once the lists of values before it number more than [`LIMIT`] with its others.
-    /// None for a law without parameters, whose claim takes no value, and for one with a parameter whose type has no
-    /// candidate value.
-    pub(super) fn breaking(&mut self, full: &[u8], lean: &str, short: &str, law: &LawNode) -> Option<String> {
+    /// The search of `law` of the class-like `full`: its claim, and `<law>.«$breaking»`, the first values of the law's
+    /// parameters its claim finishes with `false` on, written as PHP# writes them, `a = new Account(0), amount = -1`,
+    /// as `Sharp.Law.first` finds them, the first parameter's values varying slowest. A parameter takes its first
+    /// candidate value alone once the lists of values before it number more than [`LIMIT`] with its others. None for a
+    /// law without parameters, whose claim takes no value, and for one with a parameter whose type has no candidate
+    /// value.
+    pub(super) fn breaking(&self, full: &[u8], lean: &str, short: &str, law: &LawNode) -> Option<Breaking> {
         if law.parameter_list.parameters.is_empty() {
             return None;
         }
         let place = format!("{short}.{}", String::from_utf8_lossy(law.name.value));
-        let mut body = Body::new(self.checked, self.reach, full, place.clone());
+        let mut body = Body::new(self.checked, self.reach, full, place);
         let mut candidates = Candidates { body: &mut body, reach: self.reach, span: law.name.span, bound: 0 };
         let mut lines = Vec::new();
         let mut lists = 1;
@@ -106,28 +114,18 @@ impl Translator<'_, '_> {
             ));
         }
 
-        self.claim(full, lean, short, law);
+        let claim = self.claim_definition(full, lean, short, law);
         let key = names::member(lean, law.name.value);
-        let claim = claim_of(&key);
         let arguments: Vec<String> =
             (0..law.parameter_list.parameters.len()).map(|index| format!("«$argument{index}»")).collect();
-        lines.push(format!("  Sharp.Law.broken ({claim} {})", arguments.join(" ")));
-        let breaking = format!("{key}.«$breaking»");
-        let text = format!("protected def {breaking} : Option String :=\n{}", lines.join("\n"));
-        let (_, mut uses, unmodeled) = body.finish();
-        uses.push(self.own_use(&claim, place));
-        self.translation.declarations.push(Declaration {
-            key: breaking.clone(),
-            span: law.name.span,
-            text,
-            uses,
-            unmodeled,
-            role: Role::Definition,
-            measure: None,
-            opaque: None,
-        });
+        lines.push(format!("  Sharp.Law.broken ({} {})", claim.key, arguments.join(" ")));
+        let text =
+            format!("{}\n\nprotected def {key}.«$breaking» : Option String :=\n{}", claim.text, lines.join("\n"));
+        let (_, mut uses, mut unmodeled) = body.finish();
+        uses.extend(claim.uses);
+        unmodeled.extend(claim.unmodeled);
 
-        Some(breaking)
+        Some(Breaking { text, uses, unmodeled })
     }
 }
 

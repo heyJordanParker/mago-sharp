@@ -396,7 +396,7 @@ impl Lean {
         let reached: HashSet<&str> = proving()
             .flat_map(|law| laws.closure(law))
             .flat_map(|position| program.reached(&laws.ordered[position].1.statement))
-            .chain(proving().flat_map(|law| &law.breaking).flat_map(|breaking| program.reached(breaking)))
+            .chain(searched(proving().copied()).flat_map(|used| program.reached(used)))
             .collect();
         let modules = program.modules(&proved, &reached);
         wrote += writing.elapsed();
@@ -409,6 +409,7 @@ impl Lean {
             library: &library,
             threads: self.threads,
             program: &program,
+            files: translations.iter().map(|translation| (translation.file, translation)).collect(),
             laws: &laws,
             modules: modules.iter().map(|module| (module.name.as_str(), module)).collect(),
             scripts: &scripts,
@@ -447,11 +448,16 @@ fn settings(sources: &str, heartbeats: u32) -> String {
     format!("{sources}\0{heartbeats}")
 }
 
+/// The Lean name of each declaration the search of each of `laws` for the small values that break it uses.
+fn searched<'law>(laws: impl IntoIterator<Item = &'law Law>) -> impl Iterator<Item = &'law str> {
+    laws.into_iter().flat_map(|law| &law.breaking).flat_map(|breaking| &breaking.uses).map(|used| used.key.as_str())
+}
+
 /// The key a law's proof ends once for: the hash of the `settings`, and the statement, theorem and fixed steps of the
-/// law and of each law it calls, transitively, as `scripts` holds them, with the text of every declaration their
-/// statements and the law's search for the small values that break it reach, as [`Program::reached`] gives them, each
-/// in the order of its name. An edit of a declaration a law reaches changes it, and so does a release that changes
-/// the library, the heartbeats or the fixed steps, and nothing else does.
+/// law and of each law it calls, transitively, as `scripts` holds them, the text of the law's search for the small
+/// values that break it, and the text of every declaration their statements and that search reach, as
+/// [`Program::reached`] gives them, each in the order of its name. An edit of a declaration a law reaches changes it,
+/// and so does a release that changes the library, the heartbeats or the fixed steps, and nothing else does.
 fn proof_key(
     law: &Law,
     program: &Program<'_>,
@@ -473,7 +479,8 @@ fn proof_key(
         .map(|called| (called.statement.as_str(), called.proof.text.as_str()))
         .collect();
     let declarations: BTreeSet<&str> =
-        called.keys().copied().chain(law.breaking.as_deref()).flat_map(|reaching| program.reached(reaching)).collect();
+        called.keys().copied().chain(searched([law])).flat_map(|reaching| program.reached(reaching)).collect();
+    part(law.breaking.as_ref().map_or("", |breaking| breaking.text.as_str()).as_bytes());
     for (statement, theorem) in called {
         part(statement.as_bytes());
         part(theorem.as_bytes());
@@ -551,12 +558,13 @@ fn by_file<'work>(laws: Vec<(&'work Translation, &'work Law)>) -> Vec<(&'work Tr
 }
 
 /// What proving the laws of the stale files reads: the runtime library, the threads a runner proves them on, every
-/// declaration and law of the translations, the generated modules by name, and each law's theorem in the
-/// [`Form::Steps`] form by its statement.
+/// declaration and law of the translations, each translation by its file, the generated modules by name, and each
+/// law's theorem in the [`Form::Steps`] form by its statement.
 struct Proofs<'proofs> {
     library: &'proofs Path,
     threads: usize,
     program: &'proofs Program<'proofs>,
+    files: HashMap<FileId, &'proofs Translation>,
     laws: &'proofs Laws<'proofs>,
     modules: HashMap<&'proofs str, &'proofs package::Module>,
     scripts: &'proofs HashMap<&'proofs str, String>,
@@ -571,6 +579,26 @@ impl Proofs<'_> {
         let name = package::module_name(translation);
 
         self.modules.get(name.as_str()).map_or(name, |module| module.host.clone())
+    }
+
+    /// The Lean text of `law`'s search for the small values that break it, with the module of each declaration it
+    /// uses, when Lean can elaborate it: it reads no construct Lean cannot model, and each declaration it uses is one a
+    /// generated module of a file of the compile holds, which reads none either. None otherwise, and the runner runs no
+    /// search for the law.
+    fn search<'law>(&self, law: &'law Law) -> Option<(&'law str, Vec<String>)> {
+        let breaking = law.breaking.as_ref().filter(|breaking| breaking.unmodeled.is_empty())?;
+        let mut modules = Vec::new();
+        for used in &breaking.uses {
+            let translation = used.file.and_then(|file| self.files.get(&file))?;
+            let module = self.modules.get(package::module_name(translation).as_str())?;
+            let readable = used.names_only || self.program.problems(&used.key).is_empty();
+            if self.program.text(&used.key).is_none() || !readable {
+                return None;
+            }
+            modules.push(module.host.clone());
+        }
+
+        Some((breaking.text.as_str(), modules))
     }
 
     /// Proves the laws of `work`, and gives how each law's proof ended, in the order of `work`. When a law or one it
@@ -756,6 +784,15 @@ impl Proofs<'_> {
             .map(|position| self.host_of(ordered.ordered[*position].0))
             .chain(std::iter::once(self.host_of(translation)))
             .collect();
+        let mut searches: HashMap<&str, &str> = HashMap::default();
+        for law in theorems.iter().map(|position| ordered.ordered[*position].1) {
+            if judged.contains(law.statement.as_str())
+                && let Some((text, hosts)) = self.search(law)
+            {
+                modules.extend(hosts);
+                searches.insert(law.statement.as_str(), text);
+            }
+        }
         modules.sort();
         modules.dedup();
         modules.push(
@@ -779,6 +816,7 @@ impl Proofs<'_> {
                         }
                     },
                     judged: judged.contains(law.statement.as_str()),
+                    search: searches.get(law.statement.as_str()).copied(),
                 }
             })
             .collect();

@@ -85,7 +85,7 @@ def putString (b : ByteArray) (s : String) : ByteArray :=
 message kind, and a reserved `u16`. -/
 
 def lawMagic : ByteArray := "MLAW".toUTF8
-def major : UInt16 := 5
+def major : UInt16 := 6
 def checkRequest : UInt16 := 1
 def checkedResponse : UInt16 := 2
 
@@ -107,12 +107,14 @@ def header (kind : UInt16) : ByteArray :=
 /-! The `Check` request and its answer. -/
 
 /-- One theorem of a request: the statement of the law it proves, its Lean text, which Lean's search proves, the text of
-its fixed steps, empty when it has none, and whether the answer judges it. -/
+its fixed steps, empty when it has none, whether the answer judges it, and the text of its law's search for the small
+values that break it, empty when it has none. -/
 structure Theorem where
   statement : Name
   text : String
   steps : String
   judged : Bool
+  search : String
 
 /-- One check of a request: the modules its theorems import, and the theorems, each after every theorem it uses. -/
 structure Check where
@@ -135,7 +137,8 @@ def nameOf (written : String) : Name :=
 #guard nameOf "Sharp.Lean.Proof" == `Sharp.Lean.Proof
 
 def theorem_ : Decode Theorem := do
-  return { statement := nameOf (← string), text := ← string, steps := ← string, judged := (← u8) != 0 }
+  return { statement := nameOf (← string), text := ← string, steps := ← string, judged := (← u8) != 0,
+           search := ← string }
 
 def check : Decode Check := do
   return { modules := (← many string).map nameOf, theorems := ← many theorem_ }
@@ -396,7 +399,8 @@ def withTheorem (env : Environment) (item : Theorem) (shared : Shared) : IO (Env
   return (env, elaborated)
 
 /-! The search for the small values that break a law whose proof stays open, spec section 28: `<statement>.«$breaking»`,
-which the translation writes beside the law's statement as `Sharp.Law.breaking` of the law's claim on them. -/
+`Sharp.Law.breaking` of the law's claim on them, whose text the request holds beside the law's theorem, so only a law
+whose proof stays open elaborates and compiles it. -/
 
 /-- What the search for the small values that break a law gave. -/
 inductive Search where
@@ -430,12 +434,17 @@ def reachesOpaque (env : Environment) (name : Name) : Bool := Id.run do
 unsafe def evalBreaking (env : Environment) (name : Name) : Except String (Option String) :=
   env.evalConst (Option String) {} name (checkMeta := false)
 
-/-- Runs the search for the small values that break the law `statement`, when its generated module holds one that runs
-only code Lean compiled. -/
-def search (env : Environment) (statement : Name) : Search :=
+/-- Runs the search for the small values that break the law `statement`, from `text`, its claim and its `«$breaking»`,
+which it elaborates in `env`, when Lean elaborates it and it runs only code Lean compiled. -/
+def search (env : Environment) (statement : Name) (text : String) : IO Search := do
+  if text.isEmpty then return .skipped
+  let input := Parser.mkInputContext s!"open Sharp\n{text}" "<search>"
+  let state ← IO.processCommands input {} (Command.mkState env {} unlinted)
+  if state.commandState.messages.hasErrors then return .skipped
+  let env := state.commandState.env
   let name := statement.str "$breaking"
-  if !env.contains name || reachesOpaque env name then .skipped
-  else match unsafe evalBreaking env name with
+  if !env.contains name || reachesOpaque env name then return .skipped
+  return match unsafe evalBreaking env name with
     | .ok (some values) => .broken values
     | .ok none => .unbroken
     | .error _ => .skipped
@@ -469,7 +478,7 @@ def answer (env : Environment) (request : Check) (b : ByteArray) (shared : Share
       b := putU32 (putU8 b 1) elaborated.steps.size.toUInt32
       for (kind, index, goal) in elaborated.steps do
         b := putString (putU32 (putU8 b kind) index.toUInt32) goal
-      b := match search env item.statement with
+      b := match ← search env item.statement item.search with
         | .skipped => putU8 b 0
         | .unbroken => putU8 b 1
         | .broken values => putString (putU8 b 2) values
