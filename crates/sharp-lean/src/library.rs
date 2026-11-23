@@ -453,14 +453,17 @@ fn is_built(library: &Path) -> bool {
             .all(|(path, source)| fs::read(library.join(path)).is_ok_and(|bytes| bytes == source.as_bytes()))
 }
 
-/// The error of a build of the law checker that failed for `failure`, which only the debug log holds, so the error
-/// names no folder and no tool.
+/// The error of a build of the law checker that failed for `failure`, the step that failed and its cause.
 fn unbuilt(failure: impl std::fmt::Display) -> io::Error {
-    tracing::debug!("The law checker's build failed: {failure}");
+    io::Error::other(format!("the law checker could not be built in Mago's cache folder: {failure}"))
+}
 
-    io::Error::other(
-        "the law checker could not be built in Mago's cache folder. Run vendor/bin/mago compile again to retry, with MAGO_LOG=debug to see why",
-    )
+/// The lines of `printed` that state an error, as `lake build` starts each with `error`, or all of `printed` when none
+/// does.
+fn error_lines(printed: &str) -> String {
+    let errors: Vec<&str> = printed.lines().filter(|line| line.trim_start().starts_with("error")).collect();
+
+    if errors.is_empty() { printed.trim_end().to_owned() } else { errors.join("\n") }
 }
 
 /// The name of the library's build: a hash of each file of `package`, the whole of what the build reads, and of
@@ -537,7 +540,7 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake, checker: &[u8]) -> io::Result
     if checker.is_empty() {
         let output = process::output(lake.command().arg("build").current_dir(&staging))?;
         if !output.status.success() {
-            return Err(unbuilt(format!("lake build in {} printed:\n{}", staging.display(), printed(&output))));
+            return Err(unbuilt(format!("lake build printed:\n{}", error_lines(&printed(&output)))));
         }
     } else {
         tar::Archive::new(zstd::Decoder::new(checker)?).unpack(&staging).map_err(unbuilt)?;
@@ -1269,6 +1272,28 @@ mod tests {
             assert_eq!(installed(cache.path(), Some(elan.path())).map(|lake| lake.lean), Some(own.clone()));
             assert_eq!(installed(cache.path(), None).map(|lake| lake.lean), Some(own));
         }
+
+        Ok(())
+    }
+
+    /// A build that `lake build` fails names its cause: the error lines `lake build` printed, without its progress.
+    #[test]
+    fn a_build_that_lake_build_fails_names_the_error_lines_it_printed() -> io::Result<()> {
+        let builds = tempfile::tempdir()?;
+        let lean = tempfile::tempdir()?;
+        let lake = lake_in(
+            lean.path(),
+            "#!/bin/sh\necho '[2/5] Built Sharp.Lean.Prelude'\necho 'error: ./Sharp/Lean/Laws.lean:3:8: unknown identifier'\necho 'error: build failed' >&2\nexit 1\n",
+        )?;
+
+        let failed = build_in(builds.path(), &lake, &[]).err().map(|error| error.to_string());
+
+        assert_eq!(
+            failed.as_deref(),
+            Some(
+                "the law checker could not be built in Mago's cache folder: lake build printed:\nerror: ./Sharp/Lean/Laws.lean:3:8: unknown identifier\nerror: build failed"
+            )
+        );
 
         Ok(())
     }
