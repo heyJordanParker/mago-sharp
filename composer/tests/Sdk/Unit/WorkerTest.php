@@ -171,17 +171,42 @@ final class WorkerTest extends TestCase
         $handlers = (new ReflectionProperty(Hosts::class, 'handlers'))->getValue();
         $place = count($handlers);
         $worker->run();
-        Mago::$answer = static fn(): ?array => null;
+        Mago::$answer =
+            /**
+             * @return null|list<null|bool|int|float|string|list<mixed>>
+             */
+            static fn(): ?array => null;
         [$collected, $collect] = Hosts::handle($place, self::collectRequest());
-        [$reduced, $answer] = Hosts::handle($place, [WorkerProtocol::NAME, WorkerProtocol::REDUCE_REQUEST, 1, $collect]);
+        [$reduced, $answer] = Hosts::handle($place, [
+            WorkerProtocol::NAME,
+            WorkerProtocol::REDUCE_REQUEST,
+            1,
+            $collect,
+        ]);
         Mago::$answer = null;
 
-        self::assertTrue($collected && $reduced, (string) ($reduced ? '' : $answer));
+        self::assertSame([true, true], [$collected, $reduced]);
         self::assertSame(
             [
                 WorkerProtocol::NAME,
                 0x8002,
-                [1, 1, 4, 'duplicate-body', 'This body repeats another.', 0, null, null, 1, 1, 'src/Second.php', 3, 9, null, 0],
+                [
+                    1,
+                    1,
+                    4,
+                    'duplicate-body',
+                    'This body repeats another.',
+                    0,
+                    null,
+                    null,
+                    1,
+                    1,
+                    'src/Second.php',
+                    3,
+                    9,
+                    null,
+                    0,
+                ],
             ],
             $answer,
         );

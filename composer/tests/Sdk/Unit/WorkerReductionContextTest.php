@@ -50,12 +50,10 @@ final class WorkerReductionContextTest extends TestCase
         $context->report(Level::Error, 'duplicate-body', $issue);
         $context->report(Level::Warning, 'near-duplicate', $issue);
 
-        $reported = $context->takeReportedIssues();
+        [$first, $second] = $context->takeReportedIssues();
 
-        self::assertSame(
-            [[Level::Error, 'duplicate-body', $issue], [Level::Warning, 'near-duplicate', $issue]],
-            array_map(static fn($reported): array => [$reported->level, $reported->code, $reported->issue], $reported),
-        );
+        self::assertSame([Level::Error, 'duplicate-body', $issue], [$first->level, $first->code, $first->issue]);
+        self::assertSame([Level::Warning, 'near-duplicate', $issue], [$second->level, $second->code, $second->issue]);
         self::assertSame([], $context->takeReportedIssues());
     }
 
