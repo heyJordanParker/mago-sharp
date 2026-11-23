@@ -50,10 +50,11 @@ where
         }
     }
 
-    /// Reports an issue, returning `true` if it was added, or `false` when a debug build finds it has no code.
+    /// Reports an issue, returning `true` if it was added, or `false` when it has no code, which is reported as the
+    /// internal error of its missing code in its place.
     #[inline]
     pub fn report(&mut self, issue: Issue) -> bool {
-        if issue.code.is_none() && cfg!(debug_assertions) {
+        if issue.code.is_none() {
             let mut missing_code_issue = Issue::error("Internal: Diagnostic is missing a code.")
                 .with_code("missing-code")
                 .with_note("This diagnostic was reported without a unique code, which is required by the collector.")
@@ -185,5 +186,33 @@ where
     #[must_use]
     pub fn finish(self) -> IssueCollection {
         self.issues
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use mago_allocator::prelude::LocalArena;
+    use mago_database::file::File;
+    use mago_reporting::Issue;
+
+    use super::Collector;
+
+    /// An issue reported with no code is reported as the internal error of its missing code, in every build, so a
+    /// debug build and a release build report the same issues.
+    #[test]
+    fn an_issue_with_no_code_is_reported_as_missing_its_code() {
+        let arena = LocalArena::new();
+        let file = File::ephemeral(Cow::Borrowed(b"src/Order.php"), Cow::Borrowed(b"<?php\n"));
+        let mut collector = Collector::new(&arena, &file);
+
+        let added = collector.report(Issue::error("An order has no total."));
+
+        let issues = collector.finish();
+        let reported: Vec<(Option<&str>, &str)> =
+            issues.iter().map(|issue| (issue.code.as_deref(), issue.message.as_str())).collect();
+        assert!(!added);
+        assert_eq!(reported, [(Some("missing-code"), "Internal: Diagnostic is missing a code.")]);
     }
 }
