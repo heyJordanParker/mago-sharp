@@ -858,7 +858,10 @@ impl<'body, 'program> Body<'body, 'program> {
             }
             Equality::Numbers => return self.unmodeled(span, "a float".to_owned(), issues::FLOAT),
             Equality::Tables => return self.unmodeled(span, "a collection".to_owned(), issues::COLLECTION),
-            Equality::Running => {
+            Equality::OwnType if let Some(interface) = self.equatable_interface(types) => {
+                self.lifted(nullable, (lhs, rhs), |body, sides| body.own_type_equal(span, &interface, sides))
+            }
+            Equality::Running | Equality::OwnType => {
                 let operator = if negated { "!=" } else { "==" };
                 let what = format!("`{operator}` on values only the running code tells apart");
                 return self.unmodeled(span, what, issues::TYPE_TEST);
@@ -866,6 +869,55 @@ impl<'body, 'program> Body<'body, 'program> {
         };
 
         if negated { format!("(!{equal})") } else { equal }
+    }
+
+    /// The one interface that extends `Equatable` the values of both `types` are, null aside, by its full name, which
+    /// [`Equality::OwnType`] compares them through. `None` when a side may be a value of another type.
+    fn equatable_interface(&self, types: (&TUnion, &TUnion)) -> Option<Vec<u8>> {
+        let mut named =
+            [types.0, types.1].into_iter().flat_map(|r#type| r#type.types.iter()).filter_map(|atomic| match atomic {
+                TAtomic::Null => None,
+                TAtomic::Object(TObject::Named(named)) if atomic.get_intersection_types().is_none() => {
+                    Some(Some(named.name))
+                }
+                _ => Some(None),
+            });
+        let first = named.next()??;
+
+        named
+            .all(|name| name.is_some_and(|name| self.reach.same_class(name.as_bytes(), first.as_bytes())))
+            .then(|| first.as_bytes().to_vec())
+    }
+
+    /// `==` of `lhs` and `rhs`, two values of `interface`, an interface that extends `Equatable`, spec section 19: equal
+    /// when they are values of one implementer and its own `==` holds. A sealed interface's value is one of its
+    /// implementers' values, spec section 20.1, so `==` splits on each implementer, and else is false. Lean knows nothing
+    /// about the values of any other interface, so `==` on them is Lean's equality of the values.
+    fn own_type_equal(&mut self, span: Span, interface: &[u8], (lhs, rhs): (&str, &str)) -> String {
+        self.reads(interface);
+        let reach = self.reach;
+        let implementers = reach.implementers(interface).unwrap_or_default();
+        if implementers.is_empty() {
+            return format!("({lhs} == {rhs})");
+        }
+
+        let lean = names::full_name(&self.reached_name(interface));
+        let mut alternatives = Vec::new();
+        for implementer in implementers {
+            let held = TUnion::from_atomic(match self.checked.types().class_declaration(*implementer).kind {
+                DeclarationKind::Enum { .. } => TAtomic::Object(TObject::new_enum(*implementer)),
+                _ => TAtomic::Object(TObject::Named(TNamedObject::new(*implementer))),
+            });
+            let constructor = names::member(&lean, names::short_name(implementer.as_bytes()).as_bytes());
+            let (a, b) = (self.fresh(), self.fresh());
+            let equal = self.nested_lines(|body| body.equal(span, (&held, &held), (&a, &b), false));
+            alternatives.push((format!("({constructor} {a}), ({constructor} {b})"), Choice::Branch(equal)));
+        }
+        if implementers.len() > 1 {
+            alternatives.push(("_, _".to_owned(), Choice::Branch(vec!["pure false".to_owned()])));
+        }
+
+        self.choose(&Choice::Match(format!("{lhs}, {rhs}"), alternatives))
     }
 
     /// `==` of two `List`s or two `Map`s `lhs` and `rhs`, whose elements, or values, have the types `elements`, as spec

@@ -1510,11 +1510,11 @@ pub fn get_backing_key_type<'key>(
 ///
 /// Spec section 12 keys a `Map` by anything with `==` and `hash()`: an `int`, a `float`, a `string`, which a member
 /// name is, spec section 6.3, a `bool`, `null` and an enum case, which section 19 gives `==` with no code, a struct, a
-/// `List`, `Set` or `Map` of them, and a class that declares or inherits `operator ==`, which the checker requires
-/// `hash()` beside, and a type parameter bounded by `Equatable` or by one of them. An intersection keys one when any of
-/// its members does,
-/// since each of its values is a value of every member. A class value keys one too, through the `==` and the hash of
-/// its whole type, type arguments included, as C#, Java and Kotlin key a map by a type.
+/// `List`, `Set` or `Map` of them, a class that declares or inherits `operator ==`, which the checker requires `hash()`
+/// beside, an interface that extends `Equatable`, and a type parameter bounded by `Equatable` or by one of them. An
+/// intersection keys one when any of its members does, since each of its values is a value of every member. A class
+/// value keys one too, through the `==` and the hash of its whole type, type arguments included, as C#, Java and Kotlin
+/// key a map by a type.
 #[must_use]
 pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
     let is_key_object = |member: &TAtomic| match member {
@@ -1526,6 +1526,7 @@ pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
                 .get_class_like(name)
                 .is_some_and(|class_like| class_like.kind.is_enum() || class_like.flags.is_struct())
                 || codebase.get_declaring_method(name, word("op_Equality")).is_some()
+                || is_equatable_interface(name, codebase)
         }
         _ => false,
     };
@@ -1573,6 +1574,26 @@ pub fn bound_is_equatable(bound: &TUnion) -> bool {
         || bound.types.iter().any(|atomic| {
             matches!(atomic, TAtomic::GenericParameter(parameter) if bound_is_equatable(&parameter.constraint))
         })
+}
+
+/// Whether `name` is an interface that extends `Equatable`, or `Equatable` itself, spec section 19.
+///
+/// Each of its values has `==` and `hash()`, since every type that implements it has `==`: two are equal when they are
+/// the same type and that type's `==` holds, and each hashes as its own type does.
+#[must_use]
+pub fn is_equatable_interface(name: Word, codebase: &CodebaseMetadata) -> bool {
+    codebase.get_class_like(name).is_some_and(|interface| interface.kind.is_interface())
+        && codebase.is_instance_of(name, word(mago_names::SHARP_EQUATABLE))
+}
+
+/// Whether a value of `union` may be a value of an [interface that extends `Equatable`](is_equatable_interface), as its
+/// type, a member of its intersection or a type parameter's bound.
+#[must_use]
+pub fn holds_equatable_interface(union: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    union.types.iter().any(|atomic| match atomic {
+        TAtomic::GenericParameter(parameter) => holds_equatable_interface(&parameter.constraint, codebase),
+        atomic => atomic.get_all_object_names().into_iter().any(|name| is_equatable_interface(name, codebase)),
+    })
 }
 
 /// The object a PHP# `Map<K, V>` or `Set<T>` runs as, `Sharp\Map<K, V>` or `Sharp\Set<T>`, each key as itself, or

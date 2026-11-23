@@ -23543,6 +23543,22 @@ fn a_camel_case_method_s_result_is_read_by_its_declared_name() {
 /// class Tally implements \IteratorAggregate { public function getIterator(): \Traversable { return \Sharp\Internal\elements($this, true); } }
 /// ```
 ///
+/// Spec section 19: an interface that extends `Equatable` has `==`, and `Equatable` is no type the running code checks,
+/// so the interface's list of the interfaces it extends leaves it out and names the others.
+#[test]
+fn an_interface_that_extends_equatable_extends_its_other_interfaces_alone() {
+    let files = lowered_each(
+        &[
+            ("src/App/Shown.sharp", "namespace App;\n\npublic interface Shown\n{\n}\n"),
+            ("src/App/Failure.sharp", "namespace App;\n\npublic interface Failure : Shown, Equatable\n{\n}\n"),
+        ],
+        &[],
+    );
+    let (lowered, interface) = class_in(&files, "Failure");
+
+    assert_eq!(lowered.render(lowered.child(interface, 1)), "NAME_LIST\n  ZVAL \"App\\\\Shown\"\n");
+}
+
 /// Spec section 12: a class whose header names `Iterable<T>` is PHP's `\IteratorAggregate`, whose `getIterator()` reads
 /// its `elements()` through the engine, and `true` gives plain PHP each `[key, value]` tuple as its key and value.
 #[test]
@@ -23814,6 +23830,128 @@ fn equality_of_class_values_compares_their_whole_types() {
                       ZVAL "kinds"
                     VAR
                       ZVAL "kind"
+        "#}
+    );
+}
+
+/// Spec section 19: two values of an interface that extends `Equatable` are equal when they are the same type and that
+/// type's `==` holds, which only the running values tell, so `==` on them runs the engine's `\Sharp\Internal\equals`,
+/// `!=` is its `!`, and two `List`s of them compare element by element through it, where PHP's `===` would tell two
+/// equal structs apart.
+#[test]
+fn equality_of_an_interface_that_extends_equatable_compares_by_each_value_s_own_type() {
+    assert_eq!(
+        body_in(
+            "bool run(Failure failure, Failure other, List<Failure> failures, List<Failure> others)",
+            "        let b = failure == other;\n        b = failure != other;\n        return failures == others;\n",
+            &[(
+                "src/App/Tenant/Failure.sharp",
+                "namespace App.Tenant;\n\npublic interface Failure : Equatable\n{\n}\n"
+            )],
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                CALL
+                  ZVAL "Sharp\\Internal\\equals"
+                  ARG_LIST
+                    VAR
+                      ZVAL "failure"
+                    VAR
+                      ZVAL "other"
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                UNARY_OP [14]
+                  CALL
+                    ZVAL "Sharp\\Internal\\equals"
+                    ARG_LIST
+                      VAR
+                        ZVAL "failure"
+                      VAR
+                        ZVAL "other"
+              RETURN
+                CALL
+                  ARROW_FUNC "" @11-11
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "lhs#1"
+                        null
+                        null
+                        null
+                        null
+                      PARAM
+                        null
+                        ZVAL "rhs#2"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    AND
+                      BINARY_OP [16]
+                        CALL
+                          ZVAL "count"
+                          ARG_LIST
+                            VAR
+                              ZVAL "lhs#1"
+                        CALL
+                          ZVAL "count"
+                          ARG_LIST
+                            VAR
+                              ZVAL "rhs#2"
+                      CALL
+                        ZVAL "array_all"
+                        ARG_LIST
+                          VAR
+                            ZVAL "lhs#1"
+                          ARROW_FUNC "" @11-11
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "element#3"
+                                null
+                                null
+                                null
+                                null
+                              PARAM
+                                null
+                                ZVAL "key#4"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            AND
+                              CALL
+                                ZVAL "array_key_exists"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "key#4"
+                                  VAR
+                                    ZVAL "rhs#2"
+                              CALL
+                                ZVAL "Sharp\\Internal\\equals"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "element#3"
+                                  DIM
+                                    VAR
+                                      ZVAL "rhs#2"
+                                    VAR
+                                      ZVAL "key#4"
+                            null
+                            null
+                    null
+                    null
+                  ARG_LIST
+                    VAR
+                      ZVAL "failures"
+                    VAR
+                      ZVAL "others"
         "#}
     );
 }

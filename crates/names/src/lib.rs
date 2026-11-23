@@ -115,6 +115,9 @@ pub const LEAN_FUNCTION: &str = "Sharp\\Internal\\LeanFunction";
 /// for, so the checker reserves the name and the scanner reads it as no type the running code checks.
 pub const EQUATABLE: &str = "Equatable";
 
+/// The full name of the prelude's [`EQUATABLE`], which an interface extends to give its values `==`, spec section 19.
+pub const SHARP_EQUATABLE: &str = "Sharp\\Equatable";
+
 /// How PHP# writes PHP's `object`, spec section 24.
 ///
 /// The parser reads both as `Hint::Object`, and only `Object` is PHP#.

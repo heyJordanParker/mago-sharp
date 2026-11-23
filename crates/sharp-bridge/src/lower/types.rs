@@ -53,6 +53,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_php_plain_form;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_void;
+use mago_codex::ttype::holds_equatable_interface;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::takes_array;
 use mago_codex::ttype::takes_bytes;
@@ -181,6 +182,9 @@ pub enum Equality {
     /// no string, `bool` or `null`, a value that may be a collection or a value of another type, a class value, or a
     /// value of a type parameter.
     Running,
+    /// By the `==` of the type each value is, through `\Sharp\Internal\equals`: a value of an interface that extends
+    /// `Equatable`, which equals only a value of its own type, spec section 19.
+    OwnType,
     /// By the `op_Equality` the class-like declares, with the method's name: a class's `operator ==`, or the one a
     /// struct or an enum with a case that carries data gets.
     Declared(Word, &'static [u8]),
@@ -2652,6 +2656,9 @@ impl<'analysis> Types<'analysis> {
         {
             return Equality::Running;
         }
+        if [lhs, rhs].into_iter().any(|r#type| holds_equatable_interface(r#type, self.codebase)) {
+            return Equality::OwnType;
+        }
         if let Some((owner, name)) = self.declared_equality(lhs, rhs) {
             return Equality::Declared(owner, name);
         }
@@ -2694,6 +2701,7 @@ impl<'analysis> Types<'analysis> {
         lhs_lists
             && rhs_lists
             && self.declared_equality(&lhs_element, &rhs_element).is_none()
+            && ![&lhs_element, &rhs_element].into_iter().any(|r#type| holds_equatable_interface(r#type, self.codebase))
             && !mixes_numbers(&lhs_element, &rhs_element)
             && self.compares_identically(&lhs_element, &rhs_element)
     }

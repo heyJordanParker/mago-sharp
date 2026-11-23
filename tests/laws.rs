@@ -2565,6 +2565,67 @@ fn compile_proves_a_law_over_the_fields_of_an_enum_s_data_case() {
     );
 }
 
+/// Spec section 19: `==` on two values of an interface that extends `Equatable` holds when they are values of one
+/// implementer and its own `==` holds. A law splits it on each implementer of a sealed one, and reads two values of an
+/// open one as equal when they are one value, since it knows nothing else about them. A claim either breaks is not
+/// proven.
+#[test]
+fn compile_proves_a_law_over_an_interface_that_extends_equatable() {
+    let failures = |sealed: &str, laws: &str| {
+        [
+            (
+                "app/Shop/Failure.sharp",
+                format!("namespace App.Shop;\n\npublic {sealed}interface Failure : Equatable\n{{\n}}\n"),
+            ),
+            (
+                "app/Shop/Declined.sharp",
+                "namespace App.Shop;\n\npublic enum Declined : Failure\n{\n    case Card;\n    case Fraud;\n}\n"
+                    .to_owned(),
+            ),
+            (
+                "app/Shop/Lost.sharp",
+                "namespace App.Shop;\n\npublic enum Lost : Failure\n{\n    case Gone;\n}\n".to_owned(),
+            ),
+            (
+                "app/Shop/Failed.sharp",
+                format!(
+                    "namespace App.Shop;\n\npublic final class Failed\n{{\n    public Failed(public Failure failure {{ get; }}) {{ }}\n\n    public static Failure of(Failure failure) => failure;\n\n    {laws}\n}}\n"
+                ),
+            ),
+        ]
+    };
+    let compiled_with = |sealed: &str, laws: &str| {
+        let files = failures(sealed, laws);
+        let files: Vec<(&str, &str)> = files.iter().map(|(name, source)| (*name, source.as_str())).collect();
+        let directory = lawful_project(&files);
+        let output = compile(directory.path());
+
+        (directory, output)
+    };
+    let keeps = "law keepsItsFailure(Failure f) => new Failed(f).failure == f;";
+    let apart = "law cardIsNoLoss(int unused) => Failed.of(Declined.Card) != Failed.of(Lost.Gone);";
+
+    for sealed in ["sealed ", ""] {
+        let laws = if sealed.is_empty() { keeps.to_owned() } else { format!("{keeps}\n    {apart}") };
+        let (directory, output) = compiled_with(sealed, &laws);
+
+        assert!(output.status.success(), "{}", printed(&output));
+        assert!(compiled(directory.path(), "app/Shop/Failed.sharp").exists());
+    }
+
+    for (sealed, law) in [("sealed ", "law anyTwoAreOne(Failure a, Failure b) => a == b;"), ("", apart)] {
+        let (_directory, output) = compiled_with(sealed, law);
+        let name = law.trim_start_matches("law ").split('(').next().unwrap();
+
+        assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+        assert!(
+            printed(&output).contains(&format!("error[law-unproven]: law {name} is not proven\n")),
+            "{}",
+            printed(&output)
+        );
+    }
+}
+
 /// A type test over an interface that is not sealed is refused: its implementers are open, so a law cannot tell them apart.
 #[test]
 fn a_law_reaching_a_type_test_over_an_open_interface_is_refused() {

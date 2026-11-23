@@ -39,10 +39,12 @@ use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_php_declared_type;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::intersect_union_types;
+use mago_codex::ttype::is_equatable_interface;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
@@ -2583,6 +2585,47 @@ fn report_outside_implementer<A>(
     );
 }
 
+/// Spec section 19: every type that implements an interface that extends `Equatable` has `==`, so the interface's values
+/// compare by their own types'. A class-like without it, as [`missing_equality`] decides, is refused at the first
+/// interface of its header that extends `Equatable`.
+fn report_implementer_without_equality<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    implemented_types: &[Identifier<'_>],
+) where
+    A: Arena,
+{
+    let Some((interface, span)) = implemented_types.iter().find_map(|implemented_type| {
+        let interface = context.codebase.get_class_like(word(context.resolved_names.get(implemented_type)))?;
+
+        is_equatable_interface(interface.name, context.codebase).then_some((interface, implemented_type.span()))
+    }) else {
+        return;
+    };
+    let Some(reason) = missing_equality(context, &get_named_object(class_like_metadata.name, None), span) else {
+        return;
+    };
+
+    let class = display_class_like_name(context, class_like_metadata.original_name);
+    let interface_name = display_class_like_name(context, interface.original_name);
+    let extends = if interface.name.as_bytes().eq_ignore_ascii_case(mago_names::SHARP_EQUATABLE.as_bytes()) {
+        String::new()
+    } else {
+        format!(", which extends `{}`", mago_names::EQUATABLE)
+    };
+    let issue = Issue::error(format!("`{class}` implements `{interface_name}`{extends}, so it needs `==`: {reason}."))
+        .with_annotation(
+            Annotation::primary(span).with_message("Its values compare by the `==` of the type that holds them."),
+        );
+    let issue = if class_like_metadata.kind.is_enum() || class_like_metadata.flags.is_struct() {
+        issue
+    } else {
+        issue.with_help(format!("Declare `operator ==` and `hash()` in `{class}`."))
+    };
+
+    context.collector.report_with_code(IssueCode::InvalidImplement, issue);
+}
+
 #[allow(clippy::unwrap_used)]
 fn check_class_like_implements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -2602,6 +2645,8 @@ fn check_class_like_implements<'ctx, 'arena, A>(
     if implemented_types.is_empty() {
         return;
     }
+
+    report_implementer_without_equality(context, class_like_metadata, implemented_types);
 
     let is_struct = class_like_metadata.flags.is_struct();
     let using_kind_str = if is_struct { "struct" } else { class_like_metadata.kind.as_str() };

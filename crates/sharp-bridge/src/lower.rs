@@ -2100,7 +2100,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A header's interfaces, which PHP compiles as the interface list, or null when it names none. A class's base
     /// class is its parent, and a trait is in its `use`. A header's `Iterable<T>` is PHP's `\IteratorAggregate`, whose
-    /// `getIterator()` [`Self::iteration`] writes, spec section 12.
+    /// `getIterator()` [`Self::iteration`] writes, spec section 12. `Equatable` gives an interface `==`, spec section
+    /// 19, and is no type the running code checks, so the list leaves it out.
     fn name_list(&mut self, inheritance: &Inheritance) -> u32 {
         let mut names = Vec::new();
         if let Some(iterable) = inheritance.iterable() {
@@ -2108,6 +2109,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         for name in inheritance.names() {
             let full_name = self.names.get(&name);
+            if full_name.eq_ignore_ascii_case(mago_names::SHARP_EQUATABLE.as_bytes()) {
+                continue;
+            }
             match self.types.class_declaration(word(full_name)).kind {
                 DeclarationKind::Interface => names.push(self.string(ZEND_NAME_FQ, self.line(name), full_name)),
                 DeclarationKind::Class | DeclarationKind::Trait => {}
@@ -7030,7 +7034,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `==`.
     fn equality(&mut self, line: u32, lhs: Side, rhs: Side, negated: bool) -> u32 {
         let call = match self.types.equality(self.side_type(&lhs), self.side_type(&rhs)) {
-            Equality::Running => {
+            Equality::Running | Equality::OwnType => {
                 let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\equals");
                 let lhs = self.side(&lhs);
                 let rhs = self.side(&rhs);

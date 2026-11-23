@@ -24856,6 +24856,74 @@ fn equatable_is_no_return_type_and_joins_object() {
     assert_eq!(compile_errors(("src/Demo/Shapes.sharp", sharp), &EQUATABLE_CLASSES), [refusal, refusal, refusal]);
 }
 
+/// The files the tests of an interface that extends `Equatable` share: `Failure`, which extends it, and two enums that
+/// implement it, `Declined` and `Lost`.
+const EQUATABLE_FAILURES: [(&str, &str); 3] = [
+    ("src/Demo/Failure.sharp", "namespace Demo;\n\npublic interface Failure : Equatable\n{\n}\n"),
+    (
+        "src/Demo/Declined.sharp",
+        "namespace Demo;\n\npublic enum Declined : Failure\n{\n    case Card;\n    case Fraud;\n}\n",
+    ),
+    ("src/Demo/Lost.sharp", "namespace Demo;\n\npublic enum Lost : Failure\n{\n    case Gone;\n}\n"),
+];
+
+/// Spec section 19: an interface that extends `Equatable` has `==`, so `==`, `!=`, a search, a `Set` element and a `Map`
+/// key take its values, which are equal when they are the same type and that type's `==` holds. A value of a type that
+/// can't implement it never equals one of its values.
+#[test]
+fn an_interface_that_extends_equatable_compares_its_values_by_their_own_types_equality() {
+    let sharp = "namespace Demo;\n\npublic class Checks\n{\n    public static bool same(Failure a, Failure b) => a == b;\n\n    public static bool differ(Failure a, Failure? b) => a != b;\n\n    public static bool card(Failure a) => a == Declined.Card;\n\n    public static bool found(List<Failure> failures, Failure failure) => failures.contains(failure);\n\n    public static int held(Set<Failure> failures, Map<Failure, int> counts) => failures.count() + counts.count();\n\n    public static bool cart(Failure a, Cart cart) => a == cart;\n}\n";
+    let others = [EQUATABLE_CLASSES.as_slice(), &EQUATABLE_FAILURES].concat();
+
+    assert_eq!(
+        reported(("src/Demo/Checks.sharp", sharp), &others),
+        ["15:54 invalid-operand `==` cannot compare `Failure` with `Cart`."]
+    );
+}
+
+/// Spec section 19: every type that implements an interface that extends `Equatable` has `==`: an enum, a struct whose
+/// properties have `==`, or a class that declares or inherits `operator ==`. A type without it is refused where its
+/// header names the interface.
+#[test]
+fn a_type_that_implements_an_interface_that_extends_equatable_needs_equality() {
+    let plain = ("src/Demo/Plain.sharp", "namespace Demo;\n\npublic class Plain : Failure\n{\n}\n");
+    let keyed = (
+        "src/Demo/Keyed.sharp",
+        "namespace Demo;\n\npublic class Keyed : Failure\n{\n    public int id { get; set; } = 1;\n\n    public static bool operator ==(Keyed a, Keyed b) => a.id == b.id;\n\n    public int hash() => this.id;\n}\n",
+    );
+    let entity = ("src/Demo/Entity.sharp", "namespace Demo;\n\npublic class Entity : DatabaseEntity, Failure\n{\n}\n");
+    let code = (
+        "src/Demo/Code.sharp",
+        "namespace Demo;\n\npublic struct Code : Failure\n{\n    public Code(public int value { get; }) { }\n}\n",
+    );
+    let held = (
+        "src/Demo/Held.sharp",
+        "namespace Demo;\n\npublic struct Held : Failure\n{\n    public Held(public Cart cart { get; }) { }\n}\n",
+    );
+    let others = [EQUATABLE_CLASSES.as_slice(), &EQUATABLE_FAILURES].concat();
+
+    assert_eq!(
+        each_file(reported, &[plain, keyed, entity, code, held], &others),
+        [
+            vec![
+                "3:22 invalid-implement `Plain` implements `Failure`, which extends `Equatable`, so it needs `==`: `Plain` declares no `operator ==`."
+            ],
+            vec![],
+            vec![],
+            vec![],
+            vec![
+                "3:22 invalid-implement `Held` implements `Failure`, which extends `Equatable`, so it needs `==`: `Held` can't compare by value: `cart` is a `Cart`, which declares no `operator ==`."
+            ],
+        ]
+    );
+    assert_eq!(
+        worded(plain, &others),
+        [
+            "3:22 invalid-implement `Plain` implements `Failure`, which extends `Equatable`, so it needs `==`: `Plain` declares no `operator ==`. | Its values compare by the `==` of the type that holds them. | Declare `operator ==` and `hash()` in `Plain`."
+        ]
+    );
+}
+
 /// Spec section 11: `Object` joins other bounds with `&`, as C#'s `where T : class, IShareable` does, so a value of
 /// `<T : Object & Shareable>` reaches `Shareable`'s members and a type argument is checked against `Shareable`.
 #[test]

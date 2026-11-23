@@ -18,6 +18,7 @@ use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_true;
+use mago_codex::ttype::holds_equatable_interface;
 use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
@@ -1178,6 +1179,15 @@ fn refusal(
             None
         }
         BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) if compares_function => Some(Refusal::Instance),
+        // Spec section 19: a value of an interface that extends `Equatable` equals a value of its own type by that
+        // type's `==`, so it compares with any value of a type that implements such an interface, and with no other.
+        BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_)
+            if [lhs_type, rhs_type].into_iter().any(|side| holds_equatable_interface(side, codebase)) =>
+        {
+            let implements = |side: &TUnion| side.types.iter().all(|atomic| implements_equatable(atomic, codebase));
+
+            (!implements(lhs_type) || !implements(rhs_type)).then_some(Refusal::DifferentTypes)
+        }
         BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) => {
             let structs: Vec<Word> = lhs
                 .iter()
@@ -1264,6 +1274,22 @@ fn refusal(
         | BinaryOperator::GreaterThanOrEqual(_)
         | BinaryOperator::Spaceship(_) => ordering_refusal(lhs_type, rhs_type, codebase),
         _ => None,
+    }
+}
+
+/// Whether a value of `atomic` compares with a value of an interface that extends `Equatable`, spec section 19: `null`,
+/// an unchecked `Any`, which compares by value, and an object of a type that is or implements such an interface, which
+/// has `==`.
+fn implements_equatable(atomic: &TAtomic, codebase: &CodebaseMetadata) -> bool {
+    match atomic {
+        TAtomic::Null | TAtomic::Mixed(_) => true,
+        TAtomic::GenericParameter(parameter) => {
+            parameter.constraint.types.iter().all(|atomic| implements_equatable(atomic, codebase))
+        }
+        atomic => atomic
+            .get_all_object_names()
+            .into_iter()
+            .any(|name| codebase.is_instance_of(name, word(mago_names::SHARP_EQUATABLE))),
     }
 }
 
