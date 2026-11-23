@@ -1106,7 +1106,9 @@ impl<'body, 'program> Body<'body, 'program> {
         self.choose(&Choice::If(lhs, Box::new(Choice::Branch(then)), Box::new(Choice::Branch(otherwise))))
     }
 
-    /// `c ? a : b`, `expression`, which runs only the branch `c` chooses, as the exact `Int` it computes when `exact`.
+    /// `c ? a : b`, `expression`, which runs only the branch `c` chooses, as the exact `Int` it computes when `exact`. It
+    /// is a step that gives each branch's value, as an `if` statement is, even when both branches are values, so the
+    /// fixed steps read the value it gives in each case, and a fact about that step is a fact about the value.
     fn conditional(&mut self, expression: &Expression, conditional: &Conditional, exact: bool) -> String {
         if let Expression::Is(_) = conditional.condition.unparenthesized() {
             let Some((arms, otherwise)) = self.tests(expression, conditional, exact) else {
@@ -1124,7 +1126,7 @@ impl<'body, 'program> Body<'body, 'program> {
         let fails = self.path.branch(conditional.condition, false);
         let otherwise = self.under(fails, |body| body.conditional_branch(conditional.r#else, expression, exact));
 
-        self.choose(&Choice::If(condition, Box::new(Choice::Branch(then)), Box::new(Choice::Branch(otherwise))))
+        self.bind_choice(&Choice::If(condition, Box::new(Choice::Branch(then)), Box::new(Choice::Branch(otherwise))))
     }
 
     /// The arms of `conditional`, a `?:` of `whole` whose condition is an `is` test, and the branch that runs where no
@@ -2891,12 +2893,13 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// The value of the branch `choice` runs. A choice whose branches only return a pure term is a term, and any other
-    /// is bound from a nested `do` block, which runs only its own branch's effects.
+    /// is [`Self::bind_choice`].
     fn choose(&mut self, choice: &Choice) -> String {
-        if let Some(term) = term(choice) {
-            return term;
-        }
+        term(choice).unwrap_or_else(|| self.bind_choice(choice))
+    }
 
+    /// The value of the branch `choice` runs, bound from a nested `do` block, which runs only its own branch's effects.
+    fn bind_choice(&mut self, choice: &Choice) -> String {
         let temporary = self.fresh();
         self.lines.push(format!("let {temporary} ← do"));
         self.lines.extend(indented(&statements(choice), 4));

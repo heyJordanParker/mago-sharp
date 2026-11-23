@@ -78,15 +78,35 @@ const PROOF_STEPS: &str = "Sharp.Lean.Proof";
 const LAW_STATEMENT: &str = "Sharp.Lean.Law";
 
 /// The lemmas the fixed steps of a case rewrite with, beside the definitions the law uses: an `if` on a condition that
-/// decides, the monad's steps, a law's claim, the int operations and comparisons, an int literal's value, and a value
-/// a nullable side holds.
+/// decides, the monad's steps, a law's claim and each choice it makes, a fact about the values a step binds, which a law's `when` and a body's
+/// `sharp_call%` state and `Sharp/Lean/Proof.lean`'s search reads one by one too, a goal over a value one of several
+/// branches gives, which holds when it holds for each, a case no value reaches, the int operations and comparisons,
+/// `b ≤ a` as `¬ a < b` on an `int` and on the exact `Int` a condition computes, so a fact that one comparison states
+/// decides a test that the other writes, an int literal's value, and a value a nullable side holds or lacks.
 const STEP_LEMMAS: &[&str] = &[
     "↓reduceIte",
     "bind_assoc",
     "pure_bind",
     "holds_bind",
     "holds_pure",
+    "holds_ite",
     "pure_inj",
+    "bind_eq_pure",
+    "map_eq_pure",
+    "ite_eq_pure",
+    "throw_eq_pure",
+    "or_imp",
+    "forall_and",
+    "forall_exists_index",
+    "and_imp",
+    "forall_eq'",
+    "implies_true",
+    "false_implies",
+    "← Int64.not_lt",
+    "← Int.not_lt",
+    "bne_iff_ne",
+    "ne_eq",
+    "reduceCtorEq",
     "int.add_eq_pure",
     "int.sub_eq_pure",
     "int.toInt_max",
@@ -115,19 +135,26 @@ const VALUE_LEMMAS: &[&str] = &[
     "Int64.reduceToInt",
 ];
 
-/// The lemmas the fixed steps of a case of a body rewrite with too: a fact `sharp_call%` states about the values a
-/// step binds, which `Sharp/Lean/Proof.lean` reads one by one, as its search does, and a goal over a value one of
-/// several branches gives, which holds when it holds for each.
-const CASE_LEMMAS: &[&str] = &[
+/// The lemmas that read a law's `when` as one fact for each step it computes, in each case of each branch it takes,
+/// as `holds_bind` reads the law's claim, so the claim's own steps are those facts.
+const CONDITION_LEMMAS: &[&str] = &[
     "bind_eq_pure",
-    "map_eq_pure",
+    "bind_assoc",
+    "pure_bind",
     "ite_eq_pure",
-    "throw_eq_pure",
     "or_imp",
     "forall_and",
     "forall_exists_index",
     "and_imp",
+    "pure_inj",
+    "decide_eq_true_eq",
+    "← Int64.not_lt",
+    "← Int.not_lt",
 ];
+
+/// How the Lean name of each declaration of the standard library starts. The first pass of the fixed steps leaves them
+/// folded, so a value a law's `when` and its claim both compute with them is one value.
+const LIBRARY: &str = "«Sharp».";
 
 /// The record in the `.sharp` folder of how each law's proof ended, by the proof's key.
 pub const PROOFS: &str = "proofs.json";
@@ -500,19 +527,29 @@ fn proof_key(
 }
 
 /// The theorem of `law` with its fixed steps, which close it with the definitions its statement uses: a law without a
-/// body closed by [`steps`] with [`STEP_LEMMAS`], and a law with one with each case closed by them with
-/// [`CASE_LEMMAS`] and the statement of each law whose fact a case can hold too. An invariant of a machine has none.
+/// body closed by [`steps`] with [`STEP_LEMMAS`], and a law with one with each case closed by them with the statement
+/// of each law whose fact a case can hold too. An invariant of a machine has none.
+/// A law without a body that states a `when`, which its one case holds as its first condition, first reads it with
+/// [`CONDITION_LEMMAS`] and the program's own definitions it uses, then closes each case of each branch it takes.
 fn scripted(law: &Law, program: &Program<'_>) -> Option<String> {
     let (plain, recursive) = program.definitions(&law.statement);
     if let Some(opening) = &law.proof.opening {
-        return Some(format!("{opening}{}", steps(STEP_LEMMAS, &plain, &recursive)));
+        let steps = steps(STEP_LEMMAS, &plain, &recursive);
+        if law.proof.cases.first().is_none_or(|case| case.conditions.is_empty()) {
+            return Some(format!("{opening}{steps}"));
+        }
+        let condition: Vec<&str> = CONDITION_LEMMAS.iter().copied().chain(own(&plain)).collect();
+
+        return Some(format!(
+            "{opening}revert «when»\n  simp only [{}]\n  and_intros\n  all_goals (intros; subst_vars)\n  all_goals ({steps})",
+            condition.join(", ")
+        ));
     }
     if law.proof.closes.is_empty() {
         return None;
     }
     let lemmas: Vec<&str> = STEP_LEMMAS
         .iter()
-        .chain(CASE_LEMMAS)
         .copied()
         .chain(std::iter::once(law.statement.as_str()))
         .chain(law.proof.laws.iter().map(|(statement, ..)| statement.as_str()))
@@ -524,26 +561,39 @@ fn scripted(law: &Law, program: &Program<'_>) -> Option<String> {
 }
 
 /// The fixed steps that close a case: `simp_all` with `lemmas` and the definitions `plain` as rewrites, first without
-/// [`VALUE_LEMMAS`] and then with them, then `omega` or `decide` on each goal it leaves. With `recursive` definitions,
-/// the steps first unfold each of them once, as a recursion on a value the case does not know needs, and else rewrite
-/// with them too, until each recursion ends, as one on values the law writes out needs.
+/// [`VALUE_LEMMAS`] and with the program's own definitions alone, which rewrites the goal with the facts that the
+/// standard library's calls give, then without [`VALUE_LEMMAS`] and with every definition, then with them, then
+/// `omega` or `decide` on each goal it leaves, or that last rewrite again once each value a fact names is in its place,
+/// as a case's value is where a fact names the constructor that built it. With `recursive` definitions, the steps first
+/// unfold each of them once, as a recursion on a value the case does not know needs, and else rewrite with them too,
+/// until each recursion ends, as one on values the law writes out needs.
 fn steps(lemmas: &[&str], plain: &[&str], recursive: &[&str]) -> String {
-    let simp = |definitions: &[&[&str]]| {
-        let pass = |lemmas: Vec<&str>| {
-            let lemmas: Vec<&str> = lemmas.into_iter().chain(definitions.iter().copied().flatten().copied()).collect();
-            format!("(try simp_all (config := {{ decide := true }}) only [{}])", lemmas.join(", "))
+    let closed = |definitions: &[&[&str]]| {
+        let pass = |lemmas: &[&str], definitions: &[&str]| {
+            let rewrites = [lemmas, definitions].concat();
+            format!("(try simp_all (config := {{ decide := true }}) only [{}])", rewrites.join(", "))
         };
-        let merging = lemmas.iter().copied().filter(|lemma| !VALUE_LEMMAS.contains(lemma)).collect();
+        let reached: Vec<&str> = definitions.concat();
+        let merging: Vec<&str> = lemmas.iter().copied().filter(|lemma| !VALUE_LEMMAS.contains(lemma)).collect();
+        let own: Vec<&str> = own(&reached).collect();
+        let full = pass(lemmas, &reached);
+        let close = format!(
+            "all_goals (intros; and_intros; all_goals (intros; subst_vars; first | rfl | omega | decide | ({full}; done)))"
+        );
 
-        format!("{}; {}", pass(merging), pass(lemmas.to_vec()))
+        format!("({}; {}; {full}; {close}; done)", pass(&merging, &own), pass(&merging, &reached))
     };
-    let close = "all_goals (intros; subst_vars; first | rfl | omega | decide)";
-    let rewritten = format!("({}; {close}; done)", simp(&[plain, recursive]));
+    let rewritten = closed(&[plain, recursive]);
     if recursive.is_empty() {
         return rewritten;
     }
 
-    format!("first | (unfold {}; {}; {close}; done) | {rewritten}", recursive.join(" "), simp(&[plain]))
+    format!("first | (unfold {}; {}) | {rewritten}", recursive.join(" "), closed(&[plain]))
+}
+
+/// Each of `definitions` that the program declares, outside the standard library.
+fn own<'definition>(definitions: &[&'definition str]) -> impl Iterator<Item = &'definition str> {
+    definitions.iter().copied().filter(|definition| !definition.starts_with(LIBRARY))
 }
 
 /// `laws`, each with the translation that states it, one law to an entry, in order, so each is a check of its own,

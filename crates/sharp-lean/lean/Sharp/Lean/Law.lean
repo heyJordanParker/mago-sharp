@@ -54,6 +54,41 @@ private theorem eq_pure {α : Type} (x : M α) (a : α) : x = pure a ↔ x.run =
   | none => simp
   | some r => cases r <;> simp [Except.map]
 
+/-- A fact about the values code computes, as a law's `when` and a body's facts state, reads them one by one, as
+`holds_bind` reads a law's claim. -/
+@[simp] theorem bind_eq_pure {α β : Type} (x : M α) (f : α → M β) (b : β) :
+    x >>= f = pure b ↔ ∃ a, x = pure a ∧ f a = pure b := by
+  simp only [eq_pure, ExceptT.run_bind]
+  cases hx : x.run with
+  | none => simp
+  | some r => cases r <;> simp
+
+/-- A step that maps what it reads, as a template of an element a list read gives, gives a value only when the read
+does. `grind` reads it too, in each case of an `if` it splits in a fact. -/
+@[simp, grind =] theorem map_eq_pure {α β : Type} (f : α → β) (x : M α) (b : β) :
+    f <$> x = pure b ↔ ∃ a, x = pure a ∧ f a = b := by
+  rw [← bind_pure_comp, bind_eq_pure]
+  simp
+
+@[simp] theorem throw_eq_pure {α : Type} (e : Throwable) (b : α) : (throw e : M α) = pure b ↔ False := by
+  constructor
+  · intro h
+    have := congrArg ExceptT.run h
+    simp [ExceptT.run_pure] at this
+  · intro h
+    exact h.elim
+
+/-- A value one of two branches gives, as `? :` gives it, is the one each branch gives where its condition holds. The
+value comes first, so a step that binds it reads as that value in each case. -/
+@[simp] theorem ite_eq_pure {α : Type} (c : Prop) [Decidable c] (x y : M α) (b : α) :
+    (if c then x else y) = pure b ↔ (x = pure b ∧ c) ∨ (y = pure b ∧ ¬c) := by
+  by_cases h : c <;> simp [h]
+
+/-- A claim that chooses, as `||` and `? :` do, holds when each choice holds where it is made. -/
+@[simp] theorem holds_ite (c : Prop) [Decidable c] (x y : M Bool) :
+    holds (if c then x else y) ↔ (c → holds x) ∧ (¬c → holds y) := by
+  by_cases h : c <;> simp [h]
+
 /-! A counting loop is `List.countP` of its list, so a law over it reads that it counts no more than the list holds. -/
 
 attribute [simp] List.countP_le_length

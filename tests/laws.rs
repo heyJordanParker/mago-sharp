@@ -4636,3 +4636,18 @@ fn a_false_law_over_a_join_is_not_proven() {
     );
     assert!(printed(&output).contains(" = fails for: a = \"\", b = \"\"\n"), "{}", printed(&output));
 }
+
+const VISIT: &str = "namespace App.Visits;\n\nimport Sharp.Time.Duration;\nimport Sharp.Time.Instant;\n\npublic machine Visit\n{\n    final case Live(Instant idleAt, Instant endsAt);\n    final case Idle(Instant endsAt);\n    final case Ended;\n\n    public const int IDLE_MINUTES = 5;\n    public const int LIFETIME_MINUTES = 30;\n    public const int MAX_HOURS = 24;\n\n    internal static Visit.Live seen(Instant started, Instant lastSeen)\n    {\n        const lapses = lastSeen.plus(Duration.ofMinutes(Visit.LIFETIME_MINUTES));\n        const ends = started.plus(Duration.ofHours(Visit.MAX_HOURS));\n        return Visit.Live(lastSeen.plus(Duration.ofMinutes(Visit.IDLE_MINUTES)), lapses < ends ? lapses : ends);\n    }\n\n    internal static Visit at(Visit status, Instant now)\n        => status is Visit.Live live\n            ? (now >= live.endsAt ? Visit.Ended : now >= live.idleAt ? Visit.Idle(live.endsAt) : live)\n            : status is Visit.Idle idle\n                ? (now >= idle.endsAt ? Visit.Ended : idle)\n                : status;\n\n    law aVisitEndsItsLifetimeAfterTheSighting(Instant started, Instant lastSeen)\n        when lastSeen.plus(Duration.ofMinutes(Visit.LIFETIME_MINUTES)) < started.plus(Duration.ofHours(Visit.MAX_HOURS))\n        => Visit.seen(started, lastSeen).endsAt == lastSeen.plus(Duration.ofMinutes(Visit.LIFETIME_MINUTES));\n    law aVisitNeverOutlivesItsLongestLength(Instant started, Instant lastSeen)\n        when lastSeen.plus(Duration.ofMinutes(Visit.LIFETIME_MINUTES)) >= started.plus(Duration.ofHours(Visit.MAX_HOURS))\n        => Visit.seen(started, lastSeen).endsAt == started.plus(Duration.ofHours(Visit.MAX_HOURS));\n    law aSightingBeforeTheEndStaysInTheVisit(Instant started, Instant lastSeen, Instant now)\n        when now < Visit.seen(started, lastSeen).endsAt\n        => !(Visit.at(Visit.seen(started, lastSeen), now) is Visit.Ended);\n    law aSightingAtTheEndOrAfterEndsTheVisit(Instant started, Instant lastSeen, Instant now)\n        when now >= Visit.seen(started, lastSeen).endsAt\n        => Visit.at(Visit.seen(started, lastSeen), now) is Visit.Ended;\n}\n";
+
+/// A law over `Instant.plus` of a `Duration` a constant gives, compared with another `Instant`, proves within its time,
+/// and so does a law over the case a `?:` between two `Instant`s chooses.
+#[test]
+fn a_law_over_instant_plus_a_constant_duration_proves() {
+    let directory = library_project(&[("app/Visits/Visit.sharp", VISIT)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Visits/Visit.sharp").exists());
+}
