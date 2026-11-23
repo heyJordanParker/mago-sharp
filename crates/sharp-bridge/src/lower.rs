@@ -315,6 +315,7 @@ const ZEND_ACC_GENERATOR: u32 = 1 << 24;
 const ZEND_ACC_ENUM: u32 = 1 << 28;
 const ZEND_ACC_SHARP_HIDDEN: u32 = 1 << 13;
 const ZEND_ACC_SHARP_INTERNAL: u32 = 1 << 30;
+const ZEND_ACC_SHARP_INTERNAL_SET: u32 = 1 << 17;
 const ZEND_SHARP_RESULT_CROSSES: u32 = 1;
 const ZEND_SHARP_RESULT_CALLER_CHECKED: u32 = 1 << 1;
 const ZEND_SHARP_TYPE_OF_LIST: u32 = 1;
@@ -10894,8 +10895,10 @@ fn without_readonly<'hint, 'arena>(hint: &'hint Hint<'arena>) -> &'hint Hint<'ar
 
 /// The flags a property's accessors add: `readonly` for a get-only auto-property, which spec section 6.1 sets in the
 /// constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` or `init`
-/// accessor's access modifier, and `protected(set)` for an `init` without one. A get-only property with storage and
-/// hooks, a body that uses `field` or a `get;` with attributes, takes `protected(set)`, the set visibility of
+/// accessor's access modifier, and `protected(set)` for an `init` without one. An `internal set` is `protected(set)`
+/// with the engine's `ZEND_ACC_SHARP_INTERNAL_SET`, which holds each write to the property's namespace, spec section
+/// 5, and a property that is itself `internal` takes neither. A get-only property with storage and hooks, a body
+/// that uses `field` or a `get;` with attributes, takes `protected(set)`, the set visibility of
 /// `readonly`, since PHP refuses hooks on a `readonly` property, and one without storage takes none, because PHP
 /// refuses a set visibility on a read-only virtual property. PHP drops a set visibility equal to the property's own,
 /// so a private property, or a protected one with `protected(set)`, takes none, and the flags carry only what the
@@ -10919,9 +10922,9 @@ fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, 
             // `init` sets the property while the object is created, in the constructors of its class and its
             // subclasses, so it runs as `protected(set)`, and the analyzer refuses every write after that.
             None | Some(Modifier::Internal(_)) if setter.name.value == b"init" => ZEND_ACC_PROTECTED_SET,
-            // PHP has no namespace reach, so the analyzer checks spec section 5's `internal set`, and other classes
-            // of the namespace write the property as PHP's public set.
-            None | Some(Modifier::Internal(_)) => 0,
+            None => 0,
+            Some(Modifier::Internal(_)) if modifiers.contains_internal() => 0,
+            Some(Modifier::Internal(_)) => ZEND_ACC_PROTECTED_SET | ZEND_ACC_SHARP_INTERNAL_SET,
             Some(Modifier::Protected(_)) => ZEND_ACC_PROTECTED_SET,
             Some(Modifier::Private(_)) => ZEND_ACC_PRIVATE_SET,
             Some(modifier) => unreachable!("check_slice refuses the accessor modifier `{modifier}`"),

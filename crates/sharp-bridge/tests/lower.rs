@@ -18394,8 +18394,10 @@ fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks
 ///
 /// PHP has no namespace reach, so spec section 5's `internal` runs as public, with the engine's flag for it: an
 /// `internal` constant, property and method carry `ZEND_ACC_SHARP_INTERNAL`, 1 << 30, by which the engine holds them to
-/// their namespace and reflection gives them `Visibility.Internal`, spec section 25. `internal set` takes no set
-/// visibility, and `internal init` takes the `protected(set)` of every `init`, which only constructors run.
+/// their namespace and reflection gives them `Visibility.Internal`, spec section 25. `internal set` is
+/// `protected(set)`, 1 << 11, with the engine's `ZEND_ACC_SHARP_INTERNAL_SET`, 1 << 17, by which the engine holds each
+/// write to the namespace, so `[133121]` is `ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED_SET | ZEND_ACC_SHARP_INTERNAL_SET`.
+/// `internal init` takes the `protected(set)` of every `init`, which only constructors run.
 #[test]
 fn internal_runs_as_public_with_the_engine_flag() {
     let lowered = Lowered::with(
@@ -18419,7 +18421,7 @@ fn internal_runs_as_public_with_the_engine_flag() {
                       null
                   null
                   ZVAL [1] "int"
-                PROP_GROUP [1]
+                PROP_GROUP [133121]
                   ZVAL [1] "int"
                   PROP_DECL
                     PROP_ELEM
