@@ -417,15 +417,15 @@ fn method_with(signature: &str, body: &str) -> String {
     method_in("Report", signature, body)
 }
 
-/// A file declaring a method with `signature` and `body` in the class `header`. Its body starts on line 9. It imports
-/// `Lib.Calc` when it names `Calc`, and the test declares the class in its library. Spec section 23 refuses an import
-/// that names nothing, so a file that names no `Calc` holds a blank line in its place.
+/// A file declaring a method with `signature` and `body` in the public class `header`. Its body starts on line 9. It
+/// imports `Lib.Calc` when it names `Calc`, and the test declares the class in its library. Spec section 23 refuses an
+/// import that names nothing, so a file that names no `Calc` holds a blank line in its place.
 fn method_in(header: &str, signature: &str, body: &str) -> String {
     let import =
         if [header, signature, body].iter().any(|part| part.contains("Calc")) { "import Lib.Calc;" } else { "" };
 
     format!(
-        "namespace App.Tenant;\n\n{import}\n\nclass {header}\n{{\n    public {signature}\n    {{\n{body}    }}\n}}\n"
+        "namespace App.Tenant;\n\n{import}\n\npublic class {header}\n{{\n    public {signature}\n    {{\n{body}    }}\n}}\n"
     )
 }
 
@@ -568,7 +568,7 @@ fn a_word_php_sharp_does_not_reserve_names_a_property_a_local_and_a_parameter() 
 
     for word in words {
         let lowered = Lowered::new(&format!(
-            "namespace App.Tenant;\n\nclass Report\n{{\n    private int {word} = 1;\n\n    public int run(int extra)\n    {{\n        const {word} = extra + this.{word};\n        return {word};\n    }}\n\n    public int read(int {word}) => {word};\n}}\n"
+            "namespace App.Tenant;\n\npublic class Report\n{{\n    private int {word} = 1;\n\n    public int run(int extra)\n    {{\n        const {word} = extra + this.{word};\n        return {word};\n    }}\n\n    public int read(int {word}) => {word};\n}}\n"
         ));
 
         assert_eq!(
@@ -888,7 +888,7 @@ fn every_line_is_the_line_the_zend_scanner_counts() {
 #[test]
 fn a_file_declares_strict_types_then_its_namespace_and_classes() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\npublic class Report\n{\n}\n",
         &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")],
     );
 
@@ -1356,7 +1356,7 @@ fn a_call_through_a_renamed_import_lowers_to_the_call_through_the_plain_import()
 /// ```
 #[test]
 fn a_file_without_a_namespace_declares_its_classes_globally() {
-    let lowered = Lowered::new("class Report {}\n");
+    let lowered = Lowered::new("public class Report {}\n");
 
     assert_eq!(
         lowered.tree(),
@@ -1466,7 +1466,7 @@ fn a_method_without_an_access_modifier_is_a_private_function() {
 #[test]
 fn a_field_is_a_property_group_of_one_property() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int count = 0;\n    protected Calc calc;\n\n    public Report(Calc calc)\n    {\n        this.calc = calc;\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\npublic class Report\n{\n    private int count = 0;\n    protected Calc calc;\n\n    public Report(Calc calc)\n    {\n        this.calc = calc;\n    }\n}\n",
         &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")],
     );
     let class = lowered.child(lowered.root(), 2);
@@ -1535,7 +1535,7 @@ fn a_field_is_a_property_group_of_one_property() {
 #[test]
 fn a_field_without_an_access_modifier_is_a_private_property() {
     let lowered = Lowered::with(
-        "namespace App.Shop;\n\nclass Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer) uses Http> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Money(Offer) uses Http> priceOf, Function<Charge(Cart) uses Http> charge)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n    }\n}\n",
+        "namespace App.Shop;\n\npublic class Checkout\n{\n    Map<string, Plan> cache = [:];\n    Function<Money(Offer) uses Http> priceOf;\n    Function<Charge(Cart) uses Http> charge;\n\n    public Checkout(Function<Money(Offer) uses Http> priceOf, Function<Charge(Cart) uses Http> charge)\n    {\n        this.priceOf = priceOf;\n        this.charge = charge;\n    }\n}\n",
         &[
             SHOP,
             (
@@ -1675,7 +1675,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
 #[test]
 fn an_auto_property_is_a_property_with_its_set_visibility() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    protected int total { get; set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n\n    public Report()\n    {\n        this.name = \"\";\n        this.id = 1;\n        this.total = 0;\n        this.hidden = 2;\n    }\n}\n",
+        "public class Report\n{\n    public int views { get; private set; } = 0;\n    public string name { get; set; }\n    public int id { get; }\n    protected int total { get; set; }\n    private int hidden { get; }\n    public string title { get; init; }\n    public string tag { get; private init; }\n\n    public Report()\n    {\n        this.name = \"\";\n        this.id = 1;\n        this.total = 0;\n        this.hidden = 2;\n    }\n}\n",
     );
     let groups: Vec<(u32, String)> = lowered
         .nodes()
@@ -1710,7 +1710,7 @@ fn an_auto_property_is_a_property_with_its_set_visibility() {
 #[test]
 fn the_constructor_is_a_public_function_named_construct() {
     let lowered = Lowered::new(
-        "class Report\n{\n    private int count;\n\n    public\n    Report(int start)\n    {\n        this.count = start;\n    }\n}\n",
+        "public class Report\n{\n    private int count;\n\n    public\n    Report(int start)\n    {\n        this.count = start;\n    }\n}\n",
     );
     let constructor =
         lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_METHOD).expect("a constructor");
@@ -1807,7 +1807,7 @@ fn an_expression_body_is_the_body_that_returns_its_expression() {
 #[test]
 fn a_computed_property_is_a_property_with_a_short_get_hook() {
     let lowered = Lowered::new(
-        "class Report\n{\n    private string name = \"\";\n\n    public string slug => this.name + \"!\";\n}\n",
+        "public class Report\n{\n    private string name = \"\";\n\n    public string slug => this.name + \"!\";\n}\n",
     );
     let class = lowered.child(lowered.root(), 1);
 
@@ -1879,7 +1879,7 @@ fn property_groups(lowered: &Lowered) -> Vec<String> {
 #[test]
 fn accessor_bodies_are_property_hooks() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n    public int slug { get; init => field = value * 2; }\n\n    public Report()\n    {\n        this.name = \"\";\n        this.count = 0;\n        this.size = 0;\n        this.guarded = 1;\n    }\n\n    public void resize(int to)\n    {\n    }\n}\n",
+        "public class Report\n{\n    public string name { get => field; set => field = value; }\n    public int count { get; private set => field = value + 1; }\n    public int total { get { return this.count; } }\n    public int size { get; set => this.resize(value); }\n    public int kept { get => field * 2; } = 3;\n    protected int guarded { get => field; }\n    public int slug { get; init => field = value * 2; }\n\n    public Report()\n    {\n        this.name = \"\";\n        this.count = 0;\n        this.size = 0;\n        this.guarded = 1;\n    }\n\n    public void resize(int to)\n    {\n    }\n}\n",
     );
 
     assert_eq!(
@@ -2094,7 +2094,7 @@ fn accessor_bodies_are_property_hooks() {
 #[test]
 fn a_field_getter_is_plain_storage_unless_a_parent_has_a_get_hook() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Shouter;\n\nclass Report : Shouter\n{\n    public override string word { get => field; set; } = \"b\";\n    public int kept { get { return field; } set; } = 1;\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Shouter;\n\npublic class Report : Shouter\n{\n    public override string word { get => field; set; } = \"b\";\n    public int kept { get { return field; } set; } = 1;\n}\n",
         &[(
             "src/Lib/Shouter.php",
             "<?php namespace Lib; class Shouter { public string $word = 'b' { get => strtoupper($this->word); } }",
@@ -2158,7 +2158,7 @@ fn a_field_getter_is_plain_storage_unless_a_parent_has_a_get_hook() {
 #[test]
 fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is_refused() {
     let nested = Lowered::new(
-        "class Report\n{\n    public int a { get { if (this.ready()) { return field; } return 0; } }\n\n    public Report()\n    {\n        this.a = 1;\n    }\n\n    public bool ready()\n    {\n        return true;\n    }\n}\n",
+        "public class Report\n{\n    public int a { get { if (this.ready()) { return field; } return 0; } }\n\n    public Report()\n    {\n        this.a = 1;\n    }\n\n    public bool ready()\n    {\n        return true;\n    }\n}\n",
     );
     let lambda =
         Lowered::new("class Report\n{\n    public int b { get { const read = () => field; return read(); } }\n}\n");
@@ -2257,7 +2257,7 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 #[test]
 fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_methods() {
     let lowered = Lowered::with(
-        "class Meter\n{\n    public static int twice { get => 2; }\n    public static int thrice { get { return 3; } }\n    public static int hits { get; set; willSet => Meter.log(\"hit\"); } = 0;\n    public static string label { get; private set; didSet => Meter.log(field); } = Words.of(1);\n    public static string? note { get; set; didSet => Meter.log(field); } = null;\n\n    public static void log(string? text)\n    {\n    }\n\n    public static void run()\n    {\n        ++Meter.hits;\n        --Meter.hits;\n        Meter.hits--;\n        Meter.note ??= \"n\";\n        Meter.label += \"l\";\n    }\n}\n",
+        "public class Meter\n{\n    public static int twice { get => 2; }\n    public static int thrice { get { return 3; } }\n    public static int hits { get; set; willSet => Meter.log(\"hit\"); } = 0;\n    public static string label { get; private set; didSet => Meter.log(field); } = Words.of(1);\n    public static string? note { get; set; didSet => Meter.log(field); } = null;\n\n    public static void log(string? text)\n    {\n    }\n\n    public static void run()\n    {\n        ++Meter.hits;\n        --Meter.hits;\n        Meter.hits--;\n        Meter.note ??= \"n\";\n        Meter.label += \"l\";\n    }\n}\n",
         &[WORDS, ("src/Stubs/Words.sharp", "namespace Stubs;\n\nimport Words;\n\nextern Words uses none;\n")],
     );
 
@@ -2604,7 +2604,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
 #[test]
 fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
     let lowered = Lowered::new(
-        "class Tally\n{\n    public static int doubled => Tally.total * 2;\n    public static int total { get; private set => field = value + 1; } = 0;\n\n    public static int run()\n    {\n        Tally.total = 4;\n        Tally.total += 2;\n        return Tally.total++ + Tally.doubled;\n    }\n}\n",
+        "public class Tally\n{\n    public static int doubled => Tally.total * 2;\n    public static int total { get; private set => field = value + 1; } = 0;\n\n    public static int run()\n    {\n        Tally.total = 4;\n        Tally.total += 2;\n        return Tally.total++ + Tally.doubled;\n    }\n}\n",
     );
 
     assert_eq!(
@@ -2804,7 +2804,7 @@ fn a_static_lazy_property_keeps_its_value_for_a_singleton_s_lifetime() {
 #[test]
 fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_statics_are_built() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int size { get; } = 3;\n    public static Calc calc { get; } = new Calc(1);\n    private static string name = Calc.label(\" a \");\n    private static int next = Report.size + 1;\n    private static int most = Report.MOST + 1;\n    const int MOST = 9;\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\npublic class Report\n{\n    public static int size { get; } = 3;\n    public static Calc calc { get; } = new Calc(1);\n    private static string name = Calc.label(\" a \");\n    private static int next = Report.size + 1;\n    private static int most = Report.MOST + 1;\n    const int MOST = 9;\n}\n",
         &[CALC_LABEL],
     );
 
@@ -3732,7 +3732,7 @@ fn a_generic_behavior_is_created_with_its_type_arguments() {
 #[test]
 fn observers_run_inside_the_set_hook_once_the_object_is_built() {
     let lowered = Lowered::with(
-        "class Report\n{\n    public string name { get; set; willSet => this.log(field); didSet => this.log(field); } = \"\";\n    public int count { get; set { field = value * 2; } didSet { this.log(\"count\"); } } = 0;\n    public string title { get; set => field = Words.trim(value); } = Words.of(1);\n\n    public void log(Any? text)\n    {\n    }\n}\n",
+        "public class Report\n{\n    public string name { get; set; willSet => this.log(field); didSet => this.log(field); } = \"\";\n    public int count { get; set { field = value * 2; } didSet { this.log(\"count\"); } } = 0;\n    public string title { get; set => field = Words.trim(value); } = Words.of(1);\n\n    public void log(Any? text)\n    {\n    }\n}\n",
         &[WORDS, ("src/Stubs/Words.sharp", "namespace Stubs;\n\nimport Words;\n\nextern Words uses none;\n")],
     );
 
@@ -3931,7 +3931,7 @@ fn observers_run_inside_the_set_hook_once_the_object_is_built() {
 #[test]
 fn a_return_in_will_set_jumps_past_it_to_the_write() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public int limit { get; set; willSet { for (const step of [1, 2]) { if (step == value) { return; } } this.log(() => { return 1; }); } } = 0;\n    public static string? label { get; set; willSet { const shown = value ?? return; Report.note(shown); } } = null;\n    public int size { get; set; willSet => this.log(() => 1); } = 0;\n\n    public void log(Function<int()> text)\n    {\n    }\n\n    public static void note(string text)\n    {\n    }\n}\n",
+        "public class Report\n{\n    public int limit { get; set; willSet { for (const step of [1, 2]) { if (step == value) { return; } } this.log(() => { return 1; }); } } = 0;\n    public static string? label { get; set; willSet { const shown = value ?? return; Report.note(shown); } } = null;\n    public int size { get; set; willSet => this.log(() => 1); } = 0;\n\n    public void log(Function<int()> text)\n    {\n    }\n\n    public static void note(string text)\n    {\n    }\n}\n",
     );
 
     let groups = property_groups(&lowered);
@@ -4073,7 +4073,7 @@ fn a_return_in_will_set_jumps_past_it_to_the_write() {
 #[test]
 fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public int size { get => this.read(); set; }\n\n    public Report()\n    {\n        this.size = 1;\n    }\n\n    public int read()\n    {\n        return 1;\n    }\n}\n",
+        "public class Report\n{\n    public int size { get => this.read(); set; }\n\n    public Report()\n    {\n        this.size = 1;\n    }\n\n    public int read()\n    {\n        return 1;\n    }\n}\n",
     );
 
     assert_eq!(
@@ -4130,7 +4130,7 @@ fn an_auto_accessor_beside_a_body_without_field_is_the_hook_over_the_storage() {
 #[test]
 fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() {
     let lowered = Lowered::with(
-        "import Lib.Model;\nimport InvalidArgumentException;\n\nclass Order : Model\n{\n    public int price { get; set { if (value < 0) { throw new InvalidArgumentException(\"negative\"); } field = value; } } = 0;\n    public Address shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n}\n",
+        "import Lib.Model;\nimport InvalidArgumentException;\n\npublic class Order : Model\n{\n    public int price { get; set { if (value < 0) { throw new InvalidArgumentException(\"negative\"); } field = value; } } = 0;\n    public Address shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n}\n",
         &[
             common::MODEL,
             common::ADDRESS,
@@ -4239,7 +4239,7 @@ fn a_validating_set_and_a_property_over_a_parents_methods_are_their_php_hooks() 
 #[test]
 fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
     let lowered = Lowered::with(
-        "import Lib.Model;\n\nclass Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n",
+        "import Lib.Model;\n\npublic class Order : Model\n{\n    public Address? shipping { get => this.getAttribute(\"shipping\"); set => this.setAttribute(\"shipping\", value); }\n    public string? note { get => field; set => field = value; } = null;\n    public string? summary { get => this.note; }\n}\n",
         &[
             common::MODEL,
             common::ADDRESS,
@@ -4370,7 +4370,7 @@ fn nullable_properties_with_accessor_bodies_are_their_php_hooks() {
 #[test]
 fn a_constructor_parameter_with_an_access_modifier_is_a_promoted_parameter() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public Report(private int count, public int id { get; }, protected string name { get; set; }, int extra) {}\n}\n",
+        "public class Report\n{\n    public Report(private int count, public int id { get; }, protected string name { get; set; }, int extra) {}\n}\n",
     );
     let parameters: Vec<(String, u32)> = lowered
         .written()
@@ -4403,7 +4403,7 @@ fn a_constructor_parameter_with_an_access_modifier_is_a_promoted_parameter() {
 #[test]
 fn a_non_constant_initial_value_runs_at_the_start_of_the_constructor() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private Calc calc = new Calc(1);\n    public int total { get; set; } = 1 + 1;\n\n    public Report(int start)\n    {\n        this.total = start;\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\npublic class Report\n{\n    private Calc calc = new Calc(1);\n    public int total { get; set; } = 1 + 1;\n\n    public Report(int start)\n    {\n        this.total = start;\n    }\n}\n",
         &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc { public function __construct(int $start) {} }")],
     );
     let class = lowered.child(lowered.root(), 2);
@@ -4758,10 +4758,10 @@ fn a_named_constructor_without_an_access_modifier_is_a_private_static_method() {
 #[test]
 fn a_named_constructor_is_a_static_method_that_returns_the_object_this_creates() {
     let lowered = Lowered::with(
-        "namespace App;\n\nclass Report : Base\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) : super() { }\n\n    public Report.sized(int size, string ...notes) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = super.describe();\n        let read = () => { return this.label; };\n        let skip = () => { return; };\n    }\n}\n",
+        "namespace App;\n\npublic class Report : Base\n{\n    public string label { get; set; } = \"\";\n\n    public Report(public int size { get; }) : super() { }\n\n    public Report.sized(int size, string ...notes) : this(size)\n    {\n        if (size == 0)\n        {\n            return;\n        }\n        this.label = super.describe();\n        let read = () => { return this.label; };\n        let skip = () => { return; };\n    }\n}\n",
         &[(
             "src/App/Base.sharp",
-            "namespace App;\n\nclass Base\n{\n    public Base() { }\n    public string describe() => \"base\";\n}\n",
+            "namespace App;\n\npublic class Base\n{\n    public Base() { }\n    public string describe() => \"base\";\n}\n",
         )],
     );
 
@@ -5675,7 +5675,7 @@ fn new_through_a_class_value_creates_the_class_with_the_type_arguments_it_carrie
 /// when it is constant, and `code#initial` returns it to reflection's `Property.defaultValue()`.
 #[test]
 fn a_get_only_property_gets_its_initial_value_in_the_constructor() {
-    let lowered = Lowered::new("class Report\n{\n    public string code { get; } = \"none\";\n}\n");
+    let lowered = Lowered::new("public class Report\n{\n    public string code { get; } = \"none\";\n}\n");
     let class = lowered.child(lowered.root(), 1);
 
     assert_eq!(
@@ -5742,7 +5742,7 @@ fn a_get_only_property_gets_its_initial_value_in_the_constructor() {
 #[test]
 fn a_nullable_member_s_initial_null_is_its_default() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int? total = null;\n    public Calc? owner { get; set; } = null;\n    private (int|string)? key = null;\n    private int? start = 1;\n    public int? limit { get; } = null;\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\npublic class Report\n{\n    private int? total = null;\n    public Calc? owner { get; set; } = null;\n    private (int|string)? key = null;\n    private int? start = 1;\n    public int? limit { get; } = null;\n}\n",
         &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")],
     );
     let class = lowered.child(lowered.root(), 2);
@@ -5849,7 +5849,7 @@ fn a_nullable_member_s_initial_null_is_its_default() {
 #[test]
 fn method_modifiers_become_the_method_flags() {
     let lowered = Lowered::new(
-        "class Report\n{\n    public static void make() {}\n    private void hide() {}\n    protected void share() {}\n    public virtual void open() {}\n}\n",
+        "public class Report\n{\n    public static void make() {}\n    private void hide() {}\n    protected void share() {}\n    public virtual void open() {}\n}\n",
     );
     let methods: Vec<(String, u32)> = lowered
         .written()
@@ -6147,7 +6147,7 @@ fn a_union_that_holds_a_set_or_a_map_takes_a_php_array_too() {
 #[test]
 fn a_set_body_on_a_union_that_holds_a_set_takes_a_php_array_too() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public Set<string>|int picked { get; set => field = value; } = 0;\n}\n",
+        "namespace App.Tenant;\n\npublic class Report\n{\n    public Set<string>|int picked { get; set => field = value; } = 0;\n}\n",
     );
 
     assert_eq!(
@@ -11874,9 +11874,10 @@ fn a_default_of_a_method_without_a_body_lowers_as_one_with_a_body() {
 
 #[test]
 fn a_set_parameter_becomes_a_set_before_the_body_runs() {
-    let interface = Lowered::new("namespace App.Tenant;\n\ninterface Tagged\n{\n    void keep(Set<string> kept);\n}\n");
+    let interface =
+        Lowered::new("namespace App.Tenant;\n\npublic interface Tagged\n{\n    void keep(Set<string> kept);\n}\n");
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Order\n{\n    public Order(public Set<string> tags { get; }, Set<int> ids) {}\n}\n",
+        "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(public Set<string> tags { get; }, Set<int> ids) {}\n}\n",
     );
     let body = |name: &str| lowered.render(lowered.child(lowered.method_named(name), 2));
 
@@ -13082,7 +13083,7 @@ fn a_variadic_or_operator_set_parameter_becomes_a_set_before_the_body_runs() {
 #[test]
 fn an_emptied_list_field_takes_add_as_the_list_method() {
     let lowered = Lowered::new(
-        "class Product\n{\n    public List<string> tags { get; set { field = []; field.add(\"x\"); } } = [];\n}\n",
+        "public class Product\n{\n    public List<string> tags { get; set { field = []; field.add(\"x\"); } } = [];\n}\n",
     );
 
     assert_eq!(
@@ -14044,7 +14045,7 @@ fn an_override_writes_a_variadic_parameter_as_its_list() {
 #[test]
 fn never_is_php_null_where_php_types_no_never_and_a_type_argument() {
     let lowered = Lowered::with(
-        "class Report\n{\n    public static int ignored(never value) => 1;\n\n    public static Box<never> none() => new Box<never>();\n}\n",
+        "public class Report\n{\n    public static int ignored(never value) => 1;\n\n    public static Box<never> none() => new Box<never>();\n}\n",
         &[("src/Box.sharp", "public class Box<T>\n{\n}\n")],
     );
 
@@ -15990,13 +15991,15 @@ fn new_of_a_generic_php_sharp_class_carries_its_type_arguments() {
     );
 }
 
-/// PHP has no class visibility, so a `public` class is the same class.
+/// PHP has no class visibility, so a `public` class is a plain class, and an `internal` one, as a class is unless it is
+/// `public`, carries `ZEND_ACC_SHARP_INTERNAL`, 1 << 30, by which only code of its namespace runs `new` of it, spec
+/// section 5.
 #[test]
-fn a_public_class_is_a_class() {
+fn a_public_class_is_a_class_and_an_internal_one_carries_the_engine_flag() {
     let public = Lowered::new("namespace App.Tenant;\n\npublic class Report\n{\n}\n");
     let internal = Lowered::new("namespace App.Tenant;\n\nclass Report\n{\n}\n");
 
-    assert_eq!(public.tree(), internal.tree());
+    assert_eq!(internal.tree(), public.tree().replace("CLASS \"Report\"", "CLASS [1073741824] \"Report\""));
 }
 
 /// PHP has no enum visibility, so a `public` enum is the same enum.
@@ -16068,7 +16071,7 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
     let tree = |declaration: &str| Lowered::new(&format!("namespace App.Tenant;\n\n{declaration}")).tree();
 
     assert_eq!(
-        tree("abstract class Shape\n{\n    public abstract float area();\n}\n"),
+        tree("public abstract class Shape\n{\n    public abstract float area();\n}\n"),
         file_tree(
             "App\\Tenant",
             indoc! {r#"
@@ -16095,7 +16098,7 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
         )
     );
     assert_eq!(
-        tree("final class Unit\n{\n}\n"),
+        tree("public final class Unit\n{\n}\n"),
         file_tree(
             "App\\Tenant",
             indoc! {r#"
@@ -16114,7 +16117,7 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
         )
     );
     assert_eq!(
-        tree("interface Measured\n{\n    string label(int digits);\n}\n"),
+        tree("public interface Measured\n{\n    string label(int digits);\n}\n"),
         file_tree(
             "App\\Tenant",
             indoc! {r#"
@@ -16302,11 +16305,11 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
     let entity = ("src/Lib/Entity.php", "<?php namespace Lib; interface Named {} class Entity {}");
     let linkable = (
         "src/App/Tenant/Linkable.sharp",
-        "namespace App.Tenant;\n\nimport Lib.Named;\n\ninterface Linkable : Named\n{\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Named;\n\npublic interface Linkable : Named\n{\n}\n",
     );
     let interface = Lowered::with(linkable.1, &[entity]);
     let class = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Entity;\n\nclass Page : Entity, Linkable\n{\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Entity;\n\npublic class Page : Entity, Linkable\n{\n}\n",
         &[entity, linkable],
     );
     let file = |declaration: &str| file_tree("App\\Tenant", declaration);
@@ -17837,7 +17840,7 @@ fn emit_is_a_call_of_the_engine_emit() {
 #[test]
 fn virtual_lowers_to_nothing_and_override_to_the_override_attribute() {
     let lowered = Lowered::with(
-        "class Thumbnail : Image\n{\n    public virtual int size()\n    {\n        return 1;\n    }\n\n    [Deprecated]\n    public override string name()\n    {\n        return \"thumbnail\";\n    }\n}\n",
+        "public class Thumbnail : Image\n{\n    public virtual int size()\n    {\n        return 1;\n    }\n\n    [Deprecated]\n    public override string name()\n    {\n        return \"thumbnail\";\n    }\n}\n",
         &[("src/Image.php", "<?php class Image { public function name(): string { return 'image'; } }")],
     );
 
@@ -17904,7 +17907,7 @@ fn virtual_lowers_to_nothing_and_override_to_the_override_attribute() {
 #[test]
 fn final_override_lowers_to_a_final_method_with_the_override_attribute() {
     let lowered = Lowered::with(
-        "class Thumbnail : Image\n{\n    public final override string name()\n    {\n        return \"thumbnail\";\n    }\n}\n",
+        "public class Thumbnail : Image\n{\n    public final override string name()\n    {\n        return \"thumbnail\";\n    }\n}\n",
         &[("src/Image.php", "<?php class Image { public function name(): string { return 'image'; } }")],
     );
 
@@ -18302,7 +18305,7 @@ fn an_override_runs_with_each_php_type_its_plain_php_parent_declares() {
 #[test]
 fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks() {
     let lowered = Lowered::with(
-        "abstract class Order : Model\n{\n    protected override string table { get; set => field = Model.clean(value); } = \"orders\";\n    public abstract string kind { get; }\n}\n",
+        "public abstract class Order : Model\n{\n    protected override string table { get; set => field = Model.clean(value); } = \"orders\";\n    public abstract string kind { get; }\n}\n",
         &[
             (
                 "src/Model.php",
@@ -18389,15 +18392,14 @@ fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks
 /// }
 /// ```
 ///
-/// PHP has no namespace reach, so spec section 5's `internal` runs as public, and the analyzer checks who reaches it.
-/// An `internal` class takes no flag, `internal set` takes no set visibility, and `internal init` takes the
-/// `protected(set)` of every `init`, which only constructors run. An `internal` property and method carry
-/// `#[\Sharp\Internal\Internal]`, so `Class<T>.properties()` and `methods()` give them `Visibility.Internal`, spec
-/// section 25. A constant and an accessor written `internal` carry none, since reflection reads neither.
+/// PHP has no namespace reach, so spec section 5's `internal` runs as public, with the engine's flag for it: an
+/// `internal` constant, property and method carry `ZEND_ACC_SHARP_INTERNAL`, 1 << 30, by which the engine holds them to
+/// their namespace and reflection gives them `Visibility.Internal`, spec section 25. `internal set` takes no set
+/// visibility, and `internal init` takes the `protected(set)` of every `init`, which only constructors run.
 #[test]
-fn internal_runs_as_public() {
+fn internal_runs_as_public_with_the_engine_flag() {
     let lowered = Lowered::with(
-        "internal class Shop\n{\n    internal const int MAX = 3;\n    public int views { get; internal set; } = 0;\n    internal int stock { get; set; } = 0;\n    public int id { get; internal init; } = 0;\n\n    internal int secret() => 1;\n}\n",
+        "public class Shop\n{\n    internal const int MAX = 3;\n    public int views { get; internal set; } = 0;\n    internal int stock { get; set; } = 0;\n    public int id { get; internal init; } = 0;\n\n    internal int secret() => 1;\n}\n",
         &[],
     );
     let class = lowered.child(lowered.root(), 1);
@@ -18409,7 +18411,7 @@ fn internal_runs_as_public() {
               null
               null
               STMT_LIST
-                CLASS_CONST_GROUP [1]
+                CLASS_CONST_GROUP [1073741825]
                   CLASS_CONST_DECL
                     CONST_ELEM
                       ZVAL "MAX"
@@ -18426,7 +18428,7 @@ fn internal_runs_as_public() {
                       null
                       null
                   null
-                PROP_GROUP [1]
+                PROP_GROUP [1073741825]
                   ZVAL [1] "int"
                   PROP_DECL
                     PROP_ELEM
@@ -18434,11 +18436,7 @@ fn internal_runs_as_public() {
                       ZVAL 0
                       null
                       null
-                  ATTRIBUTE_LIST
-                    ATTRIBUTE_GROUP
-                      ATTRIBUTE
-                        ZVAL "Sharp\\Internal\\Internal"
-                        ARG_LIST
+                  null
                 PROP_GROUP [2049]
                   ZVAL [1] "int"
                   PROP_DECL
@@ -18448,7 +18446,7 @@ fn internal_runs_as_public() {
                       null
                       null
                   null
-                METHOD [1] "secret" @8-8
+                METHOD [1073741825] "secret" @8-8
                   PARAM_LIST
                   null
                   STMT_LIST
@@ -18457,11 +18455,7 @@ fn internal_runs_as_public() {
                   SHARP_TYPE_ARGS
                     ZVAL [1] "int"
                     ZVAL "Function<int()>"
-                  ATTRIBUTE_LIST
-                    ATTRIBUTE_GROUP
-                      ATTRIBUTE
-                        ZVAL "Sharp\\Internal\\Internal"
-                        ARG_LIST
+                  null
                 SHARP_CLASS_METADATA
                   null
                   null
@@ -18470,6 +18464,45 @@ fn internal_runs_as_public() {
               null
               null
         "#}
+    );
+}
+
+/// A `public` member of an `internal` class reaches no further than its class, spec section 5, so it carries
+/// `ZEND_ACC_SHARP_INTERNAL`, 1 << 30, as the class does. A member that replaces a member of a parent class or an
+/// interface that reaches further carries none, since code reaches it through that member: `name()` replaces plain
+/// PHP's `Model::name()`, and `price()` the method of the `public` interface `Priced`. A `protected` member carries
+/// none.
+#[test]
+fn a_public_member_of_an_internal_class_carries_the_engine_flag_unless_it_replaces_a_wider_member() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.Model;\n\nclass Shop : Model, Priced\n{\n    public const int MAX = 3;\n    public int stock { get; set; } = 0;\n\n    public int price() => 1;\n    public override string name() => \"shop\";\n    protected int kept() => 2;\n    public int total() => 3;\n}\n",
+        &[
+            ("src/Lib/Model.php", "<?php namespace Lib; class Model { public function name(): string { return ''; } }"),
+            ("src/App/Priced.sharp", "namespace App;\n\npublic interface Priced\n{\n    int price();\n}\n"),
+        ],
+    );
+    let declared: Vec<(String, u32)> = lowered
+        .written()
+        .into_iter()
+        .filter_map(|(_, node)| match node.kind {
+            sharp_kind::SHARP_AST_CLASS | sharp_kind::SHARP_AST_METHOD => Some((lowered.text(node.text), node.attr)),
+            sharp_kind::SHARP_AST_CLASS_CONST_GROUP => Some(("MAX".to_owned(), node.attr)),
+            sharp_kind::SHARP_AST_PROP_GROUP => Some(("stock".to_owned(), node.attr)),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        declared,
+        [
+            ("MAX".to_owned(), (1 << 30) | 1),
+            ("stock".to_owned(), (1 << 30) | 1),
+            ("price".to_owned(), 1),
+            ("name".to_owned(), 1),
+            ("kept".to_owned(), 2),
+            ("total".to_owned(), (1 << 30) | 1),
+            ("Shop".to_owned(), 1 << 30),
+        ]
     );
 }
 
@@ -18487,7 +18520,7 @@ fn internal_runs_as_public() {
 #[test]
 fn a_lazy_property_keeps_its_first_value_in_its_storage() {
     let lowered = Lowered::with(
-        "class Plan\n{\n    public lazy int doubled => 2;\n    public lazy int? found => null;\n}\n",
+        "public class Plan\n{\n    public lazy int doubled => 2;\n    public lazy int? found => null;\n}\n",
         &[],
     );
     let class = lowered.child(lowered.root(), 1);
@@ -18729,7 +18762,7 @@ fn an_override_of_an_override_of_a_typed_property_keeps_its_type() {
 #[test]
 fn a_subclass_method_with_a_union_variadic_spreads_it_into_the_parent_method() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Ledger;\n\nclass Account : Ledger\n{\n    public override int|float total(string label, int|float ...amounts)\n    {\n        return super.total(label, ...amounts);\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Ledger;\n\npublic class Account : Ledger\n{\n    public override int|float total(string label, int|float ...amounts)\n    {\n        return super.total(label, ...amounts);\n    }\n}\n",
         &[
             (
                 "src/Lib/Ledger.php",
@@ -19178,7 +19211,7 @@ fn typeof_in_an_attribute_argument_is_the_class_name() {
 #[test]
 fn a_class_constant_is_a_class_constant_group_of_one_constant() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public const int MAX = 3;\n    protected const LIMIT = Report.MAX - 1;\n    const int MIN = 0;\n}\n",
+        "namespace App.Tenant;\n\npublic class Report\n{\n    public const int MAX = 3;\n    protected const LIMIT = Report.MAX - 1;\n    const int MIN = 0;\n}\n",
     );
     let class = lowered.child(lowered.root(), 2);
 
@@ -19232,7 +19265,7 @@ fn a_class_constant_is_a_class_constant_group_of_one_constant() {
 #[test]
 fn a_union_typed_class_constant_has_its_type_union() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public const int|string KEY = 1;\n    public const (int|string)? CODE = null;\n}\n",
+        "namespace App.Tenant;\n\npublic class Report\n{\n    public const int|string KEY = 1;\n    public const (int|string)? CODE = null;\n}\n",
     );
     let class = lowered.child(lowered.root(), 2);
 
@@ -19286,7 +19319,7 @@ fn a_union_typed_class_constant_has_its_type_union() {
 #[test]
 fn a_map_or_a_set_constant_is_its_php_array() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public const Map<string, int> LIMITS = [\"card\": 100];\n    public const Map<Level, int> LEVELS = [Level.Low: 1];\n    public const Set<string> CODES = [\"a\", \"b\"];\n    public const Map<string, int>? SPARE = null;\n    public const List<string> NAMES = [...Report.CODES_LIST, \"c\"];\n    public const List<string> CODES_LIST = [\"a\"];\n}\n",
+        "namespace App.Tenant;\n\npublic class Report\n{\n    public const Map<string, int> LIMITS = [\"card\": 100];\n    public const Map<Level, int> LEVELS = [Level.Low: 1];\n    public const Set<string> CODES = [\"a\", \"b\"];\n    public const Map<string, int>? SPARE = null;\n    public const List<string> NAMES = [...Report.CODES_LIST, \"c\"];\n    public const List<string> CODES_LIST = [\"a\"];\n}\n",
         &[("src/App/Tenant/Level.php", "<?php namespace App\\Tenant; enum Level: string { case Low = 'low'; }")],
     );
     let class = lowered.child(lowered.root(), 2);
@@ -19485,7 +19518,7 @@ fn a_map_constant_read_in_a_constant_expression_is_the_bare_constant() {
 #[test]
 fn an_iterable_or_a_tuple_constant_holds_its_list_literal() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public const Iterable<int> STEPS = [1, 2];\n    public const [int, string] PAIR = [1, \"a\"];\n}\n",
+        "namespace App.Tenant;\n\npublic class Report\n{\n    public const Iterable<int> STEPS = [1, 2];\n    public const [int, string] PAIR = [1, \"a\"];\n}\n",
     );
     let class = lowered.child(lowered.root(), 2);
 
@@ -19617,7 +19650,7 @@ fn an_any_result_declares_mixed_only_where_a_typed_plain_php_method_requires_it(
 #[test]
 fn a_static_field_or_property_is_a_static_property_group() {
     let lowered = Lowered::new(
-        "class Report\n{\n    private static int made = 0;\n    public static string last { get; private set; } = \"none\";\n}\n",
+        "public class Report\n{\n    private static int made = 0;\n    public static string last { get; private set; } = \"none\";\n}\n",
     );
     let groups: Vec<(u32, String)> = lowered
         .nodes()
@@ -25837,7 +25870,7 @@ fn yield_is_a_yield_statement_and_yield_spread_is_a_loop_that_yields_each_elemen
 #[test]
 fn a_method_that_yields_is_a_generator() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass OrderImport\n{\n    public Iterable<int> lines(List<int> rows)\n    {\n        for (const row of rows) {\n            if (row > 0) {\n                yield row;\n            }\n        }\n    }\n\n    public Iterable<int> all(List<int> rows)\n    {\n        yield ...rows;\n    }\n\n    public Iterable<int> kept(List<int> rows)\n    {\n        return rows;\n    }\n}\n",
+        "namespace App.Tenant;\n\npublic class OrderImport\n{\n    public Iterable<int> lines(List<int> rows)\n    {\n        for (const row of rows) {\n            if (row > 0) {\n                yield row;\n            }\n        }\n    }\n\n    public Iterable<int> all(List<int> rows)\n    {\n        yield ...rows;\n    }\n\n    public Iterable<int> kept(List<int> rows)\n    {\n        return rows;\n    }\n}\n",
     );
 
     assert_eq!(lowered.diagnostics(), Vec::<String>::new());
@@ -27665,7 +27698,7 @@ fn a_template_over_several_lines_keeps_the_line_of_each_part() {
 #[test]
 fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib;\nimport Lib.Field;\nimport Lib.Entity;\n\n[Entity(label: \"Orders\", order: 2 * 3), Searchable]\n[Entity(null)]\nclass Report\n{\n    [Field] private int count = 0;\n\n    public Report([Field(-1.5)] public int total { get; })\n    {\n    }\n\n    [Entity(true, Lib.TOP)]\n    public void run([Field] int extra)\n    {\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib;\nimport Lib.Field;\nimport Lib.Entity;\n\n[Entity(label: \"Orders\", order: 2 * 3), Searchable]\n[Entity(null)]\npublic class Report\n{\n    [Field] private int count = 0;\n\n    public Report([Field(-1.5)] public int total { get; })\n    {\n    }\n\n    [Entity(true, Lib.TOP)]\n    public void run([Field] int extra)\n    {\n    }\n}\n",
         &[
             common::FIELD,
             common::ENTITY,
@@ -28662,7 +28695,7 @@ fn an_extern_property_is_a_hidden_static_and_its_read_calls_get_checked_where_it
         "src/Lib/Model.php",
         "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n}\n",
     );
-    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Row : Model\n{\n    public extern string owner { get; }\n\n    public Row() : super() { }\n\n    public string owner() => \"relation\";\n\n    public string run() => this.owner;\n}\n";
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\npublic class Row : Model\n{\n    public extern string owner { get; }\n\n    public Row() : super() { }\n\n    public string owner() => \"relation\";\n\n    public string run() => this.owner;\n}\n";
     let lowered = Lowered::with(code, &[model]);
 
     assert_eq!(
@@ -31089,7 +31122,7 @@ fn a_when_condition_that_is_a_bare_name_is_the_arms_and_operand() {
 #[test]
 fn a_backed_enum_is_a_final_enum_class_with_its_backing_type_cases_and_methods() {
     let lowered = Lowered::with(
-        "namespace App.Tenant;\n\nimport Lib.Label;\n\n[Label(\"Order status\")]\nenum Status : string\n{\n    case Active = \"active\";\n    [Label(\"Gone\")]\n    case Archived = \"archived\";\n\n    public string title()\n    {\n        return this.value;\n    }\n\n    public static Status parse(string value)\n    {\n        const all = Status.cases();\n        return Status.tryFrom(value) ?? Status.from(\"active\");\n    }\n}\n",
+        "namespace App.Tenant;\n\nimport Lib.Label;\n\n[Label(\"Order status\")]\npublic enum Status : string\n{\n    case Active = \"active\";\n    [Label(\"Gone\")]\n    case Archived = \"archived\";\n\n    public string title()\n    {\n        return this.value;\n    }\n\n    public static Status parse(string value)\n    {\n        const all = Status.cases();\n        return Status.tryFrom(value) ?? Status.from(\"active\");\n    }\n}\n",
         &[(
             "src/Lib/Label.php",
             "<?php namespace Lib; #[\\Attribute(\\Attribute::TARGET_ALL)] final class Label { public function __construct(string $text) {} }",
@@ -31219,7 +31252,7 @@ fn a_backed_enum_is_a_final_enum_class_with_its_backing_type_cases_and_methods()
 #[test]
 fn a_pure_enum_is_a_final_enum_class_of_unit_cases_without_a_backing_type() {
     let lowered = Lowered::new(
-        "enum Suit\n{\n    case Hearts;\n    case Spades;\n\n    public string label() => this.name;\n\n    public static int size() => Suit.cases().count();\n}\n",
+        "public enum Suit\n{\n    case Hearts;\n    case Spades;\n\n    public string label() => this.name;\n\n    public static int size() => Suit.cases().count();\n}\n",
     );
 
     assert_eq!(
@@ -31442,7 +31475,7 @@ fn an_enum_header_is_the_interface_name_list() {
 #[test]
 fn an_enum_constant_is_a_class_constant_group_that_reads_a_case() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nenum Status : string\n{\n    case Active = \"a\";\n\n    public const Status Default = Status.Active;\n}\n",
+        "namespace App.Tenant;\n\npublic enum Status : string\n{\n    case Active = \"a\";\n\n    public const Status Default = Status.Active;\n}\n",
     );
     let r#enum = lowered.child(lowered.root(), 2);
 
@@ -31562,7 +31595,7 @@ fn a_case_read_is_a_class_constant_in_every_place() {
 #[test]
 fn an_enum_method_lowers_a_list_literal_a_function_type_and_a_lambda_as_a_class_method_does() {
     let lowered = Lowered::new(
-        "enum Suit\n{\n    case Hearts;\n    case Spades;\n\n    public static List<Suit> all() => [Suit.Hearts, Suit.Spades];\n\n    public Function<bool(Suit)> matches()\n    {\n        const first = Suit.Hearts;\n        return other => other == this || other == first;\n    }\n}\n",
+        "public enum Suit\n{\n    case Hearts;\n    case Spades;\n\n    public static List<Suit> all() => [Suit.Hearts, Suit.Spades];\n\n    public Function<bool(Suit)> matches()\n    {\n        const first = Suit.Hearts;\n        return other => other == this || other == first;\n    }\n}\n",
     );
 
     assert_eq!(
@@ -31677,7 +31710,7 @@ fn an_enum_method_lowers_a_list_literal_a_function_type_and_a_lambda_as_a_class_
 #[test]
 fn an_enum_returns_self_and_holds_a_union_typed_constant() {
     let lowered = Lowered::new(
-        "namespace App;\n\nenum Status : string\n{\n    public const int|string Key = 1;\n\n    case Active = \"a\";\n\n    public static Self first() => Status.Active;\n\n    public static List<Self> all() => Self.cases();\n}\n",
+        "namespace App;\n\npublic enum Status : string\n{\n    public const int|string Key = 1;\n\n    case Active = \"a\";\n\n    public static Self first() => Status.Active;\n\n    public static List<Self> all() => Self.cases();\n}\n",
     );
     let class = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_CLASS).expect("an enum");
 
@@ -31748,7 +31781,7 @@ fn an_enum_returns_self_and_holds_a_union_typed_constant() {
 #[test]
 fn an_enum_with_data_holds_its_constant_as_a_class_does() {
     let lowered = Lowered::new(
-        "namespace App;\n\nenum Shape\n{\n    public const int Sides = 4;\n\n    case Square(int side);\n}\n",
+        "namespace App;\n\npublic enum Shape\n{\n    public const int Sides = 4;\n\n    case Square(int side);\n}\n",
     );
     let class = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_CLASS).expect("the enum");
     let members = lowered.child(class as u32, 2);
@@ -35001,7 +35034,7 @@ const SIZE: &str = "namespace App;\n\npublic struct Size\n{\n    public int widt
 fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
     assert_eq!(
         Lowered::with(
-            "namespace App.Tenant;\n\nimport App.Size;\n\nclass Report\n{\n    public Size copies(Size size, int depth)\n    {\n        Size made = new Size { width: 2, depth: 1 };\n        return size with { depth };\n    }\n}\n",
+            "namespace App.Tenant;\n\nimport App.Size;\n\npublic class Report\n{\n    public Size copies(Size size, int depth)\n    {\n        Size made = new Size { width: 2, depth: 1 };\n        return size with { depth };\n    }\n}\n",
             &[("src/App/Size.sharp", SIZE)]
         )
         .declared("copies"),

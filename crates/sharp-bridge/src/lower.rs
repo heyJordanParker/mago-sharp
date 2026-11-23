@@ -282,6 +282,7 @@ use types::Declaration;
 use types::DeclarationKind;
 use types::Equality;
 use types::FunctionType;
+use types::Member;
 use types::MembersByKind;
 use types::PlainParameter;
 use types::Types;
@@ -313,6 +314,7 @@ const ZEND_ACC_FIELD: u32 = 1 << 15;
 const ZEND_ACC_GENERATOR: u32 = 1 << 24;
 const ZEND_ACC_ENUM: u32 = 1 << 28;
 const ZEND_ACC_SHARP_HIDDEN: u32 = 1 << 13;
+const ZEND_ACC_SHARP_INTERNAL: u32 = 1 << 30;
 const ZEND_SHARP_RESULT_CROSSES: u32 = 1;
 const ZEND_SHARP_RESULT_CALLER_CHECKED: u32 = 1 << 1;
 const ZEND_SHARP_TYPE_OF_LIST: u32 = 1;
@@ -930,7 +932,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         self.declaration(
             SHARP_AST_CLASS,
-            class_flags(&class.modifiers),
+            class_flags(&class.modifiers) | self.class_reach_flag(),
             class.class.span,
             class.right_brace,
             class.name.value,
@@ -1059,7 +1061,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         self.declaration(
             SHARP_AST_CLASS,
-            ZEND_ACC_FINAL,
+            ZEND_ACC_FINAL | self.class_reach_flag(),
             r#struct.r#struct.span,
             r#struct.right_brace,
             r#struct.name.value,
@@ -2816,6 +2818,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.method_declaration(method, flags, Some(first_statements))
     }
 
+    /// `ZEND_ACC_SHARP_INTERNAL` when the engine holds `member` of the class being lowered to the class's namespace, as
+    /// [`Types::is_held_to_namespace`] says, and zero otherwise. PHP has no namespace reach, so the member runs as
+    /// public, and the engine holds it by its flag.
+    fn reach_flag(&self, member: Member) -> u32 {
+        if self.types.is_held_to_namespace(word(self.class), member) { ZEND_ACC_SHARP_INTERNAL } else { 0 }
+    }
+
+    /// `ZEND_ACC_SHARP_INTERNAL` when the class being lowered is `internal`, spec section 5, which the compiler keeps
+    /// as the class's `SHARP_CLASS_INTERNAL`, so only code that reaches it runs `new` of it, and zero otherwise.
+    fn class_reach_flag(&self) -> u32 {
+        if self.types.is_internal_class(word(self.class)) { ZEND_ACC_SHARP_INTERNAL } else { 0 }
+    }
+
     /// An interface's method is `public` with no statement list, as php-src's grammar builds
     /// `public function designKey(): string;`, spec section 22. Its default body is in the trait `defaults` lowers.
     fn signature(&mut self, method: &Method) -> u32 {
@@ -2920,12 +2935,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     || self.types.class_declaration(word(self.class)).kind != DeclarationKind::Interface)
                     && self.types.replaces_inherited_method(word(self.class), word(php_method_name(method)))
             });
-        let internal = self.internal_attribute(&method.modifiers);
-        let attributes = self.attributes(&method.attribute_lists, r#override, internal.as_slice());
+        let attributes = self.attributes(&method.attribute_lists, r#override, &[]);
 
         self.declaration(
             SHARP_AST_METHOD,
-            flags | generator_flag(&method.body),
+            flags | generator_flag(&method.body) | self.reach_flag(Member::Method(word(php_method_name(method)))),
             start,
             method.body.span(),
             php_method_name(method),
@@ -3133,7 +3147,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         self.declaration(
             SHARP_AST_METHOD,
-            modifier_flags(&operator.modifiers) | ZEND_ACC_PUBLIC,
+            modifier_flags(&operator.modifiers) | ZEND_ACC_PUBLIC | self.reach_flag(Member::Method(word(name))),
             &operator.return_type_hint,
             operator.body.span(),
             &declared,
@@ -3173,12 +3187,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.types.method_result(word(self.class), word(method.name.value)).as_deref().map(result_alone);
                 let attr = if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 };
                 let return_type = self.carried_type(return_type, result, attr, self.line(start));
-                let internal = self.internal_attribute(&method.modifiers);
-                let attributes = self.attributes(&method.attribute_lists, None, internal.as_slice());
+                let attributes = self.attributes(&method.attribute_lists, None, &[]);
 
                 self.declaration(
                     SHARP_AST_METHOD,
-                    modifier_flags(&method.modifiers) | ZEND_ACC_STATIC | generator_flag(&method.body),
+                    modifier_flags(&method.modifiers)
+                        | ZEND_ACC_STATIC
+                        | generator_flag(&method.body)
+                        | self.reach_flag(Member::Method(word(method.name.value))),
                     start,
                     method.body.span(),
                     method.name.value,
@@ -3196,12 +3212,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 statements.push(self.node(SHARP_AST_RETURN, 0, line, &[value]));
                 let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
                 let return_type = self.hint(hint);
-                let internal = self.internal_attribute(&property.modifiers);
-                let attributes = self.attributes(&property.attribute_lists, None, internal.as_slice());
+                let attributes = self.attributes(&property.attribute_lists, None, &[]);
 
                 self.declaration(
                     SHARP_AST_METHOD,
-                    modifier_flags(&property.modifiers) | ZEND_ACC_STATIC,
+                    modifier_flags(&property.modifiers)
+                        | ZEND_ACC_STATIC
+                        | self.reach_flag(Member::Method(word(property.variable.name))),
                     hint,
                     &property.body,
                     property.variable.name,
@@ -3319,12 +3336,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements.push(self.node(SHARP_AST_RETURN, 0, end, &[object]));
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let return_type = self.string(ZEND_NAME_FQ, self.line(constructor.class), self.class);
-        let internal = self.internal_attribute(&constructor.modifiers);
-        let attributes = self.attributes(&constructor.attribute_lists, None, internal.as_slice());
+        let attributes = self.attributes(&constructor.attribute_lists, None, &[]);
 
         self.declaration(
             SHARP_AST_METHOD,
-            modifier_flags_or_private(&constructor.modifiers) | ZEND_ACC_STATIC,
+            modifier_flags_or_private(&constructor.modifiers)
+                | ZEND_ACC_STATIC
+                | self.reach_flag(Member::Method(word(constructor.name.value))),
             constructor.class,
             constructor.body.span(),
             constructor.name.value,
@@ -3755,15 +3773,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(parameter.variable.span);
         let name = self.local_name(0, line, parameter.variable.name);
         let default = parameter.default_value.as_ref().map_or(NULL, |default| self.default_value(default.value));
-        // PHP gives the property a parameter promotes the parameter's attributes, its `internal` mark among them.
-        let (member_flags, hint, internal) = if parameter.is_promoted_property() && !self.promoted_beside {
-            (
-                self.member_flags(parameter),
-                self.property_hint(hint, parameter.variable.name, line),
-                self.internal_attribute(&parameter.modifiers),
-            )
+        let (member_flags, hint) = if parameter.is_promoted_property() && !self.promoted_beside {
+            (self.member_flags(parameter), self.property_hint(hint, parameter.variable.name, line))
         } else {
-            (0, hint, None)
+            (0, hint)
         };
         let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
         // Spec section 26: a `ref` receiver is the place the call changes, which PHP passes by reference.
@@ -3772,7 +3785,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // The property a promoted parameter declares beside it takes its `property:` and `field:` attributes.
         let lists: Vec<&AttributeList> =
             parameter.attribute_lists.iter().filter(|list| list.target.is_none() || targets_value(list)).collect();
-        let added: Vec<u32> = service.into_iter().chain(internal).collect();
+        let added: Vec<u32> = service.into_iter().collect();
         let attributes = self.attributes_of(&lists, None, &added);
 
         self.node(
@@ -3903,7 +3916,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             None => ZEND_ACC_FIELD,
         };
 
-        modifier_flags(&parameter.modifiers) | accessor_flags
+        modifier_flags(&parameter.modifiers)
+            | accessor_flags
+            | self.reach_flag(Member::Property(word([b"$", parameter.variable.name].concat())))
     }
 
     /// `hint`, the lowered type of the property `property`, wrapped around the type text [`Types::property_check`]
@@ -3942,8 +3957,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
         let crossing = self.crossing_attribute(parameter.hint.as_ref());
-        let internal = self.internal_attribute(&parameter.modifiers);
-        let added: Vec<u32> = crossing.into_iter().chain(internal).collect();
+        let added: Vec<u32> = crossing.into_iter().collect();
         let lists: Vec<&AttributeList> = parameter.attribute_lists.iter().filter(|list| !targets_value(list)).collect();
         let attributes = self.attributes_of(&lists, None, &added);
 
@@ -4032,14 +4046,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, default, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
         let access_flags = ZEND_ACC_PUBLIC | ZEND_ACC_PROTECTED | ZEND_ACC_PRIVATE;
-        let flags = modifier_flags(property.modifiers()) | accessor_flags;
+        let flags = modifier_flags(property.modifiers())
+            | accessor_flags
+            | self.reach_flag(Member::Property(word([b"$", variable.name].concat())));
         let flags = if runs_static_accessors(property) { flags & !access_flags } else { flags };
         // A member with no access modifier is private, spec section 5.
         let access = if flags & access_flags == 0 { ZEND_ACC_PRIVATE } else { 0 };
         let flags = flags | access;
         let crossing = if stored.is_some() { None } else { self.crossing_attribute(property.hint()) };
-        let internal = self.internal_attribute(property.modifiers());
-        let added: Vec<u32> = crossing.into_iter().chain(internal).collect();
+        let added: Vec<u32> = crossing.into_iter().collect();
         let attributes = self.attributes(attribute_lists, r#override, &added);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])
@@ -4377,14 +4392,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let key = self.string(0, line, key);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, key, NULL, NULL]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
-        let flags = modifier_flags_or_private(property.modifiers()) | ZEND_ACC_STATIC;
+        let flags = modifier_flags_or_private(property.modifiers())
+            | ZEND_ACC_STATIC
+            | self.reach_flag(Member::Property(word([b"$", variable.name].concat())));
         let lists = match property {
             Property::Hooked(hooked) => &hooked.attribute_lists,
             Property::Plain(plain) => &plain.attribute_lists,
             Property::Computed(computed) => &computed.attribute_lists,
         };
-        let internal: Vec<u32> = self.internal_attribute(property.modifiers()).into_iter().collect();
-        let attributes = self.attributes(lists, None, &internal);
+        let attributes = self.attributes(lists, None, &[]);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[NULL, declaration, attributes])
     }
@@ -4582,8 +4598,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// A declaration's attributes are one `ATTRIBUTE_LIST` with an `ATTRIBUTE_GROUP` per `[...]`, as php-src's grammar
     /// builds `#[...]`, or null without attributes. Each attribute names its class by its full name. A method's or a
     /// field's `override` adds a group of `#[\Override]`, and the groups the lowering adds, `added`, come last: a
-    /// property's [`Self::crossing_attribute`], a parameter's [`Self::service_attribute`] and a member's
-    /// [`Self::internal_attribute`].
+    /// property's [`Self::crossing_attribute`] and a parameter's [`Self::service_attribute`].
     fn attributes(&mut self, lists: &Sequence<AttributeList>, r#override: Option<&Modifier>, added: &[u32]) -> u32 {
         self.attributes_of(&lists.iter().collect::<Vec<_>>(), r#override, added)
     }
@@ -4659,16 +4674,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_ATTRIBUTE_LIST, 0, line, &groups)
     }
 
-    /// The `#[\Sharp\Internal\Internal]` group of a member written `internal`, spec section 5. PHP has no namespace
-    /// reach, so the member runs as public, and the engine reads the mark to give its `Visibility.Internal`, spec
-    /// section 25. None for any other member.
-    fn internal_attribute(&mut self, modifiers: &Sequence<Modifier>) -> Option<u32> {
-        let internal = modifiers.iter().find(|modifier| matches!(modifier, Modifier::Internal(_)))?;
-        let line = self.line(internal);
-
-        Some(self.attribute_group(line, b"Sharp\\Internal\\Internal", &[]))
-    }
-
     /// The `#[\Sharp\Crossing(plan)]` group of a property written `hint` whose type holds a `Map` or a `Set`, at any
     /// depth, or can when it runs, with the plan [`Self::crossing_plan`] gives it, by which the engine crosses a PHP
     /// array plain PHP writes there, and gives plain PHP the PHP array of each `Map` and `Set` it reads there, as
@@ -4734,7 +4739,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             ZEND_ACC_PUBLIC
         } else {
             modifier_flags_or_private(&constant.modifiers)
-        };
+        } | self.reach_flag(Member::Constant(word(item.name.value)));
 
         self.node(SHARP_AST_CLASS_CONST_GROUP, flags, self.line(constant), &[declaration, attributes, hint])
     }
@@ -10681,7 +10686,8 @@ fn modifier_flags(modifiers: &Sequence<Modifier>) -> u32 {
     let mut flags = 0;
     for modifier in modifiers {
         flags |= match modifier {
-            // PHP has no namespace reach, so the analyzer checks spec section 5's `internal`, and it runs as public.
+            // PHP has no namespace reach, so spec section 5's `internal` runs as public, and `reach_flag` gives the flag
+            // by which the engine holds it to its namespace.
             Modifier::Public(_) | Modifier::Internal(_) => ZEND_ACC_PUBLIC,
             Modifier::Protected(_) => ZEND_ACC_PROTECTED,
             Modifier::Private(_) => ZEND_ACC_PRIVATE,
