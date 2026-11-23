@@ -28449,7 +28449,7 @@ fn an_extern_property_reaches_get_and_set_under_its_key() {
         "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    /** @var array<string, mixed> */\n    private array $attributes = [];\n\n    public function __get(string $key): mixed\n    {\n        return $this->attributes[$key] ?? null;\n    }\n\n    public function __set(string $key, mixed $value): void\n    {\n        $this->attributes[$key] = $value;\n    }\n}\n",
     );
     let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Row : Model\n{\n    [Key(\"total_cents\")]\n    public extern int totalCents { get; set; }\n\n    public extern string email { get; set; }\n\n    public Row() : super() { }\n\n    public void run()\n    {\n        this.totalCents = 5;\n        this.email = \"a@b.co\";\n    }\n\n    public int total() => this.totalCents;\n}\n";
-    let lowered = Lowered::with(code, &[model]);
+    let lowered = Lowered::with(code, &[model, KEY]);
 
     assert_eq!(
         lowered.body(),
