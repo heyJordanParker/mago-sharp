@@ -871,22 +871,31 @@ impl<'body, 'program> Body<'body, 'program> {
         if negated { format!("(!{equal})") } else { equal }
     }
 
-    /// The one interface that extends `Equatable` the values of both `types` are, null aside, by its full name, which
-    /// [`Equality::OwnType`] compares them through. `None` when a side may be a value of another type.
+    /// The one interface that extends `Equatable` whose Lean type holds the values of both `types`, null aside, by its
+    /// full name, which [`Equality::OwnType`] compares them through: the interface a side is typed as, or the sealed
+    /// interface whose constructor holds an implementer's value, spec section 20.1, as a `Failure` holds
+    /// `Declined.Card`. `None` when a side may be a value of another type.
     fn equatable_interface(&self, types: (&TUnion, &TUnion)) -> Option<Vec<u8>> {
-        let mut named =
-            [types.0, types.1].into_iter().flat_map(|r#type| r#type.types.iter()).filter_map(|atomic| match atomic {
-                TAtomic::Null => None,
-                TAtomic::Object(TObject::Named(named)) if atomic.get_intersection_types().is_none() => {
-                    Some(Some(named.name))
+        let mut held = [types.0, types.1]
+            .into_iter()
+            .flat_map(|r#type| r#type.types.iter())
+            .filter(|atomic| !atomic.is_null())
+            .map(|atomic| {
+                let name = match atomic {
+                    TAtomic::Object(object) if atomic.get_intersection_types().is_none() => object.get_name()?,
+                    _ => return None,
+                };
+                if matches!(self.checked.types().class_declaration(name).kind, DeclarationKind::Interface) {
+                    return Some(name.as_bytes().to_vec());
                 }
-                _ => Some(None),
-            });
-        let first = named.next()??;
+                let class = self.case_enum(name.as_bytes()).unwrap_or(name.as_bytes());
 
-        named
-            .all(|name| name.is_some_and(|name| self.reach.same_class(name.as_bytes(), first.as_bytes())))
-            .then(|| first.as_bytes().to_vec())
+                self.reach.sealed_interfaces(class).first().map(|interface| interface.as_bytes().to_vec())
+            });
+        let first = held.next()??;
+
+        held.all(|interface| interface.is_some_and(|interface| self.reach.same_class(&interface, &first)))
+            .then_some(first)
     }
 
     /// `==` of `lhs` and `rhs`, two values of `interface`, an interface that extends `Equatable`, spec section 19: equal

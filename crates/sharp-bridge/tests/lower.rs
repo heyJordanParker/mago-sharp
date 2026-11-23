@@ -23956,6 +23956,18 @@ fn equality_of_an_interface_that_extends_equatable_compares_by_each_value_s_own_
     );
 }
 
+/// Spec sections 11 and 19: two `List`s of a type parameter bounded by `Equatable` compare element by element, each
+/// pair by the `==` of the type the value is, through `\Sharp\Internal\equals`, where PHP's `===` on the two arrays
+/// would tell two equal structs apart.
+#[test]
+fn two_lists_of_an_equatable_type_parameter_compare_element_by_element() {
+    let body =
+        body_in("bool run<T : Equatable>(List<T> first, List<T> second)", "        return first == second;\n", &[]);
+
+    assert!(body.contains("ZVAL \"array_all\"\n"), "{body}");
+    assert!(body.contains("ZVAL \"Sharp\\\\Internal\\\\equals\"\n"), "{body}");
+}
+
 /// ```php
 /// $b = (float) $count === $ratio; $b = $ratio !== (float) $count;
 /// ```

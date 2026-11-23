@@ -2604,16 +2604,21 @@ fn compile_proves_a_law_over_an_interface_that_extends_equatable() {
     };
     let keeps = "law keepsItsFailure(Failure f) => new Failed(f).failure == f;";
     let apart = "law cardIsNoLoss(int unused) => Failed.of(Declined.Card) != Failed.of(Lost.Gone);";
+    let card = "law aFailureIsItsCase(int unused) => Failed.of(Declined.Card) == Declined.Card;";
 
     for sealed in ["sealed ", ""] {
-        let laws = if sealed.is_empty() { keeps.to_owned() } else { format!("{keeps}\n    {apart}") };
+        let laws = if sealed.is_empty() { keeps.to_owned() } else { format!("{keeps}\n    {apart}\n    {card}") };
         let (directory, output) = compiled_with(sealed, &laws);
 
         assert!(output.status.success(), "{}", printed(&output));
         assert!(compiled(directory.path(), "app/Shop/Failed.sharp").exists());
     }
 
-    for (sealed, law) in [("sealed ", "law anyTwoAreOne(Failure a, Failure b) => a == b;"), ("", apart)] {
+    for (sealed, law) in [
+        ("sealed ", "law anyTwoAreOne(Failure a, Failure b) => a == b;"),
+        ("sealed ", "law aFailureIsAnotherCase(int unused) => Failed.of(Declined.Card) == Declined.Fraud;"),
+        ("", apart),
+    ] {
         let (_directory, output) = compiled_with(sealed, law);
         let name = law.trim_start_matches("law ").split('(').next().unwrap();
 

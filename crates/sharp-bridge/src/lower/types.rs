@@ -2687,8 +2687,9 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// Whether `==` on a value of `lhs_type` and one of `rhs_type` is PHP's `===`, spec section 19: true for every value
-    /// but a `List` or a value that may be a collection or another type, and for two lists whose elements compare so.
-    /// Elements compared by an `op_Equality`, as floats, or as `Map`s or `Set`s need their own `==`.
+    /// but a `List` or a value that may be a collection or another type, and for two lists whose elements compare so,
+    /// as [`Self::equality`] tells of them. Elements of any other `==`, as a value of a type parameter, which runs its
+    /// type's own, need their own `==`.
     fn compares_identically(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> bool {
         if compares_mixed_collection(lhs_type, rhs_type) {
             return false;
@@ -2698,12 +2699,7 @@ impl<'analysis> Types<'analysis> {
         };
         let (lhs_element, rhs_element) = (self.element_type(lhs_type), self.element_type(rhs_type));
 
-        lhs_lists
-            && rhs_lists
-            && self.declared_equality(&lhs_element, &rhs_element).is_none()
-            && ![&lhs_element, &rhs_element].into_iter().any(|r#type| holds_equatable_interface(r#type, self.codebase))
-            && !mixes_numbers(&lhs_element, &rhs_element)
-            && self.compares_identically(&lhs_element, &rhs_element)
+        lhs_lists && rhs_lists && self.equality(&lhs_element, &rhs_element) == Equality::Identical
     }
 
     /// How the call `call`, which sorts, orders two keys, as `<` on two values of the key type the checker found it
