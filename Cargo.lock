@@ -1872,6 +1872,7 @@ dependencies = [
  "mago-database",
  "mago-names",
  "mago-php-version",
+ "mago-prelude",
  "mago-syntax",
  "rayon",
  "rust-embed",

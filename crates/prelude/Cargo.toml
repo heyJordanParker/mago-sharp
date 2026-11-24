@@ -36,6 +36,8 @@ build = ["serde", "mago-allocator", "rust-embed", "mago-syntax", "mago-names", "
 
 [dev-dependencies]
 criterion = { workspace = true }
+# Its own tests and bench build the prelude, which every other package's tests decode.
+mago-prelude = { workspace = true, features = ["build"] }
 
 [[bench]]
 name = "prelude"
