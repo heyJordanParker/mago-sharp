@@ -434,8 +434,8 @@ fn orchestrator_loads_initialization_stubs_into_the_source_database() {
 /// The `request-timeout-ms` of each host the deadline tests start.
 const DEADLINE: Duration = Duration::from_secs(3);
 
-/// An extension host whose plugin `slow-routes` has an after-analysis hook that runs for 0.6 times `DEADLINE`, and
-/// whose plugin `dead-routes` has one that never finishes.
+/// An extension host whose plugin `rules` registers three after-analysis hooks: `QuickRule`, which runs for 0.6 times
+/// `DEADLINE`, then `SpinsRule`, which never finishes, then `SecondQuickRule`.
 const HOST_WHOSE_SECOND_AFTER_ANALYSIS_HOOK_NEVER_FINISHES: &str = r#"<?php
 
 declare(strict_types=1);
@@ -448,41 +448,45 @@ use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Worker;
 
-final class Routes implements Plugin, AfterAnalysisHook
+final class QuickRule implements AfterAnalysisHook
 {
-    public function __construct(
-        private readonly string $identifier,
-        private readonly ?int $microseconds,
-    ) {}
-
-    public function getDefinition(): PluginDefinition
-    {
-        return new PluginDefinition($this->identifier, $this->identifier, 'Reports the routes no request reaches.');
-    }
-
-    public function register(PluginRegistry $registry): void
-    {
-        $registry->registerAfterAnalysisHook($this);
-    }
-
     public function afterAnalysis(AfterAnalysisContext $context): void
     {
-        if ($this->microseconds !== null) {
-            usleep($this->microseconds);
+        usleep(1_800_000);
+    }
+}
 
-            return;
-        }
-
+final class SpinsRule implements AfterAnalysisHook
+{
+    public function afterAnalysis(AfterAnalysisContext $context): void
+    {
         while (true) {
             sleep(1);
         }
     }
 }
 
-(new Worker(new Extension('acme/routes', 'Routes', '1.0.0', analyzerPlugins: [
-    new Routes('slow-routes', 1_800_000),
-    new Routes('dead-routes', null),
-])))->run();
+final class SecondQuickRule implements AfterAnalysisHook
+{
+    public function afterAnalysis(AfterAnalysisContext $context): void {}
+}
+
+final class Rules implements Plugin
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('rules', 'Rules', 'Three rules over the whole project.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerAfterAnalysisHook(new QuickRule());
+        $registry->registerAfterAnalysisHook(new SpinsRule());
+        $registry->registerAfterAnalysisHook(new SecondQuickRule());
+    }
+}
+
+(new Worker(new Extension('acme/rules', 'Rules', '1.0.0', analyzerPlugins: [new Rules()])))->run();
 "#;
 
 /// An extension host whose plugin `hung-filter` has an issue-filter hook for `non-existent-function` that never
@@ -633,11 +637,11 @@ fn deadline_database() -> Database<'static> {
     database
 }
 
-/// The host runs every plugin's after-analysis hooks in one request, and starts the deadline again at each plugin's,
-/// so a plugin's hooks that finish in time leave the next plugin its whole deadline. The error names the plugin whose
-/// hooks made no progress, as it names the file whose hooks made none.
+/// The host runs every after-analysis hook in one request, and starts the deadline again at each hook, so a hook that
+/// finishes in time leaves the next hook its whole deadline. The error names the hook that made no progress and its
+/// plugin.
 #[test]
-fn an_after_analysis_hook_that_never_finishes_fails_at_the_deadline_naming_its_plugin() {
+fn an_after_analysis_hook_that_never_finishes_fails_at_the_deadline_naming_its_hook() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     if !common::php_sdk_is_available(repository, "the after-analysis deadline test") {
         return;
@@ -658,11 +662,11 @@ fn an_after_analysis_hook_that_never_finishes_fails_at_the_deadline_naming_its_p
     let error = service.analyze().expect_err("the after-analysis hook should fail at the deadline");
     let elapsed = started_at.elapsed();
 
-    // `slow-routes` runs for 0.6 times the deadline, then `dead-routes` hangs for the whole deadline.
+    // `QuickRule` runs for 0.6 times the deadline, then `SpinsRule` hangs for the whole deadline.
     assert!(elapsed > DEADLINE * 6 / 5 && elapsed < DEADLINE * 13 / 5, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
-        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the after-analysis hooks of plugin `dead-routes`: raise its `request-timeout-ms` for hooks that run that long"
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms in the after-analysis hook `SpinsRule` of plugin `rules`"
     );
 }
 
@@ -693,14 +697,14 @@ fn an_issue_filter_that_never_finishes_fails_at_the_deadline_naming_its_file() {
     assert!(elapsed >= DEADLINE && elapsed < DEADLINE * 2, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
-        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the issue-filter hooks of src/Route.php: raise its `request-timeout-ms` for hooks that run that long"
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms in the issue-filter hooks of src/Route.php"
     );
 }
 
-/// An after-file request runs one file's hooks, so Mago names it by the file, and the worker sends no progress for
-/// it.
+/// An after-file request runs one file's hooks, and the worker names each hook as it starts it, with its plugin and
+/// the file.
 #[test]
-fn an_after_file_hook_that_never_finishes_fails_at_the_deadline_naming_its_file() {
+fn an_after_file_hook_that_never_finishes_fails_at_the_deadline_naming_its_hook_and_file() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     if !common::php_sdk_is_available(repository, "the after-file deadline test") {
         return;

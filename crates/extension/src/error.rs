@@ -72,8 +72,8 @@ pub enum WorkerError {
     /// The host's worker failed the request, with what it threw.
     Remote { host: String, message: String },
     /// A request made no progress within its deadline: `running` is the unit the worker last said the request started,
-    /// such as "the after-analysis hooks of plugin `routes`", or else what mago named the request, such as "the linter
-    /// rules of app/User.php".
+    /// such as "the after-analysis hook `SpinsRule` of plugin `rules`", or else what mago named the request, such as
+    /// "the linter rules of app/User.php".
     Timeout { host: String, running: Option<String>, duration: Duration },
     /// The engine stopped the request on a fatal error, with what it printed.
     Failed { host: String, message: String },
@@ -104,10 +104,10 @@ impl std::fmt::Display for WorkerError {
             }
             Self::Timeout { host, running, duration } => {
                 write!(formatter, "extension host `{host}` made no progress for {} ms", duration.as_millis())?;
-                if let Some(running) = running {
-                    write!(formatter, " on {running}")?;
+                match running {
+                    Some(running) => write!(formatter, " in {running}"),
+                    None => Ok(()),
                 }
-                write!(formatter, ": raise its `request-timeout-ms` for hooks that run that long")
             }
             Self::Failed { host, message } => write!(formatter, "extension host `{host}` failed: {message}"),
             Self::Reduction { message } => write!(formatter, "extension worker reduction failed: {message}"),

@@ -72,6 +72,7 @@ use function array_map;
 use function array_values;
 use function count;
 use function function_exists;
+use function get_debug_type;
 use function implode;
 use function in_array;
 use function is_array;
@@ -1159,11 +1160,6 @@ final class Worker
         $contributedReferences = [];
         $recordedReads = [];
         $analyses = is_array($request->analysis) ? $request->analysis : [$request->analysis];
-        $projectHooks = match ($kind) {
-            AnalyzerProtocol::BEFORE_ANALYSIS_REQUEST => 'before-analysis',
-            AnalyzerProtocol::AFTER_ANALYSIS_REQUEST => 'after-analysis',
-            default => null,
-        };
         foreach ($analyses as $analysis) {
             // A batch runs several files' hooks, so each file's start is progress of its own. Mago names the one file
             // of an after-file request itself.
@@ -1187,11 +1183,6 @@ final class Worker
                 }
 
                 $identifier = $registered->definition->identifier;
-                // One request runs every plugin's project-level hooks, so each plugin's start is progress of its own.
-                if ($projectHooks !== null) {
-                    $host->progress("the {$projectHooks} hooks of plugin `{$identifier}`");
-                }
-
                 $providing = array_key_exists($identifier, $this->pluginsWithProviders);
                 $fileCodebase = match (true) {
                     !$recording => $codebase,
@@ -1240,6 +1231,7 @@ final class Worker
 
                     if ($context instanceof BeforeAnalysisContext) {
                         foreach ($registered->beforeAnalysisHooks as $hook) {
+                            self::startHook($host, 'before-analysis', $hook, $identifier, null);
                             $ruleTimes?->start();
                             $hook->beforeAnalysis($context);
                             $ruleTimes?->stop($hook, 'beforeAnalysis', null);
@@ -1248,16 +1240,25 @@ final class Worker
 
                     if ($context instanceof AfterFileAnalysisContext) {
                         foreach ($registered->afterFileAnalysisHooks as $hook) {
+                            self::startHook($host, 'after-file', $hook, $identifier, $context->analysis->file);
                             $ruleTimes?->start();
                             $hook->afterFileAnalysis($context);
                             $ruleTimes?->stop($hook, 'afterFileAnalysis', $context->analysis->file);
                         }
 
-                        $this->runNodeAnalysisHooks($registered, $context, $pluginIndex, $reportedIssues, $ruleTimes);
+                        $this->runNodeAnalysisHooks(
+                            $registered,
+                            $context,
+                            $pluginIndex,
+                            $reportedIssues,
+                            $host,
+                            $ruleTimes,
+                        );
                     }
 
                     if ($context instanceof AfterAnalysisContext) {
                         foreach ($registered->afterAnalysisHooks as $hook) {
+                            self::startHook($host, 'after-analysis', $hook, $identifier, null);
                             $ruleTimes?->start();
                             $hook->afterAnalysis($context);
                             $ruleTimes?->stop($hook, 'afterAnalysis', null);
@@ -1323,6 +1324,7 @@ final class Worker
         AfterFileAnalysisContext $context,
         int $pluginIndex,
         array &$reportedIssues,
+        HostClient $host,
         ?RuleTimes $ruleTimes,
     ): void {
         if (
@@ -1334,6 +1336,7 @@ final class Worker
             return;
         }
 
+        $identifier = $registered->definition->identifier;
         $source = $context->analysis->getNodeSourceFile();
         $targetIndex = 0;
         foreach ($source->getTargetNodes() as $node) {
@@ -1357,6 +1360,7 @@ final class Worker
 
             $nodeContext = new NodeAnalysisContext($context, $source, $node, $data);
             foreach ($hooks as $hook) {
+                self::startHook($host, 'node', $hook->callback, $identifier, $context->analysis->file);
                 $ruleTimes?->start();
                 $hook->callback->analyze($nodeContext);
                 $ruleTimes?->stop($hook->callback, 'analyze', $context->analysis->file);
@@ -1385,6 +1389,7 @@ final class Worker
                     continue;
                 }
 
+                self::startHook($host, 'node', $hook->callback, $identifier, $context->analysis->file);
                 $ruleTimes?->start();
                 $hook->callback->analyze($nodeContext);
                 $ruleTimes?->stop($hook->callback, 'analyze', $context->analysis->file);
@@ -1417,5 +1422,15 @@ final class Worker
         }
 
         return $hooks;
+    }
+
+    /**
+     * Tells mago that the request starts `$hook`, a `$kind` hook of the plugin `$plugin`, on `$file` for a file's hook,
+     * which starts the request's deadline again, so each hook has the whole deadline and a hook that misses it is named.
+     */
+    private static function startHook(HostClient $host, string $kind, object $hook, string $plugin, ?string $file): void
+    {
+        $on = $file === null ? '' : " on {$file}";
+        $host->progress("the {$kind} hook `" . get_debug_type($hook) . "` of plugin `{$plugin}`{$on}");
     }
 }

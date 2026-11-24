@@ -1874,8 +1874,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         );
     }
 
-    /// The error the host of [`hosted`] gives when its after-analysis hooks make no progress.
-    const TIMEOUT: &str = "Orchestrator error: Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `counter` made no progress for 15000 ms on the after-analysis hooks of plugin `counts-workers`: raise its `request-timeout-ms` for hooks that run that long";
+    /// The error the host of [`hosted`] gives when its after-analysis hook makes no progress.
+    const TIMEOUT: &str = "Orchestrator error: Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `counter` made no progress for 15000 ms in the after-analysis hook `CountsWorkers` of plugin `counts-workers`";
 
     /// Once a run writes its files, fresh hosts that load them prove the project again. When that proof can't finish,
     /// the files are written and git holds their plain PHP, so the run still names them, logs the error, and fails as

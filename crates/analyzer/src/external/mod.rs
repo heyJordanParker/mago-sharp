@@ -4266,8 +4266,7 @@ mod tests {
                 "the hooks of src/Route.php",
             ]
             .map(|running| Some(format!(
-                "external analyzer worker failed: extension host `acme` made no progress for 30000 ms on {running}: \
-                 raise its `request-timeout-ms` for hooks that run that long"
+                "external analyzer worker failed: extension host `acme` made no progress for 30000 ms in {running}"
             )))
         );
     }
