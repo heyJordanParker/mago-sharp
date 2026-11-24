@@ -49,6 +49,7 @@ use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_database::file::FolderNamespace;
 use mago_database::loader::mark_sharp_file;
 use mago_names::resolver::NameResolver;
 use mago_prelude::Prelude;
@@ -244,7 +245,7 @@ fn checked(shared: &mut Shared, folder: &Path, converted: &Converted) -> String 
     let input = FileId::new(format!("{}.sharp", declared(folder)).as_bytes());
     let file = server.database().get(&input).unwrap();
     let (mut issues, _) = server.analyze_file_with_artifacts(input).expect("the analysis holds the converted file");
-    let too_wide = too_wide_members(server.codebase(), server.symbol_references());
+    let too_wide = too_wide_members(server.codebase(), server.symbol_references(), &test_files(server));
     issues.extend(too_wide.into_iter().filter(|issue| issue.primary_span().is_some_and(|span| span.file_id == input)));
     let mut lines: Vec<String> = Vec::new();
     for issue in issues.iter().filter(|issue| issue.level >= Level::Warning) {
@@ -257,6 +258,16 @@ fn checked(shared: &mut Shared, folder: &Path, converted: &Converted) -> String 
     }
 
     lines.concat()
+}
+
+/// The files of the project `server` analyzes in an `autoload-dev` folder, as `mago convert` gives the converter them.
+fn test_files(server: &Server) -> Vec<FileId> {
+    server
+        .database()
+        .files()
+        .filter(|file| file.folder_namespace == Some(FolderNamespace::Test))
+        .map(|file| file.id)
+        .collect()
 }
 
 /// What the converter gives for the case at `folder`: the PHP# text and its `extern namespace` lines, or each refusal
@@ -273,6 +284,7 @@ fn converted(shared: &mut Shared, folder: &Path) -> Result<Converted, String> {
     let program = parse_file(&arena, &file);
     let names = NameResolver::new(&arena).resolve(program);
     let effects = server.effects();
+    let test_files = test_files(server);
     let input = Input {
         file: &file,
         program,
@@ -281,6 +293,7 @@ fn converted(shared: &mut Shared, folder: &Path) -> Result<Converted, String> {
         artifacts: &artifacts,
         effects: &effects,
         references: server.symbol_references(),
+        test_files: &test_files,
         library: &library,
     };
 

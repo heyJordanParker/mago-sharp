@@ -55,6 +55,7 @@ use mago_database::error::IOAction;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_database::file::FolderNamespace;
 use mago_database::loader::mark_sharp_file;
 use mago_database::matcher::ExclusionMatcher;
 use mago_database::matcher::contains_glob_metacharacters;
@@ -759,6 +760,13 @@ impl<'configuration> Session<'configuration> {
         let Some((_, artifacts)) = self.server.analyze_file_with_artifacts(file.id) else {
             return Err(vec![format!("{}: the analysis holds no such file", display(&file.name))]);
         };
+        let test_files: Vec<FileId> = self
+            .server
+            .database()
+            .files()
+            .filter(|file| file.folder_namespace == Some(FolderNamespace::Test))
+            .map(|file| file.id)
+            .collect();
         let input = Input {
             file,
             program,
@@ -767,6 +775,7 @@ impl<'configuration> Session<'configuration> {
             artifacts: &artifacts,
             effects,
             references: self.server.symbol_references(),
+            test_files: &test_files,
             library,
         };
 

@@ -230,13 +230,17 @@ impl AnalysisService {
 
         // The file is the whole project here, so its uses, the late ones included, are every use, for the too-wide and
         // the unused-class errors.
-        analysis_result.issues.extend(too_wide_members(&self.codebase, &analysis_result.symbol_references));
         let test_files: Vec<FileId> = self
             .database
             .files()
             .filter(|file| file.folder_namespace == Some(FolderNamespace::Test))
             .map(|file| file.id)
             .collect();
+        analysis_result.issues.extend(too_wide_members(
+            &self.codebase,
+            &analysis_result.symbol_references,
+            &test_files,
+        ));
         analysis_result.issues.extend(unused_classes(&self.codebase, &analysis_result.symbol_references, &test_files));
         analysis_result.issues.extend(self.codebase.take_issues(true));
         issues.extend(analysis_result.issues.iter().cloned());

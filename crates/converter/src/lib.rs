@@ -22,6 +22,7 @@ use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
+use mago_database::file::FileId;
 use mago_names::ResolvedNames;
 use mago_names::scope::NamespaceScope;
 use mago_span::HasSpan;
@@ -65,6 +66,8 @@ pub struct Input<'input, 'arena> {
     pub effects: &'input Effects,
     /// The project's references between symbols, which name every member and file that sets a property.
     pub references: &'input SymbolReferences,
+    /// The project's files in an `autoload-dev` folder, whose classes their test runner creates, spec section 5.
+    pub test_files: &'input [FileId],
     /// The standard library's members that run a PHP function, which a bare call of a built-in becomes.
     pub library: &'input Library,
 }

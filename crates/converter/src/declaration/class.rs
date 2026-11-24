@@ -123,7 +123,7 @@ impl<'input> Converter<'input, '_> {
     fn header(&mut self, start: u32, metadata: &ClassLikeMetadata, name: &LocalIdentifier<'_>) {
         let codebase = self.input.codebase;
         let is_internal = self.in_project()
-            && types_only_their_namespace_uses(codebase, self.input.references)
+            && types_only_their_namespace_uses(codebase, self.input.references, self.input.test_files)
                 .contains(&codebase.class_key(metadata.name));
         self.edits.insert(start, if is_internal { "internal " } else { "public " });
         if let Some(parameters) = self.type_parameters(&metadata.template_types, &metadata.template_variance, name.span)
