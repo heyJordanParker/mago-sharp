@@ -34,10 +34,9 @@ pub struct ExtensionHostConfiguration {
     pub ini: BTreeMap<String, String>,
 
     /// Longest one unit of a request may run, in milliseconds. It counts from when the worker starts a request, and
-    /// starts again each time the worker starts one of the request's units: a hook, before-analysis, after-file,
-    /// after-analysis or node, a file's hooks in an after-file batch, one plugin's initialization hooks, a codebase-scan
-    /// hook, or an extension's worker reducer. A hook that runs past it fails the request, and the error names the host
-    /// and the hook.
+    /// starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one
+    /// plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker
+    /// reducer. A hook that runs past it fails the request, and the error names the host, the unit and the hook.
     pub request_timeout_ms: u64,
 
     #[serde(skip)]

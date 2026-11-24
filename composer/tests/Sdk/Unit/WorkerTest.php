@@ -214,8 +214,7 @@ final class WorkerTest extends TestCase
 
     /**
      * A request that runs several units starts the deadline again at each, and names each one, as a request of a
-     * batch of files names each file and a request of a project's hooks names each hook. Mago names a request of one
-     * unit itself.
+     * batch of files names each file. Mago names a request of one unit itself.
      */
     public function testAWorkerNamesEachUnitOfARequestAsItStartsIt(): void
     {
@@ -241,11 +240,11 @@ final class WorkerTest extends TestCase
                 'scan: start a codebase-scan hook of plugin `first`',
                 'scan: start a codebase-scan hook of plugin `second`',
                 'scan: response',
-                'before: start the before-analysis hook `Mago\Sdk\Analyzer\Plugin@anonymous` of plugin `first`',
-                'before: start the before-analysis hook `Mago\Sdk\Analyzer\Plugin@anonymous` of plugin `second`',
+                'before: start the before-analysis hooks of plugin `first`',
+                'before: start the before-analysis hooks of plugin `second`',
                 'before: response',
-                'after: start the after-analysis hook `Mago\Sdk\Analyzer\Plugin@anonymous` of plugin `first`',
-                'after: start the after-analysis hook `Mago\Sdk\Analyzer\Plugin@anonymous` of plugin `second`',
+                'after: start the after-analysis hooks of plugin `first`',
+                'after: start the after-analysis hooks of plugin `second`',
                 'after: response',
             ],
             $sent,

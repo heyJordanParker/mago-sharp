@@ -637,9 +637,9 @@ fn deadline_database() -> Database<'static> {
     database
 }
 
-/// The host runs every after-analysis hook in one request, and starts the deadline again at each hook, so a hook that
-/// finishes in time leaves the next hook its whole deadline. The error names the hook that made no progress and its
-/// plugin.
+/// The host runs every after-analysis hook in one request, and starts the deadline again at each plugin's hooks. When a
+/// hook never finishes, the error names the plugin's hooks and the hook the worker was running, the one that spins, not
+/// the one before it that finished.
 #[test]
 fn an_after_analysis_hook_that_never_finishes_fails_at_the_deadline_naming_its_hook() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -662,16 +662,16 @@ fn an_after_analysis_hook_that_never_finishes_fails_at_the_deadline_naming_its_h
     let error = service.analyze().expect_err("the after-analysis hook should fail at the deadline");
     let elapsed = started_at.elapsed();
 
-    // `QuickRule` runs for 0.6 times the deadline, then `SpinsRule` hangs for the whole deadline.
-    assert!(elapsed > DEADLINE * 6 / 5 && elapsed < DEADLINE * 13 / 5, "the analysis failed after {elapsed:?}");
+    // `QuickRule` runs for 0.6 times the deadline, then `SpinsRule` hangs past the rest of it.
+    assert!(elapsed >= DEADLINE && elapsed < DEADLINE * 2, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
-        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms in the after-analysis hook `SpinsRule` of plugin `rules`"
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms in the after-analysis hooks of plugin `rules`, in the hook `SpinsRule`"
     );
 }
 
 /// An issue-filter request runs one file's issue-filter hooks, so Mago names it by the file, and the worker sends no
-/// progress for it.
+/// progress for it. The error also names the hook the worker was running.
 #[test]
 fn an_issue_filter_that_never_finishes_fails_at_the_deadline_naming_its_file() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -697,12 +697,12 @@ fn an_issue_filter_that_never_finishes_fails_at_the_deadline_naming_its_file() {
     assert!(elapsed >= DEADLINE && elapsed < DEADLINE * 2, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
-        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms in the issue-filter hooks of src/Route.php"
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms in the issue-filter hooks of src/Route.php, in the hook `HungFilter`"
     );
 }
 
-/// An after-file request runs one file's hooks, and the worker names each hook as it starts it, with its plugin and
-/// the file.
+/// An after-file request runs one file's hooks, which the worker names by the file as it starts them, and the error
+/// also names the hook the worker was running.
 #[test]
 fn an_after_file_hook_that_never_finishes_fails_at_the_deadline_naming_its_hook_and_file() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -729,7 +729,7 @@ fn an_after_file_hook_that_never_finishes_fails_at_the_deadline_naming_its_hook_
     assert!(elapsed >= DEADLINE && elapsed < DEADLINE * 2, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
-        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the hooks of src/Route.php: raise its `request-timeout-ms` for hooks that run that long"
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms in the hooks of src/Route.php, in the hook `HungFile`"
     );
 }
 

@@ -9,6 +9,7 @@ use std::time::Instant;
 use mago_engine::Answer;
 use mago_engine::Engine;
 use mago_engine::EngineError;
+use mago_engine::Frame;
 use mago_engine::Value;
 
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -178,7 +179,9 @@ fn a_call_past_its_deadline_stops_and_resets_the_interpreter() {
 
     let stopped = engine.call("Mago\\Tests\\Engine\\spin", &[], deadline, &mut no_questions);
 
-    assert_eq!(stopped, Err(EngineError::Deadline(deadline)));
+    let Err(EngineError::Deadline { duration, frames }) = stopped else { panic!("the call ran on: {stopped:?}") };
+    assert_eq!(duration, deadline);
+    assert_eq!(frames.first(), Some(&Frame { class: String::new(), function: "Mago\\Tests\\Engine\\spin".to_owned() }));
     assert!(start.elapsed() < Duration::from_secs(5), "the call stopped {:?} after it started", start.elapsed());
     assert_eq!(call(&engine, "count_call"), Ok(Value::Int(1)), "the interpreter starts again");
 }
@@ -210,7 +213,7 @@ fn a_call_past_its_deadline_stops_while_another_threads_calls_end_in_time() {
         let spun = engine.call("Mago\\Tests\\Engine\\spin", &[], deadline, &mut no_questions);
         stopped.store(true, Ordering::SeqCst);
 
-        assert_eq!(spun, Err(EngineError::Deadline(deadline)));
+        assert!(matches!(spun, Err(EngineError::Deadline { duration, .. }) if duration == deadline), "{spun:?}");
         assert!(start.elapsed() < Duration::from_secs(5), "the call stopped {:?} after it started", start.elapsed());
         assert!(other.join().unwrap() > 1, "the other thread's calls kept ending in time");
     });
@@ -230,7 +233,7 @@ fn a_call_that_ends_before_its_deadline_leaves_the_next_call_alone() {
     let engine = engine();
     for _ in 0..50 {
         let short = engine.call("Mago\\Tests\\Engine\\count_call", &[], Duration::from_millis(1), &mut no_questions);
-        assert!(matches!(short, Ok(Value::Int(_)) | Err(EngineError::Deadline(_))), "{short:?}");
+        assert!(matches!(short, Ok(Value::Int(_)) | Err(EngineError::Deadline { .. })), "{short:?}");
     }
 
     assert!(matches!(call(&engine, "count_call"), Ok(Value::Int(_))));
@@ -406,7 +409,7 @@ fn an_answer_that_restarts_the_deadline_keeps_a_call_that_progresses_running() {
     let stalled = engine.call("Mago\\Tests\\Engine\\spin_asking", &rounds, deadline, &mut |_| Ok(Value::Null));
 
     assert_eq!(progressed, Ok(Value::Int(5)));
-    assert_eq!(stalled, Err(EngineError::Deadline(deadline)));
+    assert!(matches!(stalled, Err(EngineError::Deadline { duration, .. }) if duration == deadline), "{stalled:?}");
 }
 
 #[test]

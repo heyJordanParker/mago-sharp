@@ -73,8 +73,9 @@ pub enum WorkerError {
     /// The host's worker failed the request, with what it threw.
     Remote { host: String, message: String },
     /// A request made no progress within its deadline: `running` is the unit the worker last said the request started,
-    /// such as "the after-analysis hook `SpinsRule` of plugin `rules`", or else what mago named the request, such as
-    /// "the linter rules of app/User.php".
+    /// such as "the after-analysis hooks of plugin `rules`", or else what mago named the request, such as "the linter
+    /// rules of app/User.php", with the hook the worker was running when the stopped call's stack names one, as "the
+    /// after-analysis hooks of plugin `rules`, in the hook `SpinsRule`".
     Timeout { host: String, running: Option<String>, duration: Duration },
     /// The engine stopped the request on a fatal error, with what it printed.
     Failed { host: String, message: String },

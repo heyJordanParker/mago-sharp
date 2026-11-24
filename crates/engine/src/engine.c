@@ -7,6 +7,7 @@
 #include <Zend/zend_API.h>
 #include <Zend/zend_exceptions.h>
 #include <Zend/zend_interfaces.h>
+#include <Zend/zend_observer.h>
 #include <ext/spl/spl_exceptions.h>
 
 _Static_assert(sizeof(zval) == 16, "mago-engine's Zval holds a zval in 16 bytes");
@@ -125,6 +126,40 @@ static void engine_import_variables(zval *array)
 
 static zend_internal_function engine_caller;
 
+/* The frames of the stack the thread's last fatal error stopped, innermost first, each the list of its function's class,
+ * empty for a function of no class, and its function's name, which the call that bailed out returns. */
+ZEND_TLS zval engine_fatal_frames;
+
+static void engine_forget_fatal_frames(void)
+{
+	zval_ptr_dtor(&engine_fatal_frames);
+	ZVAL_UNDEF(&engine_fatal_frames);
+}
+
+/* Keeps the frames of the stack a fatal error stops, before the engine bails out of them. */
+static void engine_observe_error(int type, zend_string *file, uint32_t line, zend_string *message)
+{
+	(void) file;
+	(void) line;
+	(void) message;
+	if (!(type & E_FATAL_ERRORS)) {
+		return;
+	}
+	engine_forget_fatal_frames();
+	array_init(&engine_fatal_frames);
+	for (zend_execute_data *frame = EG(current_execute_data); frame; frame = frame->prev_execute_data) {
+		if (!frame->func || !frame->func->common.function_name) {
+			continue;
+		}
+		zval entry;
+		array_init_size(&entry, 2);
+		zend_class_entry *scope = frame->func->common.scope;
+		add_next_index_str(&entry, scope ? zend_string_copy(scope->name) : ZSTR_EMPTY_ALLOC());
+		add_next_index_str(&entry, zend_string_copy(frame->func->common.function_name));
+		add_next_index_zval(&engine_fatal_frames, &entry);
+	}
+}
+
 int engine_start(void)
 {
 	php_embed_module.startup = engine_module_startup;
@@ -141,6 +176,7 @@ int engine_start(void)
 
 	engine_caller.type = ZEND_INTERNAL_FUNCTION;
 	engine_caller.function_name = zend_string_init_interned(ZEND_STRL("Mago\\Engine\\call"), 1);
+	zend_observer_error_register(engine_observe_error);
 	php_request_shutdown(NULL);
 	return 0;
 }
@@ -171,6 +207,7 @@ int engine_set(const char *name, size_t name_length, const char *value, size_t v
 
 void engine_interpreter_stop(void)
 {
+	engine_forget_fatal_frames();
 	php_request_shutdown(NULL);
 }
 
@@ -234,6 +271,7 @@ int engine_call(const char *function, size_t length, zval *arguments, uint32_t c
 	/* zend_catch returns here through longjmp, so status lives in memory, where the assignments before it stay. */
 	volatile int status = ENGINE_DONE;
 	ZVAL_NULL(result);
+	engine_forget_fatal_frames();
 	zend_execute_data caller = {0};
 	caller.func = (zend_function *) &engine_caller;
 	EG(current_execute_data) = &caller;
@@ -250,6 +288,11 @@ int engine_call(const char *function, size_t length, zval *arguments, uint32_t c
 		zval_ptr_dtor(&name);
 	} zend_catch {
 		status = ENGINE_BAILED_OUT;
+		/* A call that bails out returns the frames its fatal error stopped. */
+		if (Z_TYPE(engine_fatal_frames) == IS_ARRAY) {
+			ZVAL_COPY_VALUE(result, &engine_fatal_frames);
+			ZVAL_UNDEF(&engine_fatal_frames);
+		}
 	} zend_end_try();
 	EG(current_execute_data) = NULL;
 	return status;

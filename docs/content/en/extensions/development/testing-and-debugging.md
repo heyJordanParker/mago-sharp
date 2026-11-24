@@ -129,7 +129,7 @@ Useful isolation switches are:
 
 ## Timeouts
 
-The host's `request-timeout-ms` is the longest one unit of a request may run. It counts from when the worker starts a request, and starts again each time the worker starts one of the request's units: a hook, before-analysis, after-file, after-analysis or node, a file's hooks in an after-file batch, one plugin's initialization hooks, a codebase-scan hook, or an extension's worker reducer. It does not start again at the nested metadata or comparison requests a hook makes. When a hook runs past it, Mago interrupts it, and the error names the host and the hook that made no progress, such as the after-analysis hook `SpinsRule` of plugin `rules`. The interpreter starts again before its next request. Mago interrupts the hook at its next PHP instruction, so a long scan or aggregation loop needs no check of its own.
+The host's `request-timeout-ms` is the longest one unit of a request may run. It counts from when the worker starts a request, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. It does not start again at the nested metadata or comparison requests a hook makes. When a hook runs past it, Mago interrupts it, and the error names the host, the unit that made no progress and the hook it was running, such as the after-analysis hooks of plugin `dead-routes`, in the hook `DeadRoutes`. The interpreter starts again before its next request. Mago interrupts the hook at its next PHP instruction, so a long scan or aggregation loop needs no check of its own.
 
 ## Test failure policy
 

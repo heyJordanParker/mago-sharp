@@ -23,6 +23,7 @@ use foldhash::HashMap;
 use mago_engine::Answer;
 use mago_engine::Engine;
 use mago_engine::EngineError;
+use mago_engine::Frame;
 use mago_engine::Value;
 
 use crate::WorkerError;
@@ -35,6 +36,9 @@ include!(concat!(env!("OUT_DIR"), "/sdk.rs"));
 const HANDLE: &str = "Mago\\Sdk\\Internal\\Hosts::handle";
 /// The SDK's entry that runs a host's file, which registers the host's worker.
 const LOAD: &str = "Mago\\Sdk\\Internal\\Hosts::load";
+
+/// The class of the worker a host's file runs, whose code calls each hook.
+const WORKER: &str = "Mago\\Sdk\\Worker";
 /// The SDK's entry that finds the host whose file declares a class-like.
 const DECLARER: &str = "Mago\\Sdk\\Internal\\Hosts::declarer";
 /// The longest an interpreter may take to move to the configuration's directory.
@@ -326,11 +330,16 @@ impl Hosts {
                 _ => Err(unanswered(file)),
             },
             Ok(_) => Err(unanswered(file)),
-            Err(EngineError::Deadline(duration)) => Err(WorkerError::Timeout {
-                host: file.name.clone(),
-                running: progressed.or_else(|| running.map(ToString::to_string)),
-                duration,
-            }),
+            Err(EngineError::Deadline { duration, frames }) => {
+                let running = progressed.or_else(|| running.map(ToString::to_string));
+                let running = match (running, started_hook(&frames)) {
+                    (Some(running), Some(hook)) => Some(format!("{running}, in the hook `{hook}`")),
+                    (None, Some(hook)) => Some(format!("the hook `{hook}`")),
+                    (running, None) => running,
+                };
+
+                Err(WorkerError::Timeout { host: file.name.clone(), running, duration })
+            }
             Err(error) => Err(WorkerError::Failed { host: file.name.clone(), message: error.to_string() }),
         }
     }
@@ -589,6 +598,15 @@ fn redeclared(message: &str) -> Option<String> {
     let end = name.find([' ', ',', '('])?;
 
     Some(name[..end].to_owned())
+}
+
+/// The hook the worker started in a call that ran past its deadline in `frames`, innermost first: the class, or the
+/// function of no class, of the frame the worker's own code called, which the worker held as it ran the hook.
+fn started_hook(frames: &[Frame]) -> Option<&str> {
+    frames.windows(2).find(|pair| pair[1].class == WORKER && pair[0].class != WORKER).map(|pair| {
+        let hook = &pair[0];
+        if hook.class.is_empty() { hook.function.as_str() } else { hook.class.as_str() }
+    })
 }
 
 fn unanswered(file: &HostFile) -> WorkerError {

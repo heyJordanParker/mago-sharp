@@ -64,8 +64,9 @@ pub enum EngineError {
     Threw(Thrown),
     /// The call stopped on a fatal error, with what the engine printed. The interpreter is reset.
     Failed(String),
-    /// The call ran past its deadline. The interpreter is reset.
-    Deadline(Duration),
+    /// The call ran past its deadline `duration`, stopped in `frames`, the functions it was running, innermost first.
+    /// The interpreter is reset.
+    Deadline { duration: Duration, frames: Vec<Frame> },
     /// The call returned a value of this engine type, which no [`Value`] holds.
     Value(u8),
     /// An argument or an answer holds a [`Value::Object`] or a [`Value::Case`] the interpreter can't build, and why.
@@ -83,8 +84,8 @@ impl fmt::Display for EngineError {
             Self::Script { script, message } => write!(formatter, "{} failed: {message}", script.display()),
             Self::Threw(thrown) => write!(formatter, "{thrown}"),
             Self::Failed(message) => write!(formatter, "{}", message.trim()),
-            Self::Deadline(deadline) => {
-                write!(formatter, "the call ran past its deadline of {} ms", deadline.as_millis())
+            Self::Deadline { duration, .. } => {
+                write!(formatter, "the call ran past its deadline of {} ms", duration.as_millis())
             }
             Self::Value(kind) => {
                 write!(formatter, "the call returned a value of engine type {kind}, which Mago can't read")
@@ -137,6 +138,36 @@ impl fmt::Display for Thrown {
         }
 
         write!(formatter, "{}: {} in {}:{}", self.class, self.message, self.file.display(), self.line)
+    }
+}
+
+/// A function a call was running: the class it belongs to, empty for a function of no class, and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    pub class: String,
+    pub function: String,
+}
+
+impl Frame {
+    /// The frames the engine wrote as `read`, each the list of its class and function, or none when it wrote none.
+    fn all(read: Result<Value, EngineError>) -> Vec<Self> {
+        let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+        let Ok(Value::List(frames)) = read else {
+            return Vec::new();
+        };
+
+        frames
+            .iter()
+            .filter_map(|frame| match frame {
+                Value::List(fields) => match fields.as_slice() {
+                    [Value::String(class), Value::String(function)] => {
+                        Some(Self { class: text(class), function: text(function) })
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -316,12 +347,13 @@ impl Engine {
 
             let deadlines = Deadlines::get();
             deadlines.watch(deadline, globals);
-            let result = self.run(function, arguments, answer);
+            let mut frames = Vec::new();
+            let result = self.run(function, arguments, answer, &mut frames);
             let fired = deadlines.finish(globals);
             match result {
                 Err(EngineError::Failed(_)) if fired => {
                     drop(thread.interpreter.take());
-                    Err(EngineError::Deadline(deadline))
+                    Err(EngineError::Deadline { duration: deadline, frames })
                 }
                 Err(EngineError::Failed(message)) => {
                     drop(thread.interpreter.take());
@@ -340,6 +372,8 @@ impl Engine {
         reset.len() != before
     }
 
+    /// Calls `function` with `arguments` in the thread's interpreter, answering what it asks with `answer`. A call that
+    /// fails on a fatal error gives `frames` the functions it was running, innermost first.
     #[allow(
         clippy::multiple_unsafe_ops_per_block,
         clippy::transmute_ptr_to_ptr,
@@ -350,6 +384,7 @@ impl Engine {
         function: &str,
         arguments: &[Value],
         answer: &mut dyn FnMut(Vec<Value>) -> Answer,
+        frames: &mut Vec<Frame>,
     ) -> Result<Value, EngineError> {
         let mut slots: Vec<Zval> = arguments.iter().map(|_| Zval::new()).collect();
         let mut result = Zval::new();
@@ -385,7 +420,11 @@ impl Engine {
             match status {
                 DONE => read,
                 THREW => Err(EngineError::Threw(Thrown::of(read))),
-                _ => Err(EngineError::Failed(output())),
+                _ => {
+                    *frames = Frame::all(read);
+
+                    Err(EngineError::Failed(output()))
+                }
             }
         }
     }
