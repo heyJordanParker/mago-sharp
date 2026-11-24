@@ -40,7 +40,6 @@ use mago_analyzer::external::ExternalAnalyzerError;
 use mago_analyzer::external::ExternalAnalyzerHandle;
 use mago_analyzer::external::ReturnTypeRequests;
 use mago_analyzer::plugin::PluginError;
-use mago_build_id::BUILD_ID;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::scanner::scan_program;
@@ -112,6 +111,7 @@ use crate::commands::args::reporting::default_reporting_format;
 use crate::commands::outcome::CommandOutcome;
 use crate::config::Configuration;
 use crate::config::extension::ExtensionHostConfiguration;
+use crate::consts::BUILD_ID;
 use crate::consts::PRELUDE_BYTES;
 use crate::consts::VERSION;
 use crate::error::Error;
@@ -697,6 +697,7 @@ impl LastCompile {
             library,
             compiled_files: CompiledFiles::decode(
                 &std::fs::read(folder.join(COMPILED_FILES)).unwrap_or_default(),
+                BUILD_ID,
                 configuration_hash(configuration),
             ),
             outputs,
@@ -766,6 +767,7 @@ fn write_hosts_folder(
                 Ok(input)
             },
             |_, _, _| Ok(Default::default()),
+            BUILD_ID,
             library,
             |_| IssueCollection::default(),
         )
@@ -836,7 +838,7 @@ fn write_hosts(
     let mut refused = IssueCollection::default();
     let mut accepted = HashSet::new();
     let mut recompiled = HashSet::new();
-    let bytes = compiled_files.encode(configuration_hash(configuration))?;
+    let bytes = compiled_files.encode(BUILD_ID, configuration_hash(configuration))?;
     keep(&compiled_files_path, unit::source_hash(&bytes), write_if_changed(&compiled_files_path, &bytes)?);
     written.insert(compiled_files_path);
     let mut kept = Vec::new();
@@ -1162,9 +1164,9 @@ fn holds_compiled(
             return false;
         };
 
-        unit::header(&bytes).is_ok_and(|header| {
-            header.checker == BUILD_ID.to_be_bytes() && header.source_hash == unit::source_hash(&file.contents)
-        }) && unit::inputs_changed(root, &bytes).is_ok_and(|changed| !changed)
+        unit::header(&bytes)
+            .is_ok_and(|header| header.checker == BUILD_ID && header.source_hash == unit::source_hash(&file.contents))
+            && unit::inputs_changed(root, &bytes).is_ok_and(|changed| !changed)
     })
 }
 
@@ -1215,6 +1217,7 @@ fn write_hosts_reach(
         None,
         |path| stamp_of(root, &held, path),
         |_, _, _| Ok(Default::default()),
+        BUILD_ID,
         library,
         |_| IssueCollection::default(),
     );
@@ -1692,6 +1695,7 @@ fn compiled(
             Record::read(&record_path).map(|mut record| std::mem::take(&mut record.outputs)).unwrap_or_default();
         let last = CompiledFiles::decode(
             &std::fs::read(hosts.folder.join(COMPILED_FILES)).unwrap_or_default(),
+            BUILD_ID,
             configuration_hash(configuration),
         );
         // A record the compile can't delete is in a folder it then fails to write its compiled files to.
@@ -1783,6 +1787,7 @@ fn compiled(
     let compiled_files_path = compiled_folder.join(COMPILED_FILES);
     let last = CompiledFiles::decode(
         &std::fs::read(&compiled_files_path).unwrap_or_default(),
+        BUILD_ID,
         configuration_hash(configuration),
     );
     let mut hosts_filesystems = filesystems.clone();
@@ -1823,6 +1828,7 @@ fn compiled(
                 checked.issues
             })
         },
+        BUILD_ID,
         &library,
         |issues| hidden.shown(issues, &read_database),
     );
@@ -1914,7 +1920,7 @@ fn compiled(
         written.insert(table);
     }
     if compiled_folder.is_dir() {
-        let bytes = compiled_files.encode(configuration_hash(configuration))?;
+        let bytes = compiled_files.encode(BUILD_ID, configuration_hash(configuration))?;
         write_if_changed(&compiled_files_path, &bytes)?;
         if let Some(record) = record.as_mut() {
             record.output(&compiled_files_path, unit::source_hash(&bytes));
@@ -2287,7 +2293,7 @@ impl Record {
         }
 
         Some(Self {
-            build: BUILD_ID.to_be_bytes(),
+            build: BUILD_ID,
             root: root.to_path_buf(),
             configuration: configuration_hash(configuration),
             outcome: Outcome::default(),
@@ -2418,7 +2424,7 @@ fn every_input_is_current(
     let hashes_as =
         |path: &Path, hash: &[u8; 16]| std::fs::read(path).is_ok_and(|bytes| unit::source_hash(&bytes) == *hash);
 
-    record.build == BUILD_ID.to_be_bytes()
+    record.build == BUILD_ID
         && record.root == root
         && record.configuration == configuration_hash(configuration)
         && found.len() == record.files.len()

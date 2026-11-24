@@ -1182,6 +1182,7 @@ fn compile_with_fixture(
         None,
         |_| Ok(None),
         |_, _, _| Ok(Default::default()),
+        *b"the checker's id",
         &Library::default(),
         |issues| issues,
     )?;

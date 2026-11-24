@@ -21,7 +21,6 @@ use mago_analyzer::effects::Effects;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::FileReads;
 use mago_analyzer::external::Listing;
-use mago_build_id::BUILD_ID;
 use mago_codex::graph::strongly_connected_parts;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::module::ModuleKind;
@@ -244,14 +243,14 @@ struct CompiledFile {
 }
 
 impl CompiledFiles {
-    /// The bytes [`Self::decode`] reads back: this checker build's ID, the hash of the `configuration` the files were
-    /// compiled with, then the files.
+    /// The bytes [`Self::decode`] reads back: `checker`, the build ID of the checker that compiled the files, the hash of
+    /// the `configuration` they were compiled with, then the files.
     ///
     /// # Errors
     ///
     /// Returns [`OrchestratorError`] when the files do not encode.
-    pub fn encode(&self, configuration: [u8; 16]) -> Result<Vec<u8>, OrchestratorError> {
-        let mut bytes = compiled_with(configuration);
+    pub fn encode(&self, checker: [u8; 16], configuration: [u8; 16]) -> Result<Vec<u8>, OrchestratorError> {
+        let mut bytes = compiled_with(checker, configuration);
         bytes.extend(bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(|error| {
             OrchestratorError::General(format!("The record of the compiled files does not encode: {error}."))
         })?);
@@ -259,21 +258,21 @@ impl CompiledFiles {
         Ok(bytes)
     }
 
-    /// The files `bytes` hold, or none when another checker build or another `configuration` compiled them or they
-    /// hold no record, so every file compiles again.
+    /// The files `bytes` hold, or none when a checker build other than `checker` or another `configuration` compiled
+    /// them or they hold no record, so every file compiles again.
     #[must_use]
-    pub fn decode(bytes: &[u8], configuration: [u8; 16]) -> Self {
+    pub fn decode(bytes: &[u8], checker: [u8; 16], configuration: [u8; 16]) -> Self {
         bytes
-            .strip_prefix(compiled_with(configuration).as_slice())
+            .strip_prefix(compiled_with(checker, configuration).as_slice())
             .and_then(|record| bincode::serde::decode_from_slice(record, bincode::config::standard()).ok())
             .map(|(files, _)| files)
             .unwrap_or_default()
     }
 }
 
-/// What the record of the compiled files starts with: this checker build's ID and the hash of the `configuration`.
-fn compiled_with(configuration: [u8; 16]) -> Vec<u8> {
-    let mut bytes = format!("{BUILD_ID}\0").into_bytes();
+/// What the record of the compiled files starts with: the build ID `checker` and the hash of the `configuration`.
+fn compiled_with(checker: [u8; 16], configuration: [u8; 16]) -> Vec<u8> {
+    let mut bytes = checker.to_vec();
     bytes.extend(configuration);
 
     bytes
@@ -626,7 +625,8 @@ impl IncrementalAnalysisService {
     /// absent: its size, modification time and hash are all zero. No file has that stamp, because the hash of an empty
     /// file is not zero.
     ///
-    /// Each compiled file's header names `standard_library`, the standard library the project compiles against.
+    /// Each compiled file's header names `checker`, the build ID of the checker that compiles, and `standard_library`,
+    /// the standard library the project compiles against. A compiled file another checker build wrote compiles again.
     ///
     /// `refusing` keeps, of the error-level issues the analysis reported, those that refuse their file: the ones no
     /// `ignore` entry or baseline entry hides for `mago compile`, or none for the compile the extension hosts load the
@@ -651,6 +651,7 @@ impl IncrementalAnalysisService {
         hosts: Option<Folder<'folder, Written>>,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         check: impl FnOnce(Vec<Translation>, &Reach, &HashSet<FileId>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
+        checker: [u8; 16],
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<(Compiled<Written>, Option<Compiled<Written>>), OrchestratorError>
@@ -684,7 +685,7 @@ impl IncrementalAnalysisService {
         // theirs give the forms the others' lowering and keys read.
         let no_forms = InlineForms::default();
         for target in std::iter::once(&mut first).chain(hosts.as_mut()) {
-            self.keep(target, &library, &reads, &HashMap::default(), &effects)?;
+            self.keep(target, checker, &library, &reads, &HashMap::default(), &effects)?;
         }
         self.lower_into(&mut first, &library, None, &no_forms, &reach, &effects, session.as_ref(), &mut lowerings)?;
         if let Some(hosts) = hosts.as_mut() {
@@ -696,12 +697,12 @@ impl IncrementalAnalysisService {
         let hosts_forms = hosts.as_ref().map(|hosts| hosts.library_forms(&library, &lowerings));
         let hosts_fingerprints = hosts_forms.as_deref().map(fingerprints_of);
         let forms: InlineForms = forms.into_iter().collect();
-        self.keep(&mut first, &rest, &reads, &fingerprints, &effects)?;
+        self.keep(&mut first, checker, &rest, &reads, &fingerprints, &effects)?;
         self.lower_into(&mut first, &rest, None, &forms, &reach, &effects, session.as_ref(), &mut lowerings)?;
         if let (Some(hosts), Some(hosts_forms), Some(hosts_fingerprints)) =
             (hosts.as_mut(), hosts_forms, hosts_fingerprints)
         {
-            self.keep(hosts, &rest, &reads, &hosts_fingerprints, &effects)?;
+            self.keep(hosts, checker, &rest, &reads, &hosts_fingerprints, &effects)?;
             // A file lowers the same for both folders when it inlines the same forms in both.
             let lowered = (hosts_fingerprints == fingerprints).then_some(&first);
             let hosts_forms: InlineForms = hosts_forms.into_iter().collect();
@@ -847,9 +848,11 @@ impl IncrementalAnalysisService {
         }
         inputs.end();
         let write = Phase::start("write");
-        let compiled = self.compiled(first, &files, &lowerings, &reads, &stamps, standard_library)?;
+        let compiled = self.compiled(first, &files, &lowerings, &reads, &stamps, checker, standard_library)?;
         let hosts = match hosts {
-            Some(hosts) => Some(self.compiled(hosts, &files, &lowerings, &reads, &stamps, standard_library)?),
+            Some(hosts) => {
+                Some(self.compiled(hosts, &files, &lowerings, &reads, &stamps, checker, standard_library)?)
+            }
             None => None,
         };
         write.end();
@@ -857,11 +860,12 @@ impl IncrementalAnalysisService {
         Ok((compiled, hosts))
     }
 
-    /// Keeps in `target` each of `files` whose key holds in its folder, as [`Self::kept`] finds it with `reads`, `forms`
-    /// and `effects`.
+    /// Keeps in `target` each of `files` whose key holds in its folder for the checker build `checker`, as
+    /// [`Self::kept`] finds it with `reads`, `forms` and `effects`.
     fn keep<Written>(
         &self,
         target: &mut Target<'_, Written>,
+        checker: [u8; 16],
         files: &[&Arc<File>],
         reads: &HashMap<FileId, (Reads, HashSet<FileId>)>,
         forms: &HashMap<Vec<u8>, u64>,
@@ -869,9 +873,17 @@ impl IncrementalAnalysisService {
     ) -> Result<(), OrchestratorError> {
         for file in files {
             let Target { folder, errors, kept, .. } = &mut *target;
-            if let Some(found) =
-                self.kept(file, folder.last, folder.compiled, &mut folder.intact, reads, forms, effects, errors)?
-            {
+            if let Some(found) = self.kept(
+                file,
+                checker,
+                folder.last,
+                folder.compiled,
+                &mut folder.intact,
+                reads,
+                forms,
+                effects,
+                errors,
+            )? {
                 kept.insert(file.id, found);
             }
         }
@@ -1033,6 +1045,7 @@ impl IncrementalAnalysisService {
         lowerings: &[Lowering],
         reads: &HashMap<FileId, (Reads, HashSet<FileId>)>,
         stamps: &HashMap<Vec<u8>, Input>,
+        checker: [u8; 16],
         standard_library: &Library,
     ) -> Result<Compiled<Written>, OrchestratorError>
     where
@@ -1070,16 +1083,17 @@ impl IncrementalAnalysisService {
                     let bytes = match bytes {
                         None if stamps == record.stamps => return Ok((file, Compilation::Kept, Some(next))),
                         Some(bytes) => bytes,
-                        None => {
-                            compiled(file)?.filter(|bytes| !unit::is_stale(bytes, record.key)).ok_or_else(|| {
+                        None => compiled(file)?
+                            .filter(|bytes| !unit::is_stale(bytes, checker, record.key))
+                            .ok_or_else(|| {
                                 OrchestratorError::General(format!(
                                     "The compiled file of {} changed while the compile ran. Compile again.",
                                     String::from_utf8_lossy(&file.name)
                                 ))
-                            })?
-                        }
+                            })?,
                     };
-                    let Some(bytes) = unit::restamp(&bytes, declarations_hash, &inputs, standard_library) else {
+                    let Some(bytes) = unit::restamp(&bytes, declarations_hash, &inputs, checker, standard_library)
+                    else {
                         unreachable!("a compiled file the compile keeps is one `unit::is_stale` read");
                     };
 
@@ -1092,7 +1106,7 @@ impl IncrementalAnalysisService {
                         let mut reads = reads.get(&file.id).map(|(reads, _)| reads.clone()).unwrap_or_default();
                         reads.inlined = unit.inlined().to_vec();
                         reads.function_types = unit.function_types().to_vec();
-                        let key = key(source_hash(&file.contents), &reads);
+                        let key = key(checker, source_hash(&file.contents), &reads);
                         let inputs = stamped(paths);
                         let stamps = stamps_hash(declarations_hash, &inputs, standard_library);
                         let next = CompiledFile {
@@ -1104,7 +1118,8 @@ impl IncrementalAnalysisService {
                             reaches_extension: *reaches_extension,
                             stamps,
                         };
-                        let bytes = encode(unit, &file.contents, key, declarations_hash, &inputs, standard_library);
+                        let bytes =
+                            encode(unit, &file.contents, key, declarations_hash, &inputs, checker, standard_library);
 
                         Ok((file, Compilation::Accepted(write(file, bytes)), Some(next)))
                     }
@@ -1125,7 +1140,8 @@ impl IncrementalAnalysisService {
         Ok((compilations, next))
     }
 
-    /// The compiled file of `file` and what `last` kept of it, when its key holds: `last` keeps it, the analysis
+    /// The compiled file of `file` and what `last` kept of it, when its key for the checker build `checker` holds:
+    /// `last` keeps it, the analysis
     /// refused nothing in it, and the key of its source and the current fingerprints of the reads `last` kept, as
     /// `reads` holds the declarations, inferred returns and sets of names it reads, `forms` the fingerprint of each
     /// library form by its name and `effects` its function types' effects, is the one `last` kept and its compiled
@@ -1134,6 +1150,7 @@ impl IncrementalAnalysisService {
     fn kept<'last>(
         &self,
         file: &File,
+        checker: [u8; 16],
         last: &'last CompiledFiles,
         compiled: &CompiledReader<'_>,
         intact: &mut impl FnMut(&File) -> bool,
@@ -1164,7 +1181,7 @@ impl IncrementalAnalysisService {
                 })
                 .collect(),
         };
-        let key = key(source_hash(&file.contents), &current);
+        let key = key(checker, source_hash(&file.contents), &current);
         if key != record.key {
             return Ok(None);
         }
@@ -1172,7 +1189,7 @@ impl IncrementalAnalysisService {
             return Ok(Some((None, record)));
         }
 
-        Ok(compiled(file)?.filter(|bytes| !unit::is_stale(bytes, key)).map(|bytes| (Some(bytes), record)))
+        Ok(compiled(file)?.filter(|bytes| !unit::is_stale(bytes, checker, key)).map(|bytes| (Some(bytes), record)))
     }
 
     /// Refuses each plain PHP file that declares a class extending or implementing a PHP# type that it doesn't satisfy,
@@ -2286,6 +2303,9 @@ mod tests {
     static PLUGIN_REGISTRY: LazyLock<Arc<PluginRegistry>> =
         LazyLock::new(|| Arc::new(PluginRegistry::with_library_providers()));
 
+    /// The build ID of the checker the tests compile with.
+    const CHECKER: [u8; 16] = *b"the checker's id";
+
     fn prelude() -> (CodebaseMetadata, SymbolReferences) {
         let Prelude { metadata, symbol_references, .. } = PRELUDE.clone();
 
@@ -2439,7 +2459,9 @@ mod tests {
             write: &unwritten,
         };
 
-        service.compile(folder, None, stamp, check, standard_library, refusing).map(|((compiled, _), _)| compiled)
+        service
+            .compile(folder, None, stamp, check, CHECKER, standard_library, refusing)
+            .map(|((compiled, _), _)| compiled)
     }
 
     /// Each compiled file of `service` by its name.
@@ -3427,7 +3449,7 @@ mod tests {
         };
         let folder = Folder { last, compiled: &compiled, intact: &mut intact, write: &unwritten };
         let ((compiled, kept), _) = service
-            .compile(folder, None, stamp, proved, &Library::default(), |issues| issues)
+            .compile(folder, None, stamp, proved, CHECKER, &Library::default(), |issues| issues)
             .expect("the compile runs");
         let database = service.database();
         let compiled = compiled
@@ -3470,7 +3492,8 @@ mod tests {
             let mut warm = analyzed(&base);
             let (before, last, _) =
                 compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), empty_stamp, |_| false);
-            let last = CompiledFiles::decode(&last.encode([0; 16]).expect("the record encodes"), [0; 16]);
+            let last =
+                CompiledFiles::decode(&last.encode(CHECKER, [0; 16]).expect("the record encodes"), CHECKER, [0; 16]);
             warm.update_database(edited.read_only());
             warm.analyze_incremental(None).expect("the warm path runs");
 
@@ -3495,9 +3518,9 @@ mod tests {
     }
 
     /// The lowering reads the configuration, which no key holds, so the record of another configuration's compile
-    /// keeps no compiled file.
+    /// keeps no compiled file, and neither does the record another checker build wrote.
     #[test]
-    fn the_record_of_the_compiled_files_keeps_none_under_another_configuration() {
+    fn the_record_of_the_compiled_files_keeps_none_under_another_configuration_or_checker_build() {
         let (_, last, _) = compile_keeping(
             &mut analyzed(&shop_project(&shop(MONEY, RATE))),
             &CompiledFiles::default(),
@@ -3505,11 +3528,12 @@ mod tests {
             empty_stamp,
             |_| false,
         );
-        let bytes = last.encode([0; 16]).expect("the record encodes");
+        let bytes = last.encode(CHECKER, [0; 16]).expect("the record encodes");
 
-        assert_eq!(CompiledFiles::decode(&bytes, [0; 16]).files.len(), last.files.len());
+        assert_eq!(CompiledFiles::decode(&bytes, CHECKER, [0; 16]).files.len(), last.files.len());
         assert!(!last.files.is_empty());
-        assert!(CompiledFiles::decode(&bytes, [1; 16]).files.is_empty());
+        assert!(CompiledFiles::decode(&bytes, CHECKER, [1; 16]).files.is_empty());
+        assert!(CompiledFiles::decode(&bytes, [1; 16], [0; 16]).files.is_empty());
     }
 
     /// A vendor file is no input of a compiled file, which `composer.lock` stands for, but a declaration a file reads
@@ -3650,8 +3674,9 @@ mod tests {
                             }
                         })
                         .collect();
-                    let bytes = unit::restamp(bytes, header.declarations_hash, &inputs, &header.library)
-                        .expect("a compiled file restamps");
+                    let bytes =
+                        unit::restamp(bytes, header.declarations_hash, &inputs, header.checker, &header.library)
+                            .expect("a compiled file restamps");
                     (name.clone(), Compilation::Accepted(bytes))
                 }
                 Compilation::Refused(issues) => (name.clone(), Compilation::Refused(issues.clone())),

@@ -239,8 +239,9 @@ impl Server {
     /// `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or none when no
     /// file is there, once for each path, called from several threads at once. `check` gets the Lean translation of
     /// each file whose laws are checked again and of each file they reach, with the reach and each file the analysis
-    /// reported an error in, and returns the issues of each file whose law is not proved. Each compiled file's header names `standard_library`, the standard library
-    /// the workspace compiles against. `refusing` keeps the analysis's errors that refuse their file.
+    /// reported an error in, and returns the issues of each file whose law is not proved. Each compiled file's header names
+    /// `checker`, the build ID of the checker that compiles, and `standard_library`, the standard library the workspace
+    /// compiles against. `refusing` keeps the analysis's errors that refuse their file.
     ///
     /// [`CompiledFiles`]: mago_orchestrator::service::incremental_analysis::compile::CompiledFiles
     /// [`Compilation::Kept`]: mago_orchestrator::service::incremental_analysis::compile::Compilation::Kept
@@ -249,19 +250,23 @@ impl Server {
     ///
     /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a file, `compiled`, `stamp` or `check`
     /// fails.
+    #[allow(clippy::too_many_arguments)]
     pub fn compile<'folder, Written>(
         &mut self,
         folder: Folder<'folder, Written>,
         hosts: Option<Folder<'folder, Written>>,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         check: impl FnOnce(Vec<Translation>, &Reach, &HashSet<FileId>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
+        checker: [u8; 16],
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<(Compiled<Written>, Option<Compiled<Written>>), ServerError>
     where
         Written: Send,
     {
-        self.service.compile(folder, hosts, stamp, check, standard_library, refusing).map_err(ServerError::from)
+        self.service
+            .compile(folder, hosts, stamp, check, checker, standard_library, refusing)
+            .map_err(ServerError::from)
     }
 
     /// The issues that refuse the laws of the last analysis before any proof, as `mago compile` reports them, in the

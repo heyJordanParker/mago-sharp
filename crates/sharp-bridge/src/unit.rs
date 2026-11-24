@@ -12,7 +12,6 @@ use std::mem::size_of;
 use std::path::Path;
 use std::path::PathBuf;
 
-use mago_build_id::BUILD_ID;
 use mago_codex::signature::FileSignature;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
@@ -203,11 +202,13 @@ pub fn source_hash(source: &[u8]) -> [u8; 16] {
     xxh3_128(source).to_be_bytes()
 }
 
-/// The name of the code a check compiles: the hash of the magic, `SHARP_UNIT_ABI`, the checker's build ID, the
-/// source's hash and the reads. The order the reads come in never changes it.
+/// The name of the code a check compiles.
+///
+/// It is the hash of the magic, `SHARP_UNIT_ABI`, `checker`, the build ID of the checker that compiles it, the source's
+/// hash and the reads. The order the reads come in never changes it.
 #[must_use]
-pub fn key(source_hash: [u8; 16], reads: &Reads) -> [u8; 16] {
-    key_of(&[&SHARP_UNIT_MAGIC, &SHARP_UNIT_ABI, &BUILD_ID.to_be_bytes()], source_hash, reads)
+pub fn key(checker: [u8; 16], source_hash: [u8; 16], reads: &Reads) -> [u8; 16] {
+    key_of(&[&SHARP_UNIT_MAGIC, &SHARP_UNIT_ABI, &checker], source_hash, reads)
 }
 
 fn key_of(compiler: &[&[u8]], source_hash: [u8; 16], reads: &Reads) -> [u8; 16] {
@@ -254,7 +255,8 @@ pub fn declarations_hash(signature: &FileSignature) -> [u8; 16] {
     hasher.digest128().to_be_bytes()
 }
 
-/// The bytes of the `.sharpc` file for `unit`, lowered from `source` against `library`.
+/// The bytes of the `.sharpc` file for `unit`, lowered from `source` against `library` by the checker whose build ID is
+/// `checker`.
 ///
 /// Its header names `declarations_hash`, the hash of the source's declarations. The same arguments always give the
 /// same bytes.
@@ -269,6 +271,7 @@ pub fn encode(
     key: [u8; 16],
     declarations_hash: [u8; 16],
     inputs: &[Input],
+    checker: [u8; 16],
     library: &Library,
 ) -> Vec<u8> {
     let mut nodes =
@@ -290,11 +293,13 @@ pub fn encode(
         texts: &unit.texts,
     };
 
-    code.encode(declarations_hash, inputs, library)
+    code.encode(declarations_hash, inputs, checker, library)
 }
 
-/// The bytes of the compiled file `bytes` with `declarations_hash` as the hash of its source's declarations, `inputs`
-/// as its inputs and `library` as its standard library.
+/// The bytes of the compiled file `bytes` with new declarations, inputs, checker and standard library.
+///
+/// `declarations_hash` is the hash of its source's declarations, `inputs` its inputs, `checker` the build ID of the
+/// checker that writes it and `library` its standard library.
 ///
 /// They are the bytes [`encode`] gives the unit `bytes` holds, with its key and its source. None when `bytes` is no
 /// compiled file this bridge reads.
@@ -306,7 +311,13 @@ pub fn encode(
 ///
 /// Panics when a section holds more than a 32-bit size can say.
 #[must_use]
-pub fn restamp(bytes: &[u8], declarations_hash: [u8; 16], inputs: &[Input], library: &Library) -> Option<Vec<u8>> {
+pub fn restamp(
+    bytes: &[u8],
+    declarations_hash: [u8; 16],
+    inputs: &[Input],
+    checker: [u8; 16],
+    library: &Library,
+) -> Option<Vec<u8>> {
     let header = header(bytes).ok()?;
     let word = |offset: usize| -> u32 {
         let mut word = [0; 4];
@@ -333,7 +344,7 @@ pub fn restamp(bytes: &[u8], declarations_hash: [u8; 16], inputs: &[Input], libr
         texts: &bytes[texts..texts + own_texts],
     };
 
-    Some(code.encode(declarations_hash, inputs, library))
+    Some(code.encode(declarations_hash, inputs, checker, library))
 }
 
 /// The code a compiled file holds apart from its declarations' hash, its inputs and its standard library: its key, its
@@ -351,8 +362,9 @@ struct Code<'code> {
 }
 
 impl Code<'_> {
-    /// The compiled file of this code, written by this checker build, with `declarations_hash`, `inputs` and `library`.
-    fn encode(&self, declarations_hash: [u8; 16], inputs: &[Input], library: &Library) -> Vec<u8> {
+    /// The compiled file of this code, written by the checker build `checker`, with `declarations_hash`, `inputs` and
+    /// `library`.
+    fn encode(&self, declarations_hash: [u8; 16], inputs: &[Input], checker: [u8; 16], library: &Library) -> Vec<u8> {
         let mut texts = self.texts.to_vec();
         let library_version = store_text(&mut texts, &library.version);
         let inputs: Vec<sharp_input> = inputs
@@ -369,7 +381,7 @@ impl Code<'_> {
         let header = sharp_unit_header {
             magic: SHARP_UNIT_MAGIC,
             abi: SHARP_UNIT_ABI,
-            checker: BUILD_ID.to_be_bytes(),
+            checker,
             key: self.key,
             source_hash: self.source_hash,
             source_size: self.source_size,
@@ -627,15 +639,16 @@ pub fn compiled_path_of_real(root: &Path, real: &Path) -> Option<PathBuf> {
     real.strip_prefix(root).ok().map(|relative| root.join(COMPILED_FOLDER).join(relative).with_extension("sharpc"))
 }
 
-/// Returns `true` when the compiled file `bytes` cannot stand for the code whose key is `key` any more: it is no compiled
-/// file this bridge reads, another checker build wrote it, or it names another key.
+/// Returns `true` when the compiled file `bytes` cannot stand for the code whose key is `key` any more.
+///
+/// It is no compiled file this bridge reads, a checker build other than `checker` wrote it, or it names another key.
 ///
 /// The key hashes the source and the fingerprint of each declaration its check read, as [`key`] gives it, so a compile
 /// that computes `key` from the fingerprints of the reads the file's last check named keeps the file while none of
 /// them changed, whatever else an edit changed.
 #[must_use]
-pub fn is_stale(bytes: &[u8], key: [u8; 16]) -> bool {
-    header(bytes).ok().is_none_or(|header| header.checker != BUILD_ID.to_be_bytes() || header.key != key)
+pub fn is_stale(bytes: &[u8], checker: [u8; 16], key: [u8; 16]) -> bool {
+    header(bytes).ok().is_none_or(|header| header.checker != checker || header.key != key)
 }
 
 /// Returns `true` when the compiled file `bytes` is no compiled file this bridge reads, or one of its inputs changed.
