@@ -2645,13 +2645,13 @@ impl IncrementalAnalysisService {
         let too_wide = if self.scan_only {
             IssueCollection::default()
         } else {
-            let mut issues = too_wide_members(codebase, &aggregated_result.symbol_references);
             let test_files: Vec<FileId> = self
                 .database
                 .files()
                 .filter(|file| file.folder_namespace == Some(FolderNamespace::Test))
                 .map(|file| file.id)
                 .collect();
+            let mut issues = too_wide_members(codebase, &aggregated_result.symbol_references, &test_files);
             issues.extend(unused_classes(codebase, &aggregated_result.symbol_references, &test_files));
 
             issues
