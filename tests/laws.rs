@@ -1324,6 +1324,24 @@ fn compile_proves_a_law_over_a_state_beside_one_that_holds_an_instant() {
     assert!(compiled(root, "app/Delivery/Pending.sharp").exists());
 }
 
+/// A theorem rewrites with the equations Lean built for a match of its module's own definitions, as the module holds
+/// them, and builds none again: Lean refuses a second constant of one name with a panic, whose backtrace costs the law
+/// checker more than the proof. `LEAN_ABORT_ON_PANIC` ends the runner at a panic, so the compile fails where one is
+/// raised.
+#[test]
+fn a_machine_s_laws_prove_with_no_panic_in_the_law_checker() {
+    let directory = library_project(&[(
+        "app/Seats/SeatStatus.sharp",
+        include_str!("../../../benchmark/laws/Seats/SeatStatus.sharp"),
+    )]);
+    let root = directory.path();
+
+    let output = process::output(command(root, "never").env("LEAN_ABORT_ON_PANIC", "1")).unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Seats/SeatStatus.sharp").exists());
+}
+
 /// Spec section 28: a state of a sealed family passes where an open interface it implements is expected, so a law
 /// proves that passes one there, and two states that implement the same open interface both pass as it.
 #[test]

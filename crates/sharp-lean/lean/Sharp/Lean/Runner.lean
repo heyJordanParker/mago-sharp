@@ -329,16 +329,17 @@ def progress (line : String) : IO Unit := do
   stderr.putStr s!"{line}\n"
   stderr.flush
 
-/-- `env` with the generated `module` elaborated from its parsed source as the main module, with the linters off and no
-other option, as Lean elaborates a module it compiles. -/
+/-- `env` with the generated `module` elaborated from its parsed source, with the linters off and no other option. Each
+module and theorem elaborates under the one main module of `env`: Lean names the equations it builds for a `match` with
+the main module's private prefix, so a theorem finds the ones its modules built. Under another main module it builds
+them again under another prefix, and Lean refuses each such second constant of one name with a panic. -/
 def elaborateIn (env : Environment) (module : Name)
     (parsed : Parser.InputContext × Parser.ModuleParserState × MessageLog × Array Name) : ModulesM Environment := do
   let (input, parserState, messages, _) := parsed
-  let main := env.mainModule
-  let state ← elaborateCommands input parserState (Command.mkState (env.setMainModule module) messages unlinted)
+  let state ← elaborateCommands input parserState (Command.mkState env messages unlinted)
   if let some error := state.messages.toList.find? (·.severity == .error) then
     throwThe Refusal (.rejected module error.pos.line)
-  return state.env.setMainModule main
+  return state.env
 
 /-- `env`, which holds the generated modules `present`, with `module` and each generated module it imports,
 transitively, elaborated in it, each after the modules it imports, and the modules it then holds. Each of them was
