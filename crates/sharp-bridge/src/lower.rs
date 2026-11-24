@@ -3638,18 +3638,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_METHOD_CALL, 0, line, &[closure, call, arguments])
     }
 
-    /// A type that also holds null: `?T`, as php-src's grammar builds `?\App\Money`, a union with `null` last, or the
-    /// type itself when it holds null already, as `T?` and `Any` do.
+    /// A parameter's type that also holds null, with the plain PHP forms [`Self::parameter_hint`] gives it: `?T`, as
+    /// php-src's grammar builds `?\App\Money`, a union with `null` last, or the type itself when it holds null already,
+    /// as `T?` and `Any` do.
     fn nullable_hint(&mut self, hint: &Hint) -> u32 {
         match hint {
-            Hint::Nullable(_) | Hint::Mixed(_) => self.hint(hint),
-            Hint::Union(_) => self.union(hint, Some(hint.span())),
-            _ => {
-                let index = self.hint(hint);
-                self.nodes[index as usize].attr |= ZEND_TYPE_NULLABLE;
+            Hint::Nullable(_) => self.parameter_hint(hint),
+            hint => self.union(without_readonly(hint), Some(hint.span()), true),
+        }
+    }
 
-                index
-            }
+    /// [`Self::hint`] of a parameter's type `hint`, with the plain PHP form beside each object plain PHP passes in that
+    /// form, as [`Self::result_hint`] writes a result plain PHP gets: `\Sharp\Map|array`, `\Sharp\Set|array` and
+    /// `\Sharp\Bytes|string`. [`Self::collection_parameters`] turns the PHP array into the object, and the engine's
+    /// check wraps the PHP string.
+    fn parameter_hint(&mut self, hint: &Hint) -> u32 {
+        match without_readonly(hint) {
+            Hint::Never(_) => self.hint(hint),
+            _ => self.result_hint(hint, true),
         }
     }
 
@@ -3789,7 +3795,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             _ => None,
         };
-        let hint_index = self.hint(element.unwrap_or(hint));
+        let hint_index = match element {
+            Some(element) => self.hint(element),
+            None => self.parameter_hint(hint),
+        };
         let service = service.and_then(|service| dropped_service(hint, service, self.types.codebase()));
         let node = self.parameter_of_type(parameter, hint_index, service);
         if element.is_some() {
@@ -3802,24 +3811,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         node
     }
 
-    /// A parameter with its lowered type, or with a null type, as a lambda's parameter can be, and with the id of the
-    /// service the container gives it when its PHP type drops it. A `Map` or a `Set` parameter also takes the PHP array
-    /// plain PHP passes, `\Sharp\Map|array`, which [`Self::collection_parameters`] turns into the object, and a `Bytes`
-    /// parameter the PHP string, `\Sharp\Bytes|string`, which the engine's check wraps. A promoted one is a plain
+    /// A parameter with its lowered type, [`Self::parameter_hint`]'s, or with a null type, as a lambda's parameter can
+    /// be, and with the id of the service the container gives it when its PHP type drops it. A promoted one is a plain
     /// parameter, beside the property [`Self::promoted_property`] declares, when [`Self::promoted_beside`] holds.
     fn parameter_of_type(&mut self, parameter: &FunctionLikeParameter, hint: u32, service: Option<Word>) -> u32 {
-        let written = parameter.hint.as_ref().filter(|_| hint != NULL);
-        let hint = match written {
-            Some(written) if self.takes_php_array(written) => {
-                self.with_plain_type(hint, collection_hint(Some(written)).unwrap_or(false), &PhpType::Keyword(IS_ARRAY))
-            }
-            Some(written) if takes_bytes(self.types.declared_type(written)) => {
-                let nullable = matches!(without_readonly(written), Hint::Nullable(_));
-
-                self.with_plain_type(hint, nullable, &PhpType::Named(b"string"))
-            }
-            _ => hint,
-        };
         let line = self.line(parameter.variable.span);
         let name = self.local_name(0, line, parameter.variable.name);
         let default = parameter.default_value.as_ref().map_or(NULL, |default| self.default_value(default.value));
@@ -3934,27 +3929,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     fn takes_php_array(&self, hint: &Hint) -> bool {
         self.crossing_array(self.types.declared_type(hint)).is_some_and(|array| !matches!(array, TArray::List(_)))
-    }
-
-    /// The lowered type `hint` with `plain` among its types, and `null` when it is nullable: `\Sharp\Map|array`, or
-    /// `\Sharp\Set|array`, of a `Map` or a `Set`, where plain PHP passes a PHP array, `\Sharp\Bytes|string` of a
-    /// `Bytes`, spec section 18, where plain PHP passes a PHP string, and a lowered union that names one with the plain
-    /// type among its types, as `\Sharp\Set|int|array`.
-    fn with_plain_type(&mut self, hint: u32, nullable: bool, plain: &PhpType) -> u32 {
-        let lowered = &mut self.nodes[hint as usize];
-        lowered.attr &= !ZEND_TYPE_NULLABLE;
-        let (kind, line, first, count) = (lowered.kind, lowered.line, lowered.first_child, lowered.child_count);
-        let mut types = if kind == SHARP_AST_TYPE_UNION {
-            self.children[first as usize..(first + count) as usize].to_vec()
-        } else {
-            vec![hint]
-        };
-        types.push(self.php_type(plain, line));
-        if nullable {
-            types.push(self.string(ZEND_NAME_NOT_FQ, line, b"null"));
-        }
-
-        self.node(SHARP_AST_TYPE_UNION, 0, line, &types)
     }
 
     /// The flags of the property a constructor parameter promotes. Spec section 9 gives such a property access levels
@@ -4151,9 +4125,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 if accessor.is_setter()
                     && let Some(hint) = holds
                 {
-                    let collection = lowering.takes_php_array(hint).then(|| collection_hint(holds).unwrap_or(false));
+                    let collection = lowering.takes_php_array(hint);
                     parameters = lowering.setter_parameters(accessor, variable, hint, collection);
-                    if collection.is_some() {
+                    if collection {
                         let (span, line) = (accessor.name.span, lowering.line(accessor));
                         let first = lowering.variable(span, b"value");
                         let crossed = lowering.crossed(span, lowering.types.declared_type(hint), b"value", first);
@@ -4202,7 +4176,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             property.hook_list.hooks.iter().filter(|accessor| !in_interface || accessor.name.value != b"init")
         {
             let parameters = if accessor.is_setter() {
-                self.setter_parameters(accessor, property.item.variable(), hint, None)
+                self.setter_parameters(accessor, property.item.variable(), hint, false)
             } else {
                 NULL
             };
@@ -4262,28 +4236,23 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The parameter list of the `set` hook of `setter`, the setter of the property `variable` written `hint`, or
-    /// null for the `$value` PHP gives it: a `Map` or a `Set`, which `collection` says is nullable or not, takes the
-    /// PHP array plain PHP writes too, and a `param:` attribute, as in `[param: Trimmed] set;`, goes on the parameter,
-    /// which takes the property's type.
+    /// null for the `$value` PHP gives it: a `Map` or a `Set`, `collection`, takes the PHP array plain PHP writes too,
+    /// as [`Self::parameter_hint`] gives it, and a `param:` attribute, as in `[param: Trimmed] set;`, goes on the
+    /// parameter, which takes the property's type.
     fn setter_parameters(
         &mut self,
         setter: &PropertyHook,
         variable: &DirectVariable,
         hint: &Hint,
-        collection: Option<bool>,
+        collection: bool,
     ) -> u32 {
-        if !setter.attribute_lists.iter().any(targets_value) && collection.is_none() {
+        if !setter.attribute_lists.iter().any(targets_value) && !collection {
             return NULL;
         }
 
         let line = self.line(setter);
-        let accepted = match collection {
-            Some(nullable) => {
-                let lowered = self.hint(hint);
-                self.with_plain_type(lowered, nullable, &PhpType::Keyword(IS_ARRAY))
-            }
-            None => self.php_property_type(hint, variable.name, line),
-        };
+        let accepted =
+            if collection { self.parameter_hint(hint) } else { self.php_property_type(hint, variable.name, line) };
         let value = self.string(0, line, b"value");
         let attributes = self.accessor_attributes(setter, &[], true);
         let parameter = self.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, attributes, NULL, NULL]);
@@ -4537,7 +4506,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let read = lowering.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[read]);
             let get = lowering.accessor_hook(getter, &[], NULL, read);
             let store = lowering.behaviors_store(line, setter.name.span, behaviors);
-            let parameters = lowering.setter_parameters(setter, variable, hint, None);
+            let parameters = lowering.setter_parameters(setter, variable, hint, false);
             let set = lowering.accessor_hook(setter, &[], parameters, store);
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &[get, set])
@@ -5270,16 +5239,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Hint::Nullable(nullable) => (nullable.hint, Some(nullable.question_mark)),
             _ => (hint, None),
         };
-        let mut members: Vec<(PhpType, u32)> =
-            union_members(union).into_iter().map(|member| (self.erase(member), self.line(member))).collect();
-        if crossing {
-            let plain_forms: Vec<(PhpType, u32)> =
-                members.iter().filter_map(|(php_type, line)| Some((php_type.plain_form()?, *line))).collect();
-            members.extend(plain_forms);
-        }
-        let null_line = question_mark.map(|question_mark| self.line(question_mark));
 
-        self.php_union(members, null_line)
+        self.union(union, question_mark, crossing)
     }
 
     /// The PHP return type of the method `method`, which returns `hint`, or none where PHP's would be `mixed`, as for
@@ -5306,9 +5267,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.result_hint(hint, crossing)
     }
 
-    /// The type `union`, a union or one type, with null added when `question_mark` is the `?` that adds it.
-    fn union(&mut self, union: &Hint, question_mark: Option<Span>) -> u32 {
-        let members = union_members(union).into_iter().map(|member| (self.erase(member), self.line(member))).collect();
+    /// The type `union`, a union or one type, with null added when `question_mark` is the `?` that adds it, and with the
+    /// plain PHP form beside each member that has one, `crossing`, as [`PhpType::plain_form`] gives it.
+    fn union(&mut self, union: &Hint, question_mark: Option<Span>, crossing: bool) -> u32 {
+        let mut members: Vec<(PhpType, u32)> =
+            union_members(union).into_iter().map(|member| (self.erase(member), self.line(member))).collect();
+        if crossing {
+            let plain_forms: Vec<(PhpType, u32)> =
+                members.iter().filter_map(|(php_type, line)| Some((php_type.plain_form()?, *line))).collect();
+            members.extend(plain_forms);
+        }
         let null_line = question_mark.map(|question_mark| self.line(question_mark));
 
         self.php_union(members, null_line)
@@ -8119,7 +8087,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn lambda_parameters(&mut self, lambda: Span, list: &FunctionLikeParameterList) -> u32 {
         let mut parameters = Vec::new();
         for parameter in &list.parameters {
-            let hint = parameter.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
+            let hint = parameter.hint.as_ref().map_or(NULL, |hint| self.parameter_hint(hint));
             parameters.push(self.parameter_of_type(parameter, hint, None));
         }
         let line = self.line(list);
@@ -10623,12 +10591,13 @@ impl PhpType {
 
     /// Whether every value of `other` is a value of this type, so a union that holds this type needs no `other`. Names
     /// are compared as the engine compares them in a `.sharp` file: a built-in type in any case, and a class as written,
-    /// spec section 24, so `Box|BOX` keeps both classes. No union holds two keyword types: the checker refuses two
-    /// collections, which share PHP's `array`, and `Self` twice.
+    /// spec section 24, so `Box|BOX` keeps both classes. A keyword type holds itself, so `List<int>|List<string>`, and
+    /// a `Map|List` result beside the `array` plain PHP gets for its `Map`, name PHP's `array` once.
     fn holds(&self, other: &PhpType) -> bool {
         match (self, other) {
             (PhpType::Mixed, _) => true,
             (PhpType::Named(name), PhpType::Named(other)) => name.eq_ignore_ascii_case(other),
+            (PhpType::Keyword(code), PhpType::Keyword(other)) => code == other,
             (PhpType::Classes(classes), PhpType::Classes(others)) => classes.iter().all(|class| others.contains(class)),
             _ => false,
         }

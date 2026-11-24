@@ -13796,6 +13796,36 @@ fn union_members_that_erase_to_one_type_appear_once() {
             ZVAL [1] "string"
         "#}
     );
+
+    // `Map` and `List` share PHP's `array`, a `Map` result and a `Map` parameter take it beside `\Sharp\Map`, and a
+    // `Bytes` parameter takes `string` beside `\Sharp\Bytes`, so each appears once.
+    let shelf = Lowered::with(
+        indoc! {"
+        namespace App.Tenant;
+
+        public class Shelf
+        {
+            public int keep(Map<string, int>|List<int> rows, List<int>|List<string> items, Bytes|string data) => 1;
+
+            public Map<string, int>|List<int> rows() => [1];
+        }
+    "},
+        &[],
+    );
+    let keep = shelf.method_named("keep");
+    let parameter_type = |index: u32| shelf.render(shelf.child(shelf.child(shelf.child(keep, 0), index), 0));
+    let map_or_list = indoc! {r#"
+        TYPE_UNION
+          ZVAL "Sharp\\Map"
+          TYPE [7]
+    "#};
+
+    assert_eq!(parameter_type(0), map_or_list);
+    assert_eq!(parameter_type(1), "TYPE [7]\n");
+    assert_eq!(parameter_type(2), "TYPE_UNION\n  ZVAL \"Sharp\\\\Bytes\"\n  ZVAL [1] \"string\"\n");
+    // The result's type wraps the union beside the type text the engine checks the returned value against.
+    let result_type = shelf.child(shelf.method_named("rows"), 3);
+    assert_eq!(shelf.render(shelf.child(result_type, 0)), map_or_list);
 }
 
 /// ```php
