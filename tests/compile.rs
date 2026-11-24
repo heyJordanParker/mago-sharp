@@ -4856,3 +4856,32 @@ fn an_instant_crosses_to_a_plain_php_date_only_after_the_interop_import() {
     );
     assert!(compiled.status.success(), "{}", printed(&compiled));
 }
+
+/// A shop's stock, which reserves a unit and announces it in one transaction, with the announcing step `step`.
+fn stock_announcing(step: &str) -> String {
+    format!(
+        "namespace App.Shop;\n\nimport Sharp.Data.Database;\nimport Sharp.Net.Mail;\nimport Sharp.Net.MailMessage;\n\npublic class Stock\n{{\n    public Stock(private Database database, private Mail mail) {{ }}\n\n    public int reserve(string sku, MailMessage message)\n        => this.database.transaction(() => {{\n            {step}\n            return this.database.execute(\"UPDATE stock SET count = count - 1 WHERE sku = ?\", [sku]);\n        }});\n}}\n"
+    )
+}
+
+/// Spec section 29: `Database.transaction`'s body may reach the database and emit, whose listeners run once the
+/// transaction commits, and nothing else, so mail sent inside it can't go out for a transaction that rolls back.
+#[test]
+fn a_transaction_s_body_emits_and_reaches_the_database_and_sending_mail_in_it_is_refused() {
+    let reserved = ("app/Shop/Reserved.sharp", "namespace App.Shop;\n\npublic event Reserved(string sku);\n");
+    let emitting = library_project(&[reserved, ("app/Shop/Stock.sharp", &stock_announcing("emit new Reserved(sku);"))]);
+    let mailing = library_project(&[reserved, ("app/Shop/Stock.sharp", &stock_announcing("this.mail.send(message);"))]);
+
+    let compiled = compile_lines(emitting.path());
+    let refused = compile_lines(mailing.path());
+
+    assert!(compiled.status.success(), "{}", printed(&compiled));
+    assert_eq!(
+        issue_lines(&refused),
+        [
+            "app/Shop/Stock.sharp:12:38:error - invalid-argument: This lambda calls `Mail.send`, which has the effect `Mail`, so a `Function<int() uses Database, Events>` cannot hold it."
+        ],
+        "{}",
+        printed(&refused)
+    );
+}

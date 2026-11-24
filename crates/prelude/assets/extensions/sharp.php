@@ -893,6 +893,23 @@ function listenersFor(object $event): array {}
  */
 function runScoped(\Closure $body): mixed {}
 
+/**
+ * Opens a hold, inside any hold already open, in which each `emit` waits instead of reaching the app's dispatcher.
+ * The standard library's `Database.transaction` opens one for each transaction it begins.
+ */
+function holdEmits(): void {}
+
+/**
+ * Closes the newest hold once its transaction commits: each emit it held joins the hold around it, or, when none is
+ * open, reaches the app's dispatcher in emit order.
+ */
+function releaseEmits(): void {}
+
+/**
+ * Closes the newest hold once its transaction rolls back, so no dispatcher hears the emits it held.
+ */
+function dropEmits(): void {}
+
 /*
  * The engine functions the standard library's `List`, `Map` and `Set` members run, each with the collection first. A
  * function that changes the collection takes it by reference, from the place a `ref` receiver passes, and only the
