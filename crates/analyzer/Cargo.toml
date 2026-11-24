@@ -46,8 +46,11 @@ itoa = { workspace = true }
 ryu = { workspace = true }
 memchr = { workspace = true }
 
-[dev-dependencies]
+[build-dependencies]
 mago-prelude = { workspace = true, features = ["build"] }
+
+[dev-dependencies]
+mago-prelude = { workspace = true, features = ["serde"] }
 mago-semantics = { workspace = true }
 indoc = { workspace = true }
 criterion = { workspace = true }

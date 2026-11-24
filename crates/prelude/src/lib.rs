@@ -106,6 +106,26 @@ impl Prelude {
     pub fn encode(&self) -> Result<Vec<u8>, PreludeError> {
         Ok(bincode::serde::encode_to_vec(self, standard())?)
     }
+
+    /// (Builder-only) Builds the prelude, encodes it and writes it to `path`, for a build script whose package embeds
+    /// the file with `include_bytes!`. It builds on a thread with a 36 MiB stack, the stack `mago`'s build script has
+    /// built it on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the thread can't start or panics, the encoding fails, or the file can't be written.
+    #[cfg(feature = "build")]
+    pub fn write(path: &std::path::Path) -> std::io::Result<()> {
+        let encoded = std::thread::Builder::new()
+            .stack_size(36 * 1024 * 1024)
+            .name("prelude_builder".into())
+            .spawn(|| Self::build().encode())?
+            .join()
+            .map_err(|_| std::io::Error::other("the thread that builds the prelude panicked"))?
+            .map_err(std::io::Error::other)?;
+
+        std::fs::write(path, encoded)
+    }
 }
 
 impl Default for Prelude {

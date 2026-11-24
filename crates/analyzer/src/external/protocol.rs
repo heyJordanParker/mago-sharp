@@ -4143,7 +4143,7 @@ fn validate_provider_indices(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(super) mod testing {
     use std::sync::LazyLock;
 
@@ -4168,7 +4168,11 @@ pub(super) mod testing {
     use crate::plugin::PluginRegistry;
     use crate::settings::Settings;
 
-    static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
+    #[allow(clippy::large_include_file)]
+    static PRELUDE: LazyLock<Prelude> = LazyLock::new(|| {
+        Prelude::decode(include_bytes!(concat!(env!("OUT_DIR"), "/prelude.bin")))
+            .expect("build.rs writes a prelude that decodes")
+    });
 
     /// A PHP# file with an enum and a class whose `Map` and `Set` types an external analyzer reads, which calls a
     /// plain PHP method with a `Map`.

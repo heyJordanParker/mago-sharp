@@ -28,7 +28,11 @@ use mago_prelude::Prelude;
 use mago_syntax::parser::parse_file;
 use mago_word::WordSet;
 
-static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
+#[allow(clippy::large_include_file)]
+static PRELUDE: LazyLock<Prelude> = LazyLock::new(|| {
+    Prelude::decode(include_bytes!(concat!(env!("OUT_DIR"), "/prelude.bin")))
+        .expect("build.rs writes a prelude that decodes")
+});
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
 
 fn analyze_file(path: &Path, content: &str) {

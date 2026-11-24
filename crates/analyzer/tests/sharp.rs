@@ -100,9 +100,9 @@ use effect_classes::LIST_MEMBERS;
 use effect_classes::MAP_MEMBERS;
 use effect_classes::SET_MEMBERS;
 
+use crate::PRELUDE;
 use crate::prelude_population::populate_on_prelude;
 
-static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
 
 /// The standard library's package in `vendor/`. A file under it is the standard library's, as the loader marks a file

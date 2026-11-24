@@ -20,9 +20,9 @@ use mago_syntax::parser::parse_file;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
+use crate::PRELUDE;
 use crate::prelude_population::populate_on_prelude;
 
-static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
 
 #[derive(Debug, Clone)]
