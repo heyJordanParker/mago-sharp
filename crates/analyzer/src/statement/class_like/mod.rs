@@ -5700,8 +5700,8 @@ fn check_class_like_properties<'ctx, A>(
             let parent_display = display_member(context, parent_class_name, property_name);
             let property = display_property_name(context, *property_name);
 
-            // A PHP# property is closed unless it is `virtual` or `abstract`, spec sections 6.1 and 22, so the codex reads
-            // it as final. PHP# writes no `final` on a property, so a final PHP# property is a closed one.
+            // A PHP# property is closed unless it is `virtual`, `abstract` or an override that is not `final`, spec
+            // sections 6.1 and 22, so the codex reads a closed one as final.
             let sharp_parent = context.dialect.is_sharp() && parent_metadata.flags.is_sharp();
             // PHP# checks only `.sharp` code, so a plain PHP subclass, a test double included, overrides a closed PHP#
             // property. PHP itself makes one whose `set` is private final, and refuses that override.
@@ -5709,25 +5709,40 @@ fn check_class_like_properties<'ctx, A>(
                 && parent_metadata.flags.is_sharp()
                 && !parent_property.write_visibility.is_private();
             if sharp_parent && parent_property.flags.is_final() && !parent_property.write_visibility.is_private() {
-                let parent_class = display_class_like_name(context, parent_class_name);
-                // Spec section 9: a parameter takes no `virtual`, so a promoted property opens only in the class body.
-                let help = if parent_property.flags.is_promoted_property() {
-                    format!(
-                        "Declare `{property}` in `{parent_class}`'s body as `virtual` to let a subclass override it."
-                    )
+                // A closed override is a `final override`, which closed the chain at the parent, as a method's does.
+                if parent_metadata.overridden_property_ids.contains_key(property_name) {
+                    context.collector.report_with_code(
+                        IssueCode::OverrideFinalProperty,
+                        Issue::error(format!("`{parent_display}` is `final`, so no subclass replaces it."))
+                            .with_annotation(Annotation::primary(property_span).with_message("Replaced here."))
+                            .with_annotation(
+                                Annotation::secondary(parent_property_span).with_message("Declared `final` here."),
+                            ),
+                    );
                 } else {
-                    format!("Declare `{property}` `virtual` in `{parent_class}` to let a subclass override it.")
-                };
+                    let parent_class = display_class_like_name(context, parent_class_name);
+                    // Spec section 9: a parameter takes no `virtual`, so a promoted property opens only in the class
+                    // body.
+                    let help = if parent_property.flags.is_promoted_property() {
+                        format!(
+                            "Declare `{property}` in `{parent_class}`'s body as `virtual` to let a subclass override it."
+                        )
+                    } else {
+                        format!("Declare `{property}` `virtual` in `{parent_class}` to let a subclass override it.")
+                    };
 
-                context.collector.report_with_code(
-                    IssueCode::OverrideFinalProperty,
-                    Issue::error(format!(
-                        "Cannot override `{parent_display}`: a PHP# property is closed unless it is `virtual` or `abstract`."
-                    ))
-                    .with_annotation(Annotation::primary(property_span).with_message("Overridden here."))
-                    .with_annotation(Annotation::secondary(parent_property_span).with_message("Declared closed here."))
-                    .with_help(help),
-                );
+                    context.collector.report_with_code(
+                        IssueCode::OverrideFinalProperty,
+                        Issue::error(format!(
+                            "Cannot override `{parent_display}`: a PHP# property is closed unless it is `virtual` or `abstract`."
+                        ))
+                        .with_annotation(Annotation::primary(property_span).with_message("Overridden here."))
+                        .with_annotation(
+                            Annotation::secondary(parent_property_span).with_message("Declared closed here."),
+                        )
+                        .with_help(help),
+                    );
+                }
             } else if !open_to_php
                 && (parent_property.flags.is_final()
                 // PHP makes a property whose `set` is private final, so the engine refuses a PHP# override of one.

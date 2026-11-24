@@ -450,9 +450,10 @@ where
 /// property in the class body, a computed one, or one a constructor promotes. A field and a computed property have no
 /// accessors.
 ///
-/// A property is closed unless it is `virtual`, `abstract` or `override`, spec sections 6.1 and 22, as a method is, so
-/// the analyzer reads a closed one as final. A private property is never inherited, an interface's is always open, and
-/// a field has no `virtual`, so it is always open. The engine still runs every property as an open PHP property.
+/// A property is closed unless it is `virtual`, `abstract` or an `override` that is not `final`, spec sections 6.1 and
+/// 22, as a method is, so the analyzer reads a closed one as final. A private property is never inherited, an
+/// interface's is always open, and a field has no `virtual`, so it is always open. The engine runs a property as an
+/// open PHP property unless it is `final`.
 ///
 /// A get-only property with storage is set once, in the constructor, as `readonly` is, and one without storage is
 /// computed on each read. An `init` property is written only while its object is created.
@@ -474,9 +475,10 @@ where
     let is_open = is_field
         || class_like_metadata.kind.is_interface()
         || context.member_visibility(modifiers, class_like_metadata) == Visibility::Private
-        || modifiers
-            .iter()
-            .any(|modifier| matches!(modifier, Modifier::Abstract(_) | Modifier::Virtual(_) | Modifier::Override(_)));
+        || (!modifiers.contains_final()
+            && modifiers.iter().any(|modifier| {
+                matches!(modifier, Modifier::Abstract(_) | Modifier::Virtual(_) | Modifier::Override(_))
+            }));
     let is_get_only = !modifiers.contains_abstract()
         && accessors.is_some_and(|accessors| accessors.is_get_only() && context.resolved_names.has_storage(accessors));
     let setter = accessors.and_then(PropertyHookList::setter);

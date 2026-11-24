@@ -3952,6 +3952,33 @@ fn a_property_overrides_a_sharp_property_only_when_it_is_open() {
     );
 }
 
+/// Spec sections 6.1 and 22: an override in an open class stays open until `final override` closes the chain at its
+/// class, as it closes a method's, so a subclass below replaces the open override and not the final one.
+#[test]
+fn a_final_override_property_closes_its_override_chain() {
+    let base = (
+        "src/Demo/Base.sharp",
+        "namespace Demo;\n\npublic abstract class Base\n{\n    public abstract string content { get; }\n}\n",
+    );
+    let leaf = (
+        "src/Demo/OpenLeaf.sharp",
+        "namespace Demo;\n\npublic class OpenLeaf : Base\n{\n    public final override string content { get; set; } = \"x\";\n}\n",
+    );
+    let branch = (
+        "src/Demo/OpenBranch.sharp",
+        "namespace Demo;\n\npublic class OpenBranch : Base\n{\n    public override string content { get; set; } = \"x\";\n}\n",
+    );
+    let below_leaf = "namespace Demo;\n\npublic class BelowLeaf : OpenLeaf\n{\n    public override string content { get; set; } = \"y\";\n}\n";
+    let below_branch = "namespace Demo;\n\npublic class BelowBranch : OpenBranch\n{\n    public override string content { get; set; } = \"y\";\n}\n";
+
+    assert_eq!(issues(leaf, &[base]), Vec::<String>::new());
+    assert_eq!(
+        messages(("src/Demo/BelowLeaf.sharp", below_leaf), &[base, leaf]),
+        ["`OpenLeaf.content` is `final`, so no subclass replaces it."]
+    );
+    assert_eq!(messages(("src/Demo/BelowBranch.sharp", below_branch), &[base, branch]), Vec::<String>::new());
+}
+
 /// Spec sections 6.1 and 9: a property a constructor promotes is closed, as one in the class body is, and a parameter
 /// takes no `virtual`, so the help on an override of a promoted property names the class body as the one place that
 /// opens it.
