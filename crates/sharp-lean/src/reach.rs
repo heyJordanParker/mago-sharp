@@ -96,6 +96,9 @@ pub struct Reach {
     /// The laws of each interface that states laws, by the interface's key: each law's name as written and the number
     /// of its parameters, in the order the interface states them.
     interface_laws: HashMap<Word, Vec<(Word, usize)>>,
+    /// The invariants of each case of a machine, spec section 20.2, by the key of the case's class: each law of the
+    /// machine whose one parameter is the case, by its name as written, in the order the machine states them.
+    invariants: HashMap<Word, Vec<Word>>,
 }
 
 impl Reach {
@@ -144,6 +147,26 @@ impl Reach {
         }
         for implementers in reach.law_implementers.values_mut() {
             implementers.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        }
+        for machine in codebase.class_likes.values().filter(|class| class.machine.is_some()) {
+            let mut invariants: Vec<(u32, Word, Word)> = machine
+                .laws
+                .values()
+                .filter_map(|law| {
+                    let [parameter] = law.parameters.as_slice() else {
+                        return None;
+                    };
+                    let case = parameter.type_metadata.as_ref()?.type_union.get_single_named_object()?;
+                    let class = codebase.get_class_like(case.name)?;
+                    let machine_key = codebase.class_key(machine.name);
+                    (class.flags.is_enum_case_class() && class.direct_parent_class == Some(machine_key))
+                        .then(|| (law.span.start.offset, codebase.class_key(case.name), law.original_name))
+                })
+                .collect();
+            invariants.sort_unstable_by_key(|(offset, ..)| *offset);
+            for (_, case, law) in invariants {
+                reach.invariants.entry(case).or_default().push(law);
+            }
         }
 
         for class in codebase.class_likes.values().filter(|class| !class.laws.is_empty()) {
@@ -359,6 +382,12 @@ impl Reach {
     /// states them: none for any other class-like.
     pub(crate) fn interface_laws(&self, interface: &[u8]) -> &[(Word, usize)] {
         self.interface_laws.get(&self.class_key(interface)).map_or(&[], Vec::as_slice)
+    }
+
+    /// The invariants of the case of a machine whose class is `case`, spec section 20.2, each by its name as written, in
+    /// the order the machine states them: none for any other class-like.
+    pub(crate) fn invariants(&self, case: &[u8]) -> &[Word] {
+        self.invariants.get(&self.class_key(case)).map_or(&[], Vec::as_slice)
     }
 
     /// The full name of each interface whose laws `class` proves, in name order.

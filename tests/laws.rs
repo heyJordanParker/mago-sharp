@@ -4774,6 +4774,26 @@ fn a_law_over_one_case_of_a_machine_beside_another_parameter_holds_for_each_valu
     assert!(compiled(root, "app/Store/OrderStatus.sharp").exists());
 }
 
+/// Spec sections 20.2 and 28: a law in a file of its own over one case of a machine another file declares holds for each
+/// value of that case, as a law of the machine does.
+#[test]
+fn a_law_over_one_case_of_a_machine_another_file_declares_holds_for_each_value_of_that_case() {
+    let refunds = "namespace App.Store;\n\npublic final class Refunds\n{\n    law aRefundedOrderRefundsTheAmount(OrderStatus.Refunded refunded, int amount) => refunded.refunded(amount) == amount;\n}\n";
+    let order = refunding_order("");
+    let directory = library_project(&[
+        ("app/Store/OrderStatus.sharp", &order),
+        ("app/Store/Receipt.sharp", RECEIPT),
+        ("app/Store/Refunds.sharp", refunds),
+        ("app/Store/Variant.sharp", VARIANT),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Store/Refunds.sharp").exists());
+}
+
 /// Spec sections 20.2 and 28: a law over two cases of a machine holds for each pair of their values that keep their
 /// cases' invariants.
 #[test]

@@ -13,8 +13,6 @@ use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Law as LawNode;
 use mago_syntax::cst::Method;
-use mago_syntax::cst::NamespaceBody;
-use mago_syntax::cst::Statement;
 use mago_word::Word;
 use mago_word::word;
 
@@ -48,42 +46,44 @@ impl Translator<'_, '_> {
         metadata.cases.iter().map(|case| case.name).find(|case| case_class(machine, case.as_bytes()) == class)
     }
 
-    /// The case of a machine this file declares that `parameter`'s type names, spec sections 20.2 and 28, as
-    /// [`HeldCase`] gives it. None for a parameter of any other type, and for a case of a machine another file declares.
+    /// The case of a machine that `parameter`'s type names, spec sections 20.2 and 28, whichever file declares the
+    /// machine, as [`HeldCase`] gives it. None for a parameter of any other type.
     pub(super) fn held_case(&self, parameter: &FunctionLikeParameter) -> Option<HeldCase> {
         let Some(Hint::Identifier(identifier)) = &parameter.hint else {
             return None;
         };
         let class = self.checked.names().get(identifier);
-        let (full, r#enum, case) =
-            declared_enums(self.checked.program().statements.as_slice()).into_iter().find_map(|r#enum| {
-                let full = self.checked.names().get(&r#enum.name);
-                let case = r#enum.members.iter().find_map(|member| match member {
-                    ClassLikeMember::EnumCase(case) if case_class(full, case.item.name().value) == class => Some(case),
-                    _ => None,
-                })?;
-
-                r#enum.is_machine().then_some((full, r#enum, case))
-            })?;
-        let lean = names::full_name(full);
-        let short = names::short_name(full);
-        let name = case.item.name().value;
+        let separator = class.iter().rposition(|&byte| byte == b'\\')?;
+        let (machine, case) = (&class[..separator], &class[separator + 1..]);
+        self.checked.types().machine(word(machine))?;
+        if !self.reach.cases(machine).iter().any(|known| known.as_bytes() == case) {
+            return None;
+        }
+        let reached = self.reach.class(machine)?;
+        let lean = names::full_name(reached.name.as_bytes());
+        let short = names::short_name(reached.name.as_bytes());
         let value = parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name);
-        let fields =
-            case_fields(case).iter().map(|(field, _)| names::identifier(&[value, b".", field].concat())).collect();
-        let mut uses = vec![self.own_use(&lean, short.clone())];
+        let fields = self
+            .checked
+            .types()
+            .constructor_parameters(word(class))
+            .iter()
+            .map(|field| {
+                let field = field.name.0.as_bytes();
+                names::identifier(&[value, b".", field.strip_prefix(b"$").unwrap_or(field)].concat())
+            })
+            .collect();
+        let use_in_machine =
+            |key: String, place: String| Use { key, file: Some(reached.file), place, smaller: None, names_only: false };
+        let mut uses = vec![use_in_machine(lean.clone(), short.clone())];
         let mut invariants = Vec::new();
-        for member in &r#enum.members {
-            if let ClassLikeMember::Law(law) = member
-                && self.invariant_case(full, law).is_some_and(|held| held.as_bytes() == name)
-            {
-                let claim = claim_of(&names::member(&lean, law.name.value));
-                uses.push(self.own_use(&claim, format!("{short}.{}", String::from_utf8_lossy(law.name.value))));
-                invariants.push(claim);
-            }
+        for law in self.reach.invariants(class) {
+            let claim = claim_of(&names::member(&lean, law.as_bytes()));
+            uses.push(use_in_machine(claim.clone(), format!("{short}.{law}")));
+            invariants.push(claim);
         }
 
-        Some(HeldCase { constructor: names::member(&lean, name), fields, invariants, uses })
+        Some(HeldCase { constructor: names::member(&lean, case), fields, invariants, uses })
     }
 
     /// The invariants of the machine `r#enum`, spec section 20.2, each a law whose one parameter is one of its cases.
@@ -656,21 +656,6 @@ impl HeldCase {
 
         std::iter::once(built).chain(self.invariants.iter().map(|claim| format!("holds ({claim} {value})"))).collect()
     }
-}
-
-/// Each enum `statements` declares, in a namespace or not.
-fn declared_enums<'ast, 'arena>(statements: &'ast [Statement<'arena>]) -> Vec<&'ast Enum<'arena>> {
-    statements
-        .iter()
-        .flat_map(|statement| match statement {
-            Statement::Namespace(namespace) => declared_enums(match &namespace.body {
-                NamespaceBody::Implicit(body) => body.statements.as_slice(),
-                NamespaceBody::BraceDelimited(block) => block.statements.as_slice(),
-            }),
-            Statement::Enum(r#enum) => vec![r#enum],
-            _ => Vec::new(),
-        })
-        .collect()
 }
 
 /// The full name of the class the case `case` of the enum `full` runs as, spec section 20: `Shop\OrderStatus\Paid`.
