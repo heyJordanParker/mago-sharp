@@ -43,7 +43,7 @@ fn extract_zip(archive_path: &Path, file_to_extract: &str, into_dir: &Path) -> R
     let mut archive = zip::ZipArchive::new(file)?;
     let mut entry = archive.by_name(file_to_extract)?;
 
-    let output_path = into_dir.join(entry.name());
+    let output_path = into_dir.join(&*entry.name()?);
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -52,4 +52,33 @@ fn extract_zip(archive_path: &Path, file_to_extract: &str, into_dir: &Path) -> R
     io::copy(&mut entry, &mut output)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::Write;
+
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+
+    use super::extract_file;
+
+    #[test]
+    fn a_zip_release_gives_up_only_the_binary_it_is_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("mago-0.7.2-x86_64-pc-windows-msvc.zip");
+        let mut writer = ZipWriter::new(fs::File::create(&archive_path).unwrap());
+        writer.start_file("mago-0.7.2-x86_64-pc-windows-msvc/README.md", SimpleFileOptions::default()).unwrap();
+        writer.write_all(b"the readme").unwrap();
+        writer.start_file("mago-0.7.2-x86_64-pc-windows-msvc/mago.exe", SimpleFileOptions::default()).unwrap();
+        writer.write_all(b"the binary").unwrap();
+        writer.finish().unwrap();
+        let into_dir = dir.path().join("extracted");
+
+        extract_file(&archive_path, "mago-0.7.2-x86_64-pc-windows-msvc/mago.exe", &into_dir).unwrap();
+
+        assert_eq!(fs::read(into_dir.join("mago-0.7.2-x86_64-pc-windows-msvc/mago.exe")).unwrap(), b"the binary");
+        assert!(!into_dir.join("mago-0.7.2-x86_64-pc-windows-msvc/README.md").exists());
+    }
 }

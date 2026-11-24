@@ -1,0 +1,6 @@
+# cargo deny check advisories, which sharp/bin/check mago-checks runs: no crate this lockfile pins may have a RustSec
+# vulnerability, unsound or yanked advisory, and no advisory is allowed by its id. An unmaintained advisory names no
+# defect and no fixed version to move to, so the check prints it as a warning and passes: --warn unmaintained.
+[advisories]
+version = 2
+ignore = []
