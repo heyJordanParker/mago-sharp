@@ -33,6 +33,8 @@ Each analysis thread runs one PHP# interpreter. An interpreter starts in the dir
 
 The interpreter ignores `php.ini` and runs without a memory limit, with the `ini` settings of every enabled host over that. All hosts share each interpreter, so two hosts that set one setting set it to the same value, or the run fails naming both. It has the extensions of the PHP# runtime image, so a host loads the classes of the project and its packages as the app does.
 
+A host's code is the folder that holds its file, as a package is its folder: every PHP# file under that folder, and every file those files and the host's file name, compiles before the hosts start, and the rest of the project compiles once they started, so a host's file constructs a PHP# class outside its code only in a hook.
+
 A file that fails, or registers no worker, fails the whole run, and the error names the host. A hook that makes no progress for `request-timeout-ms` is interrupted, and its interpreter starts again before its next request.
 
 ## Environment
