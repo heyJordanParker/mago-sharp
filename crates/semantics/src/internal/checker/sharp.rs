@@ -1306,6 +1306,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                     let variable = property.first_variable();
                     let kind = if matches!(property, Property::Plain(_)) { "Field" } else { "Property" };
                     check_member_name(property.modifiers(), variable.name, variable.span, kind, context);
+                    check_property_modifiers(property, context);
                     report_static_without_initial_value(property, context);
 
                     Some(FieldOrProperty)
@@ -1424,8 +1425,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::PropertyAbstractItem(_)
             | Node::PropertyConcreteItem(_)
             | Node::DirectVariable(_)
-            // `is_slice_property` refuses `override`, `virtual` and `abstract` on a field, `required` on a member
-            // without `init` or `set`, and `extern` on a member that is not `{ get; }` or `{ get; set; }`.
+            // `is_slice_property` refuses `override`, `virtual`, `abstract` and `final` on a field, `required` on a
+            // member without `init` or `set`, and `extern` on a member that is not `{ get; }` or `{ get; set; }`.
+            // `check_property_modifiers` decides where a property's `final` can matter.
             | Node::Modifier(
                 Modifier::Public(_)
                 | Modifier::Protected(_)
@@ -1435,6 +1437,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Modifier::Abstract(_)
                 | Modifier::Virtual(_)
                 | Modifier::Override(_)
+                | Modifier::Final(_)
                 | Modifier::Required(_)
                 | Modifier::Extern(_),
             ),
@@ -2867,29 +2870,15 @@ fn check_method_modifiers(method: &Method, context: &mut Context<'_, '_, '_>) {
         return;
     }
 
-    let sealed_by = file_statements(context.program).find_map(|statement| match statement {
-        Statement::Class(class)
-            if class.span().contains(&start)
-                && (class.modifiers.contains_final() || class.modifiers.contains_static()) =>
-        {
-            let modifier = if class.modifiers.contains_final() { "final" } else { "static" };
-            Some(format!("`{}` is `{modifier}`", BytesDisplay(class.name.value)))
-        }
-        Statement::Enum(r#enum) if r#enum.span().contains(&start) => {
-            Some(format!("`{}` is an enum", BytesDisplay(r#enum.name.value)))
-        }
-        _ => None,
-    });
-
+    let sealed_by = sealed_by(context.program, start);
     let is_override = method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Override(_)));
     for modifier in &method.modifiers {
         let message = match modifier {
-            Modifier::Final(_) if !is_override => {
-                "`final` marks only an override: a PHP# method is already closed unless it is `virtual`.".to_owned()
-            }
-            Modifier::Final(_) | Modifier::Virtual(_) if let Some(sealed_by) = &sealed_by => {
-                let word = BytesDisplay(modifier.get_keyword().value);
-                format!("{sealed_by}, so no subclass replaces its methods, and `{word}` can't matter.")
+            Modifier::Final(_) | Modifier::Virtual(_)
+                if let Some(message) =
+                    closing_refusal(modifier, is_override, sealed_by.as_deref(), ("method", "methods")) =>
+            {
+                message
             }
             Modifier::Virtual(_) if method.modifiers.contains_private() => {
                 "A `private` method is never replaced, so `virtual` can't matter.".to_owned()
@@ -2909,6 +2898,61 @@ fn check_method_modifiers(method: &Method, context: &mut Context<'_, '_, '_>) {
         context.report(
             Issue::error(message).with_annotation(Annotation::primary(modifier.span()).with_message("Remove it.")),
         );
+    }
+}
+
+/// Refuses a property's `final` where it can't matter, by the rule [`check_method_modifiers`] applies to a method's,
+/// spec sections 6.1 and 22: `final override` closes an override chain at its class.
+fn check_property_modifiers(property: &Property, context: &mut Context<'_, '_, '_>) {
+    let modifiers = property.modifiers();
+    let Some(r#final) = modifiers.iter().find(|modifier| matches!(modifier, Modifier::Final(_))) else {
+        return;
+    };
+    let is_override = modifiers.iter().any(|modifier| matches!(modifier, Modifier::Override(_)));
+    let sealed_by = sealed_by(context.program, property.span().start);
+    if let Some(message) = closing_refusal(r#final, is_override, sealed_by.as_deref(), ("property", "properties")) {
+        context.report(
+            Issue::error(message).with_annotation(Annotation::primary(r#final.span()).with_message("Remove it.")),
+        );
+    }
+}
+
+/// The class-like that encloses `start` when no subclass replaces its members, as "`Leaf` is `final`": a `final` or
+/// `static` class, or an enum.
+fn sealed_by(program: &Program, start: Position) -> Option<String> {
+    file_statements(program).find_map(|statement| match statement {
+        Statement::Class(class)
+            if class.span().contains(&start)
+                && (class.modifiers.contains_final() || class.modifiers.contains_static()) =>
+        {
+            let modifier = if class.modifiers.contains_final() { "final" } else { "static" };
+            Some(format!("`{}` is `{modifier}`", BytesDisplay(class.name.value)))
+        }
+        Statement::Enum(r#enum) if r#enum.span().contains(&start) => {
+            Some(format!("`{}` is an enum", BytesDisplay(r#enum.name.value)))
+        }
+        _ => None,
+    })
+}
+
+/// The error for `modifier`, a member's `final` or `virtual`, when it can't matter: `final` on a member that overrides
+/// nothing, since a PHP# member is closed unless it is `virtual`, and either one in the class-like `sealed_by` names.
+/// `member` is what the member is, singular and plural, as `("method", "methods")`.
+fn closing_refusal(
+    modifier: &Modifier,
+    is_override: bool,
+    sealed_by: Option<&str>,
+    (member, members): (&str, &str),
+) -> Option<String> {
+    match modifier {
+        Modifier::Final(_) if !is_override => {
+            Some(format!("`final` marks only an override: a PHP# {member} is already closed unless it is `virtual`."))
+        }
+        Modifier::Final(_) | Modifier::Virtual(_) if let Some(sealed_by) = sealed_by => {
+            let word = BytesDisplay(modifier.get_keyword().value);
+            Some(format!("{sealed_by}, so no subclass replaces its {members}, and `{word}` can't matter."))
+        }
+        _ => None,
     }
 }
 
@@ -3900,6 +3944,14 @@ fn is_slice_property(property: &Property) -> Result<(), Box<Issue>> {
                     "A field takes no `virtual`: a subclass overrides a `protected` field with a property already.",
                 )
                 .with_annotation(Annotation::primary(r#virtual.span()).with_message("Written here.")),
+            ));
+        }
+        if let Some(r#final) = modifier(|modifier| matches!(modifier, Modifier::Final(_))) {
+            return Err(Box::new(
+                Issue::error(
+                    "A field takes no `final`: `final` marks only an override, and a field overrides nothing.",
+                )
+                .with_annotation(Annotation::primary(r#final.span()).with_message("Written here.")),
             ));
         }
         if let Some(r#abstract) = modifier(|modifier| matches!(modifier, Modifier::Abstract(_))) {
@@ -6406,7 +6458,7 @@ fn supported(place: Place) -> &'static str {
         }
         Place::Extension => unreachable!("`enter` places an extension's keyword, receiver and every member of it"),
         Place::FieldOrProperty => {
-            "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, or classes and interfaces joined with `&` as in `Shippable & Billable`, a name, and an optional initial value."
+            "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, or classes and interfaces joined with `&` as in `Shippable & Billable`, a name, and an optional initial value. A property that replaces a parent's is `override`, and `final override` closes the override chain at its class."
         }
         Place::ClassConstant => {
             "A PHP# constant has attributes, `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class, a generic type as in `Map<string, int>` or `Class<Report>`, a function type as in `Function<int(int)>` or a tuple as in `[int, string]`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."

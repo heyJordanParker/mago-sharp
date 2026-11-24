@@ -3584,6 +3584,26 @@ fn final_marks_only_an_override_and_a_modifier_that_cant_matter_is_an_error() {
     );
 }
 
+/// Spec sections 6.1 and 22: a property closes its override chain with `final override`, as a method does, so `final`
+/// marks only an overriding property, can't matter in a final class, and goes on no field, which overrides nothing.
+#[test]
+fn final_marks_only_an_overriding_property_as_it_does_a_method() {
+    let shelf = "namespace App.Tenant;\n\npublic class Shelf : Holder\n{\n    public final override Rows<string> items { get; set; } = new Rows<string>();\n    public final string label { get; set; } = \"shelf\";\n    protected final int count = 0;\n}\n";
+    let leaf = "namespace App.Tenant;\n\npublic final class Leaf : Holder\n{\n    public final override Rows<string> items { get; set; } = new Rows<string>();\n}\n";
+
+    assert_eq!(
+        issues(shelf),
+        [
+            "6:12 `final` marks only an override: a PHP# property is already closed unless it is `virtual`.",
+            "7:15 A field takes no `final`: `final` marks only an override, and a field overrides nothing.",
+        ]
+    );
+    assert_eq!(
+        issues(leaf),
+        ["5:12 `Leaf` is `final`, so no subclass replaces its properties, and `final` can't matter."]
+    );
+}
+
 /// A method name that starts with `__` fails as a typo does, with none of PHP's magic method rules, in a class and in an
 /// enum. The PHP# forms for those jobs compile.
 #[test]
