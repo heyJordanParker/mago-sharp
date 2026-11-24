@@ -1,8 +1,8 @@
 //! Runs `mago compile` and `mago analyze` on projects whose laws the law checker proves or refuses. A law's outcome is
 //! Lean's kernel judging a theorem under a deterministic heartbeat budget, which reads nothing that differs by
-//! platform, so these tests are a test binary of their own, which Linux's MAGO slices run and MACOS skips. The tests of
-//! Lean's install, its runner, its process handling and its paths, which can fail on one platform alone, are in
-//! `tests/compile.rs`.
+//! platform, so these tests are a test binary of their own, which Linux's MAGO slices and the Mac's job both run. The
+//! tests of Lean's install, its runner, its process handling and its paths, which can fail on one platform alone, are
+//! in `tests/compile.rs`.
 
 mod common;
 
