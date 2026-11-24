@@ -678,13 +678,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if let Some(first) = modules.first()
             && (self.tested || !bindings.is_empty())
         {
-            let line = self.line(*first);
-            let table = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &bindings);
-            if self.tested {
-                statements.extend(self.test_module(checked, line, table));
-            } else {
-                statements.push(self.node(SHARP_AST_RETURN, 0, line, &[table]));
-            }
+            self.module_class(checked, first, &bindings, &mut statements);
         }
 
         let root = self.node(SHARP_AST_STMT_LIST, 0, 1, &statements);
@@ -726,8 +720,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             }
             // An `extern` declaration tells the checker what plain PHP does, and its attributes are the class's own at
-            // run time. A module's laws are checked and never run. A module's bindings are the table the file returns
-            // last, in `program`.
+            // run time. A module's laws are checked and never run. A module's bindings are the table its class returns,
+            // which the file declares last, in `program`.
             Statement::Extern(r#extern) => statements.extend(self.extern_attributes(r#extern)),
             // The checker keeps a `#!` line to the file's first line, which only a shell reads.
             Statement::Use(_) | Statement::Module(_) | Statement::Inline(_) => {}
@@ -758,20 +752,75 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements.push(self.global_call(line, b"Sharp\\Internal\\runProgram", &[name]));
     }
 
-    /// Spec section 32: a test file's module, the call `\Sharp\Internal\testModule('App\Shop\CheckoutTest', table)`,
-    /// which hands the container the module's bindings for the class the file declares, so the container uses them
-    /// while a test of that class runs. A file declares one type, spec section 27, and a file whose type is no class
-    /// has no test to run them in, so it calls nothing.
-    fn test_module(&mut self, checked: &CheckedProgram, line: u32, table: u32) -> Option<u32> {
-        let names = Node::Program(checked.program()).filter_map(|node| match *node {
-            Node::Class(class) => Some(self.names.get(&class.name)),
-            _ => None,
-        });
-        let class = self.string(0, line, names.first()?);
-        let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\testModule");
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[class, table]);
+    /// Spec sections 5 and 32: the class of `module`, the file's module, whose static `bindings()` returns `bindings`,
+    /// so each binding's lambda, and each lambda in it, is code of the module's namespace, as a method of any of its
+    /// classes is. A base module's class is its namespace's `Module`, the class-like the codex registers, an environment
+    /// module's `Module«Production»`, and a test module's `Module«CheckoutTest»`, after the class its file declares, so
+    /// no class of a program shares its name. The file returns what `bindings()` gives, which `Sharp\Container` reads,
+    /// and a test file hands it to `\Sharp\Internal\testModule('App\Shop\CheckoutTest', …)`, so the container uses it
+    /// while a test of that class runs. A file declares one type, spec section 27, and a test file whose type is no
+    /// class has no test to run its module in, so it declares and calls nothing.
+    fn module_class(&mut self, checked: &CheckedProgram, module: &Module, bindings: &[u32], statements: &mut Vec<u32>) {
+        let tested = if self.tested {
+            let classes = Node::Program(checked.program()).filter_map(|node| match *node {
+                Node::Class(class) => Some(self.names.get(&class.name)),
+                _ => None,
+            });
+            let Some(&class) = classes.first() else {
+                return;
+            };
 
-        Some(self.node(SHARP_AST_CALL, 0, line, &[function, arguments]))
+            Some(class)
+        } else {
+            None
+        };
+        let suffix = match (&self.types.module(module.span()).kind, tested) {
+            (_, Some(class)) => class.rsplit(|&byte| byte == b'\\').next(),
+            (ModuleKind::Environment(environment), None) => Some(environment.as_bytes()),
+            (ModuleKind::Base | ModuleKind::Test, None) => None,
+        };
+        let module_name = self.names.get(&module.module);
+        let name = match suffix {
+            Some(suffix) => [module_name, "«".as_bytes(), suffix, "»".as_bytes()].concat(),
+            None => module_name.to_vec(),
+        };
+
+        let line = self.line(module);
+        let table = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, bindings);
+        let returned = self.node(SHARP_AST_RETURN, 0, line, &[table]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[returned]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let return_type = self.node(SHARP_AST_TYPE, IS_ARRAY, line, &[]);
+        let method = self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC,
+            module.module,
+            module.right_brace,
+            b"bindings",
+            &[parameters, NULL, body, return_type, NULL],
+        );
+        let members = self.node(SHARP_AST_STMT_LIST, 0, line, &[method]);
+        let declared = name.rsplit(|&byte| byte == b'\\').next().unwrap_or_default();
+        statements.push(self.declaration(
+            SHARP_AST_CLASS,
+            ZEND_ACC_FINAL,
+            module.module,
+            module.right_brace,
+            declared,
+            &[NULL, NULL, members, NULL, NULL],
+        ));
+
+        let class = self.string(ZEND_NAME_FQ, line, &name);
+        let method = self.string(0, line, b"bindings");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+        let table = self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
+        statements.push(match tested {
+            Some(tested) => {
+                let tested = self.string(0, line, tested);
+                self.global_call(line, b"Sharp\\Internal\\testModule", &[tested, table])
+            }
+            None => self.node(SHARP_AST_RETURN, 0, line, &[table]),
+        });
     }
 
     /// Spec section 32: each test of a class a test file declares runs with the file's module, in PHPUnit's own
@@ -837,10 +886,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// Spec section 32: a file whose base or environment modules bind services returns their bindings, which
-    /// `Sharp\Container` reads. A module of laws alone returns nothing. Each binding is a list of the namespace whose
-    /// classes it serves, its service's id, the class it serves or null, its lifetime, and its value: a class's full
-    /// name, a list of them, or a static `fn` over the binding's parameters that returns its expression.
+    /// Spec section 32: the bindings of `module`, which [`Self::module_class`] returns from its module's class. A module
+    /// of laws alone has none. Each binding is a list of the namespace whose classes it serves, its service's id, the
+    /// class it serves or null, its lifetime, and its value: a class's full name, a list of them, or a static `fn` over
+    /// the binding's parameters that returns its expression.
     fn module_bindings(&mut self, module: &Module, bindings: &mut Vec<u32>) {
         let metadata = self.types.module(module.span());
         let written = module.members.iter().filter_map(|member| match member {

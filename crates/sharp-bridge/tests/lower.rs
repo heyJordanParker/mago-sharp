@@ -1094,8 +1094,8 @@ fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_val
         ),
     ] {
         let lowered = Lowered(common::checked("app/Shop/Module.sharp", &module(bindings), &library, lower));
-        // `return [[namespace, service, class, lifetime, value]];`, the file's third statement.
-        let table = lowered.child(lowered.root(), 2);
+        // `return [[namespace, service, class, lifetime, value]];`, the statement of the module class's `bindings()`.
+        let table = lowered.child(lowered.child(lowered.method_named("bindings"), 2), 0);
         let entry = lowered.child(lowered.child(lowered.child(table, 0), 0), 0);
         let fields: Vec<String> =
             (0..5).map(|index| lowered.render(lowered.child(lowered.child(entry, index), 0))).collect();
@@ -1118,16 +1118,115 @@ fn the_standard_library_module_names_its_own_namespace_as_any_module_does() {
     ] {
         let code = format!("namespace {namespace};\n\n{binding}");
         let lowered = Lowered(common::checked(path, &code, &[], lower));
-        // `return [[namespace, service, class, lifetime, value]];`, the file's third statement.
-        let table = lowered.child(lowered.root(), 2);
+        // `return [[namespace, service, class, lifetime, value]];`, the statement of the module class's `bindings()`.
+        let table = lowered.child(lowered.child(lowered.method_named("bindings"), 2), 0);
         let entry = lowered.child(lowered.child(lowered.child(table, 0), 0), 0);
 
         assert_eq!(lowered.render(lowered.child(lowered.child(entry, 0), 0)), expected, "{path}");
     }
 }
 
+/// Spec sections 5 and 32: a module file declares its module's class, whose static `bindings()` returns the module's
+/// bindings, so each binding's lambda, and each lambda in it, is code of the module's namespace, as a method of any of
+/// its classes is. A base module's class is its namespace's `Module`, an environment module's `Module«Production»`, and
+/// a test module's `Module«CheckoutTest»`, after the class its file declares, so no class of a program shares its
+/// name. The file returns what `bindings()` gives, and a test file hands it to the container for its class. Each row is
+/// a module file, its code, its class and the statement the file ends with.
+#[test]
+fn a_module_file_declares_its_module_class_whose_bindings_method_returns_its_table() {
+    let library = [
+        ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n"),
+        ("app/Mail/SmtpMailer.sharp", "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n"),
+        (
+            "app/Shop/Module.sharp",
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule\n{\n    singleton Mailer = SmtpMailer;\n}\n",
+        ),
+        (
+            "vendor/phpunit/phpunit/src/Framework/TestCase.php",
+            "<?php namespace PHPUnit\\Framework; abstract class TestCase {}",
+        ),
+    ];
+    let module = |header: &str, test: &str| {
+        format!(
+            "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport PHPUnit.Framework.TestCase;\n\nmodule{header}\n{{\n    singleton Mailer = SmtpMailer;\n}}\n{test}"
+        )
+    };
+    let returned =
+        |class: &str| format!("RETURN\n  STATIC_CALL\n    ZVAL {class:?}\n    ZVAL \"bindings\"\n    ARG_LIST\n");
+
+    for (path, code, class, last) in [
+        ("app/Shop/Module.sharp", module("", ""), "Module", returned("App\\Shop\\Module")),
+        (
+            "app/Shop/Module.Production.sharp",
+            module(" : App.Shop", ""),
+            "Module«Production»",
+            returned("App\\Shop\\Module«Production»"),
+        ),
+        (
+            "tests/Shop/CheckoutTest.sharp",
+            module(" : App.Shop", "\npublic class CheckoutTest : TestCase\n{\n}\n"),
+            "Module«CheckoutTest»",
+            indoc! {r#"
+                CALL
+                  ZVAL "Sharp\\Internal\\testModule"
+                  ARG_LIST
+                    ZVAL "App\\Shop\\CheckoutTest"
+                    STATIC_CALL
+                      ZVAL "App\\Shop\\Module«CheckoutTest»"
+                      ZVAL "bindings"
+                      ARG_LIST
+            "#}
+            .to_owned(),
+        ),
+    ] {
+        let library: Vec<(&str, &str)> = library.iter().filter(|(other, _)| *other != path).copied().collect();
+        let lowered = [Lowered(common::checked(path, &code, &library, lower))];
+        let (lowered, declared) = class_in(&lowered, class);
+        let expected = indoc! {r#"
+            CLASS [32] "{class}" @7-10
+              null
+              null
+              STMT_LIST
+                METHOD [17] "bindings" @7-10
+                  PARAM_LIST
+                  null
+                  STMT_LIST
+                    RETURN
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ARRAY [3]
+                            ARRAY_ELEM
+                              ZVAL "app\\shop"
+                              null
+                            ARRAY_ELEM
+                              ZVAL "App\\Mail\\Mailer"
+                              null
+                            ARRAY_ELEM
+                              ZVAL null
+                              null
+                            ARRAY_ELEM
+                              ZVAL "singleton"
+                              null
+                            ARRAY_ELEM
+                              ZVAL "App\\Mail\\SmtpMailer"
+                              null
+                          null
+                  TYPE [7]
+                  null
+              null
+              null
+        "#};
+
+        assert_eq!(lowered.render(declared), expected.replace("{class}", class), "{path}");
+        let root = lowered.root();
+        let statements = lowered.nodes()[root as usize].child_count;
+        assert_eq!(lowered.render(lowered.child(root, statements - 1)), last, "{path}");
+    }
+}
+
 /// Spec section 32: a test file's module applies while a test of the class the file declares runs, so the file hands
-/// its bindings to the container for its class, as `\Sharp\Internal\testModule('App\Shop\CheckoutTest', [...])`, and
+/// its bindings to the container for its class, as
+/// `\Sharp\Internal\testModule('App\Shop\CheckoutTest', \App\Shop\Module«CheckoutTest»::bindings())`, and
 /// returns nothing. A file declares one type, spec section 27, so a second class beside the module is refused, and a
 /// file whose type is no test class, as an interface, holds no test, so its module is refused and the file calls
 /// nothing.
@@ -1241,13 +1340,8 @@ fn a_test_files_class_starts_each_test_with_the_test_module_and_ends_it_after() 
 
         assert_eq!(lowered.declared("__sharpStartTest"), at(&start), "{members:?}");
         assert_eq!(lowered.declared("__sharpEndTest"), at(&end), "{members:?}");
-        let call = (0..lowered.nodes().len() as u32)
-            .find(|&node| {
-                lowered.nodes()[node as usize].kind == sharp_kind::SHARP_AST_CALL
-                    && lowered.render(lowered.child(node, 0)) == "ZVAL \"Sharp\\\\Internal\\\\testModule\"\n"
-            })
-            .unwrap_or_else(|| panic!("{members:?}: the file calls testModule"));
-        let bindings = lowered.render(lowered.child(lowered.child(call, 1), 1));
+        let returned = lowered.child(lowered.child(lowered.method_named("bindings"), 2), 0);
+        let bindings = lowered.render(lowered.child(returned, 0));
         assert!(bindings.starts_with(table), "{members:?}: {bindings}");
     }
 
