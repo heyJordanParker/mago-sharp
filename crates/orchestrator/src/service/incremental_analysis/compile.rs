@@ -973,7 +973,8 @@ impl IncrementalAnalysisService {
             sources.insert(file.id);
             // A file this one reaches through declarations or bodies names the hash of its declarations beside its
             // stamp, so an edit to its bodies leaves this file current: the key holds the returns and effects it read
-            // from them. Every other source keeps its stamp alone.
+            // from them. So does a module file, whose declarations are its `imports` line and its bindings, all a file
+            // reads of it. Every other source keeps its stamp alone.
             let mut imports: Vec<InputPath> = Vec::new();
             for reached in dependencies.reached_through_bodies(file.id) {
                 if sources.contains(&reached) {
@@ -1010,6 +1011,12 @@ impl IncrementalAnalysisService {
             } else {
                 Vec::new()
             };
+            // A module no file is at, or one this compile refuses, has no declarations hash and keeps its stamp alone.
+            let module_files = self.module_inputs(file, dependencies, modules).into_iter().map(|path| {
+                let declarations_hash = read_by_declarations.get(&FileId::new(&path)).copied().unwrap_or_default();
+
+                (path, declarations_hash)
+            });
             let mut paths: Vec<InputPath> = sources
                 .into_iter()
                 .filter_map(|source| self.database.get(&source).ok())
@@ -1017,9 +1024,9 @@ impl IncrementalAnalysisService {
                 .map(|source| source.name.to_vec())
                 .chain(namespace_class_files)
                 .chain(namespace_files)
-                .chain(self.module_inputs(file, dependencies, modules))
                 .chain(std::iter::once(COMPOSER_LOCK.to_vec()))
                 .map(|path| (path, [0; 16]))
+                .chain(module_files)
                 .chain(imports)
                 .collect();
             // A path another rule also names keeps its stamp alone, which sorts first.
@@ -1402,8 +1409,9 @@ impl IncrementalAnalysisService {
     /// file imports. A module's bindings, a listener's constructor and a program's constructor also take each service
     /// from the module of the taking class's namespace or of a namespace above it, so a file that declares a module, a
     /// listener or a program also reads the modules of each namespace a module of it serves, and of each class its
-    /// check read. An environment module also reads its environment's modules. An edit, an addition or a deletion of
-    /// one makes the compiled file stale.
+    /// check read. An environment module also reads its environment's modules. An addition or a deletion of one makes
+    /// the compiled file stale, and so does an edit that changes its `imports` line or a binding: the compiled file
+    /// names the hash of each one's declarations, so an edit that leaves them as they were leaves it current.
     fn module_inputs(&self, file: &File, dependencies: &Dependencies<'_>, modules: &ModuleFiles) -> Vec<Vec<u8>> {
         if !is_source(file) {
             return Vec::new();
@@ -3653,6 +3661,70 @@ mod tests {
         let changed_declarations = header(accepted(&changed, "app/Money.sharp")).unwrap().declarations_hash;
         assert_ne!(changed_declarations, money_declarations);
         assert_eq!(money(&changed, "app/Rates.sharp").map(|input| input.declarations_hash), Some(changed_declarations));
+    }
+
+    /// The project the input and key tests edit, with `module` as the module of `App`, the namespace of every
+    /// `.sharp` file in it.
+    fn shop_with_module(module: &str) -> Vec<(&'static str, String)> {
+        let mut files = shop(MONEY, RATE);
+        files.push(("app/Module.sharp", format!("namespace App;\n\nmodule\n{{\n{module}}}\n")));
+        files
+    }
+
+    /// The compilations of a compile of `edited` after a compile of `base`, and the files whose compiled files it read.
+    fn compiled_after_edit(
+        base: &[(&'static str, String)],
+        edited: &[(&'static str, String)],
+    ) -> (BTreeMap<String, Compilation>, BTreeMap<String, Compilation>, BTreeSet<String>) {
+        let base = shop_project(base);
+        let mut warm = analyzed(&base);
+        let (before, last, _) =
+            compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), database_stamp(&base), |_| false);
+        let edited = shop_project(edited);
+        warm.update_database(edited.read_only());
+        warm.analyze_incremental(None).expect("the warm path runs");
+        let (after, _, read) = compile_keeping(&mut warm, &last, &before, database_stamp(&edited), |_| true);
+
+        (before, after, read)
+    }
+
+    /// Spec sections 27 and 32: a file reads the modules of its namespaces only through their `imports` lines and
+    /// bindings, so a newline appended to `app/Module.sharp` compiles the module again and leaves every other compiled
+    /// file unread and unwritten.
+    #[test]
+    fn a_newline_in_a_module_rewrites_only_that_module_s_compiled_file() {
+        let module = "    singleton Money = Money;\n";
+        let (_, after, read) =
+            compiled_after_edit(&shop_with_module(module), &shop_with_module(&format!("{module}\n")));
+
+        assert!(matches!(after.get("app/Module.sharp"), Some(Compilation::Accepted(_))), "{after:?}");
+        let sharp: Vec<&String> = after
+            .keys()
+            .filter(|name| Path::new(name).extension().is_some_and(|extension| extension == "sharp"))
+            .collect();
+        assert!(sharp.len() > 5, "{sharp:?}");
+        for name in sharp.into_iter().filter(|name| *name != "app/Module.sharp") {
+            assert!(matches!(after.get(name), Some(Compilation::Kept)), "{name}: {after:?}");
+            assert!(!read.contains(name), "{name}: {read:?}");
+        }
+    }
+
+    /// Spec section 32: a module's `imports` line limits what each file of its namespace imports, so one added to
+    /// `app/Module.sharp` makes each compiled file below it stale, and each names the module's new declarations.
+    #[test]
+    fn an_import_added_to_a_module_makes_each_file_below_it_stale() {
+        let module = "    singleton Money = Money;\n";
+        let (before, after, _) = compiled_after_edit(
+            &shop_with_module(module),
+            &shop_with_module(&format!("    imports Acme, Lib;\n{module}")),
+        );
+
+        let declarations = header(accepted(&after, "app/Module.sharp")).unwrap().declarations_hash;
+        assert_ne!(declarations, header(accepted(&before, "app/Module.sharp")).unwrap().declarations_hash);
+        for name in ["app/Money.sharp", "app/Order.sharp", "app/Cash.sharp", "app/Rates.sharp", "app/Unrelated.sharp"] {
+            let module = inputs(accepted(&after, name)).into_iter().find(|input| input.path == b"app/Module.sharp");
+            assert_eq!(module.map(|input| input.declarations_hash), Some(declarations), "{name}");
+        }
     }
 
     /// Each compiled file of `compiled` as the engine decides whether to run it: an input that names the hash of an
