@@ -25845,47 +25845,23 @@ fn a_loop_over_a_map_reads_each_entry_and_a_loop_unpacks_each_tuple() {
 }
 
 /// ```php
-/// $entries = $entries instanceof \Sharp\Map ? \Sharp\Internal\Sequence::from($entries) : $entries;
+/// return 1;
 /// yield from \Sharp\Internal\Sequence::from($plans);
-/// return \Sharp\Internal\Sequence::from($plans);
-/// $kept = \Sharp\Internal\Sequence::from($plans);
+/// return $plans;
+/// $kept = $plans;
+/// foreach (($entries#1 = $entries) instanceof \Sharp\Map ? \Sharp\Internal\Sequence::from($entries#1) : $entries#1 as [$key, $count]) { }
 /// ```
 ///
-/// Spec section 12: a `Map<TKey, TValue>` is an `Iterable<[TKey, TValue]>` of its entries, so a `Map` that lands in an
-/// `Iterable` place, a local, a return or `yield ...`, is the `Sequence` that reads its entries. A parameter takes any
-/// caller's `Map` the same way before the body runs.
+/// Spec section 12: a `Map<TKey, TValue>` is an `Iterable<[TKey, TValue]>` of its entries, so a reader of an `Iterable`
+/// reads a `Map` as its entries: `yield ...` of a `Map`, and a loop over an `Iterable` that holds one when it runs. A
+/// `Map` that lands in an `Iterable` place, a parameter, a return or a local, stays the `Map`, so `is Map` holds there.
 #[test]
-fn a_map_that_lands_in_an_iterable_gives_its_entries() {
+fn a_map_that_lands_in_an_iterable_stays_the_map_and_its_readers_read_its_entries() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public int count(Iterable<[string, int]> entries) { return 1; }\n\n    public Iterable<[string, int]> all(Map<string, int> plans) { yield ...plans; }\n\n    public Iterable<[string, int]> some(Map<string, int> plans) { return plans; }\n\n    public void run(Map<string, int> plans)\n    {\n        Iterable<[string, int]> kept = plans;\n    }\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public int count(Iterable<[string, int]> entries) { return 1; }\n\n    public Iterable<[string, int]> all(Map<string, int> plans) { yield ...plans; }\n\n    public Iterable<[string, int]> some(Map<string, int> plans) { return plans; }\n\n    public void run(Map<string, int> plans)\n    {\n        Iterable<[string, int]> kept = plans;\n    }\n\n    public void each(Iterable<[string, int]> entries)\n    {\n        for (const [key, count] of entries) { }\n    }\n\n    public void any(Iterable<Any?> values)\n    {\n        for (const value of values) { }\n    }\n}\n",
     );
 
-    assert_eq!(
-        lowered.body_of("count"),
-        indoc! {r#"
-            STMT_LIST
-              ASSIGN
-                VAR
-                  ZVAL "entries"
-                CONDITIONAL
-                  INSTANCEOF
-                    VAR
-                      ZVAL "entries"
-                    ZVAL "Sharp\\Map"
-                  STATIC_CALL
-                    ZVAL "Sharp\\Internal\\Sequence"
-                    ZVAL "from"
-                    ARG_LIST
-                      VAR
-                        ZVAL "entries"
-                  VAR
-                    ZVAL "entries"
-              RETURN
-                ZVAL 1
-        "#}
-    );
-    // Each body first makes the object of a PHP array plain PHP passes as `plans`, and then a statement takes the
-    // entries as its first child: the loop `yield ...` runs as, the `return` and the assignment.
+    assert_eq!(lowered.body_of("count"), "STMT_LIST\n  RETURN\n    ZVAL 1\n");
     let entries = concat!(
         "    STATIC_CALL\n",
         "      ZVAL \"Sharp\\\\Internal\\\\Sequence\"\n",
@@ -25894,12 +25870,22 @@ fn a_map_that_lands_in_an_iterable_gives_its_entries() {
         "        VAR\n",
         "          ZVAL \"plans\"\n",
     );
-    for (method, statement) in
-        [("all", "  FOREACH\n"), ("some", "  RETURN\n"), ("run", "  ASSIGN\n    VAR\n      ZVAL \"kept\"\n")]
-    {
+    let all = lowered.body_of("all");
+    assert!(all.contains(&format!("  FOREACH\n{entries}")), "all:\n{all}");
+    for (method, statement) in [("some", "  RETURN\n"), ("run", "  ASSIGN\n    VAR\n      ZVAL \"kept\"\n")] {
         let body = lowered.body_of(method);
 
-        assert!(body.contains(&format!("{statement}{entries}")), "{method}:\n{body}");
+        assert!(body.contains(&format!("{statement}    VAR\n      ZVAL \"plans\"\n")), "{method}:\n{body}");
+        assert!(!body.contains("Sequence"), "{method}:\n{body}");
+    }
+    for method in ["each", "any"] {
+        let body = lowered.body_of(method);
+
+        assert!(
+            body.starts_with("STMT_LIST\n  FOREACH\n    CONDITIONAL\n      INSTANCEOF\n        ASSIGN\n"),
+            "{method}:\n{body}"
+        );
+        assert!(body.contains("ZVAL \"Sharp\\\\Map\""), "{method}:\n{body}");
     }
 }
 
