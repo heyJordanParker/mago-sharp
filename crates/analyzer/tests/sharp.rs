@@ -11204,7 +11204,7 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
     );
 }
 
-/// Spec section 18: a `string` is text and its bytes are `Bytes`, so a call of a byte member 0.6.40 had is refused with
+/// Spec section 18: a `string` is text and its bytes are `Bytes`, so a call of a byte member a release had is refused with
 /// the member that replaces it, on a `string`, an `int` and a `List<int>`.
 #[test]
 fn a_removed_byte_member_is_refused_with_its_replacement() {
@@ -19323,7 +19323,7 @@ fn a_list_literal_in_a_coalesce_a_conditional_or_a_match_where_a_set_is_declared
 
 /// An `Any` joined with an `Any` is an `Any`, though one of them is an element read that may be past the end of its
 /// `List`. So a `? :` of two `Any` values goes into a declared `Any`, and `[]` beside `[this.streams[0]]` goes into a
-/// declared `List<Any>`, spec section 12, where 0.6.35 joined each pair as `Any?` and refused the line.
+/// declared `List<Any>`, spec section 12, where a release joined each pair as `Any?` and refused the line.
 #[test]
 fn a_conditional_of_two_any_values_or_two_lists_of_any_goes_into_a_declared_any() {
     let sharp = "namespace Demo;\n\nclass Pipe\n{\n    private List<Any> streams = [];\n\n    public List<Any> pending(int written, string request)\n    {\n        List<Any> write = written < request.length() ? [this.streams[0]] : [];\n        return write;\n    }\n\n    public Any first(bool flag, Any held)\n    {\n        Any picked = flag ? this.streams[0] : held;\n        return picked;\n    }\n}\n";
@@ -32247,7 +32247,7 @@ fn a_chain_of_class_value_comparisons_is_not_redundant() {
 }
 
 /// Spec section 25: a reflection boolean is named `isNullable` and `isOptional`, as the standard library names every
-/// boolean, so 0.6.10's `nullable` and `optional` name no member.
+/// boolean, so an earlier release's `nullable` and `optional` name no member.
 #[test]
 fn the_reflection_booleans_of_0_6_10_name_no_member() {
     let report = (

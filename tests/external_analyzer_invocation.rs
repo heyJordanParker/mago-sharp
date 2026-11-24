@@ -786,7 +786,7 @@ fn node_hooks_see_a_sharp_call_of_self_a_case_and_a_local_as_the_php_that_means_
 /// A host's node hooks read each PHP# call form, its type arguments apart from its arguments: an instance call
 /// `calc.wrap<int>(1)`, a null-safe one `maybe?.wrap<int>(2)`, a static one `Calc.pair<int>(3)`, a call on a call
 /// `Calc.pair<int>(3).first<int>()`, a null-safe call of a function value `doubler?.(4)`, and `new Box<int>(5)`, which no
-/// SDK view reads. Each passes its type arguments to the call as written, where 0.6.10's view of a call that passes any
+/// SDK view reads. Each passes its type arguments to the call as written, where an earlier release's view of a call that passes any
 /// refused it with "A call node has no argument list." and stopped the analysis of the file.
 #[test]
 fn node_hooks_read_each_sharp_call_form_and_its_type_arguments() -> Result<(), Box<dyn std::error::Error>> {
@@ -892,7 +892,7 @@ fn node_hooks_read_a_built_in_bound_as_the_compile_resolves_it() -> Result<(), B
 
 /// A dotted name of a machine's case names the case's class, spec section 20, wherever the checker reads it as the case:
 /// a type pattern, its `not` form, a return type and `typeof`. A hook reads `Demo\JourneyStatus\Open` at each, where
-/// 0.6.51 gave the machine in a pattern. A value pattern's expression has the case's type, where 0.6.51 gave it none.
+/// A release gave the machine in a pattern. A value pattern's expression has the case's type, where that release gave it none.
 #[test]
 fn node_hooks_read_a_case_s_dotted_name_and_value_as_the_case() -> Result<(), Box<dyn std::error::Error>> {
     if !php_sdk_is_available() {

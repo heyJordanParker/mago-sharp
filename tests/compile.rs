@@ -1834,7 +1834,7 @@ fn a_watch_keeps_a_worker_that_never_loaded_the_edited_class() {
 
 /// A watch reports what the one-shot command reports where an issue points into a vendor file Composer's autoload maps
 /// served, and keeps watching: the report renders each file the analysis read, and the watch's own tree holds only
-/// the files it watches. 0.6.26 stopped the watch after its first analysis with "Files error: file missing".
+/// the files it watches. A release stopped the watch after its first analysis with "Files error: file missing".
 #[test]
 fn a_watch_reports_an_issue_that_points_into_a_vendor_file_the_autoload_maps_served() {
     let directory = tempfile::tempdir().unwrap();
@@ -1893,7 +1893,7 @@ fn a_watch_reports_an_issue_that_points_into_a_vendor_file_the_autoload_maps_ser
 
 /// `mago analyze --watch` keeps reporting the issues that point into a vendor file Composer's autoload maps served, round
 /// after round, while files are deleted, created, renamed and edited, as agents change a tree. Deleting a class's file
-/// analyzes the project from scratch inside the round, and 0.6.27's watch then lost the served files and stopped with
+/// analyzes the project from scratch inside the round, and the next release's watch then lost the served files and stopped with
 /// "Files error: file missing". Each round's report is the one-shot command's on the same tree.
 #[test]
 fn a_watch_reports_the_vendor_files_the_autoload_maps_served_through_deletes_creates_renames_and_edits() {
@@ -4777,7 +4777,7 @@ fn a_signal_that_ends_a_compile_ends_the_lean_it_waits_on() {
 }
 
 /// Spec section 23: a call only `__call` or `__callStatic` answers, instance or static, is a missing method in a library
-/// and in a project alike, where 0.6.45 compiled it.
+/// and in a project alike, where a release compiled it.
 #[test]
 fn a_call_only_a_magic_method_answers_is_refused_in_a_library_and_a_project() {
     let bag = "<?php\n\nnamespace Lib;\n\nfinal class Bag\n{\n    /** @param list<mixed> $arguments */\n    public function __call(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n\n    /** @param list<mixed> $arguments */\n    public static function __callStatic(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n}\n";

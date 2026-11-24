@@ -129,7 +129,7 @@ function get_version(): string
 
 /**
  * The error for a `mago` and an extension SDK of different releases, as "`mago` speaks analyzer protocol 1.12, and the
- * extension SDK, heyjordanparker/mago-sharp 0.6.1, speaks 1.13.": what each side holds, this SDK's release when
+ * extension SDK, heyjordanparker/mago-sharp 1.2.3, speaks 1.13.": what each side holds, this SDK's release when
  * Composer gives one, and the fix, since `mago` and the SDK release together at one version.
  *
  * @internal

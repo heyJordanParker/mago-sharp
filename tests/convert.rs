@@ -45,8 +45,8 @@ fn logged(output: &Output, level: &str, message: &str) -> bool {
 
 /// A linked worktree whose `.git` file names a git folder that isn't there, as in a container that mounts the worktree
 /// alone, stops the run with exit code 2 and says what to do: mount the main repository's `.git` folder, or run in a
-/// plain clone. On 0.6.5 it said "`git rev-parse` failed (exit status: 128): fatal: not a git repository" with the
-/// host's path alone, and on 0.6.3 every file stayed plain PHP for "commit it first".
+/// plain clone. A release said "`git rev-parse` failed (exit status: 128): fatal: not a git repository" with the
+/// host's path alone, and an earlier one left every file plain PHP for "commit it first".
 #[test]
 fn a_worktree_whose_git_folder_is_missing_says_to_mount_it_or_run_in_a_plain_clone() {
     let directory = tempfile::tempdir().unwrap();

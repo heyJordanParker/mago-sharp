@@ -1967,7 +1967,7 @@ fn report_non_existent_collection_member<A>(
     );
 }
 
-/// The member that replaces a byte member 0.6.40 had, spec section 18, as the help of a call of it: a `string` is text,
+/// The member that replaces a byte member an earlier release had, spec section 18, as the help of a call of it: a `string` is text,
 /// so its bytes are `Bytes`, and a `List<int>` and an `int` give `Bytes` too. None for any other member.
 fn byte_member_replacement(receiver: &str, method: &[u8]) -> Option<&'static str> {
     Some(match (receiver, method) {
