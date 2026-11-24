@@ -89,13 +89,9 @@ const LAW_STATEMENT: &str = "Sharp.Lean.Law";
 /// a claim and in a method it calls.
 const MERGING_REWRITES: &[&str] = &["sharp_step", "↓reduceIte", "reduceCtorEq"];
 
-/// The rewrites of the fixed steps' third pass: `sharp_value`, the lemmas of `sharp_step` but the ones that split a
-/// case's facts, which would read each fact again for each `Int` the pass gives, and the ones that read an int step as
-/// the `Int` it gives, and the simprocs of [`MERGING_REWRITES`] and of an int literal's value.
-const VALUE_REWRITES: &[&str] = &["sharp_value", "↓reduceIte", "reduceCtorEq", "Int64.reduceToInt"];
-
-/// The rewrites of the fixed steps' last rewrite of a goal their passes leave open: `sharp_full`, every lemma of the
-/// other two passes, and their simprocs.
+/// The rewrites of the fixed steps' third pass and of their last rewrite of a goal the passes leave open: `sharp_full`,
+/// the lemmas of `sharp_step` and the ones that read an int step as the `Int` it gives, and the simprocs of
+/// [`MERGING_REWRITES`] and of an int literal's value.
 const FULL_REWRITES: &[&str] = &["sharp_full", "↓reduceIte", "reduceCtorEq", "Int64.reduceToInt"];
 
 /// The lemmas that read a law's `when` as one fact for each step it computes, in each case of each branch it takes,
@@ -523,7 +519,7 @@ fn scripted(law: &Law, program: &Program<'_>) -> Option<String> {
 /// The fixed steps that close a case: `sharp_simp_all` with the `statements` of the laws a case holds and the definitions
 /// `plain` as rewrites, first with [`MERGING_REWRITES`] and the program's own definitions alone, which rewrites the goal
 /// with the facts that the standard library's calls give, then with [`MERGING_REWRITES`] and every definition, then with
-/// [`VALUE_REWRITES`], then `omega` or `decide` on each goal it leaves, or a rewrite with [`FULL_REWRITES`] once each
+/// [`FULL_REWRITES`], then `omega` or `decide` on each goal it leaves, or that rewrite again once each
 /// value a fact names is in its place, as a case's value is where a fact names the constructor that built it. With
 /// `recursive` definitions, the steps first unfold each of them once, as a recursion on a value the case does not know
 /// needs, and else rewrite with them too, until each recursion ends, as one on values the law writes out needs.
@@ -544,7 +540,7 @@ fn steps(statements: &[&str], plain: &[&str], recursive: &[&str]) -> String {
             "({}; {}; {}; {close}; done)",
             pass(MERGING_REWRITES, &own),
             pass(MERGING_REWRITES, &reached),
-            pass(VALUE_REWRITES, &reached)
+            pass(FULL_REWRITES, &reached)
         )
     };
     let rewritten = closed(&[plain, recursive]);

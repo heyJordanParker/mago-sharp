@@ -164,15 +164,15 @@ end Law
 /-! The lemmas the fixed steps rewrite with, each in the simp set of each pass that rewrites with it, as `src/lean.rs`
 names the sets. -/
 
-attribute [sharp_step, sharp_value, sharp_full] bind_assoc pure_bind holds_bind holds_pure holds_ite pure_inj
+attribute [sharp_step, sharp_full] bind_assoc pure_bind holds_bind holds_pure holds_ite pure_inj
   bind_eq_pure map_eq_pure ite_eq_pure throw_eq_pure bne_iff_ne ne_eq beq_iff_eq beq_self_eq_true decide_eq_true_eq
   Bool.and_eq_true Option.isSome_some Option.getD_some
 
-attribute [sharp_step ←, sharp_value ←, sharp_full ←] Int64.not_lt Int.not_lt
+attribute [sharp_step ←, sharp_full ←] Int64.not_lt Int.not_lt
 
 attribute [sharp_step, sharp_full] or_imp forall_and forall_exists_index and_imp forall_eq' implies_true false_implies
 
-attribute [sharp_value, sharp_full] int.add_eq_pure int.sub_eq_pure int.toInt_max Int64.le_iff_toInt_le
+attribute [sharp_full] int.add_eq_pure int.sub_eq_pure int.toInt_max Int64.le_iff_toInt_le
   Int64.lt_iff_toInt_lt Int64.toInt_zero
 
 end Sharp
