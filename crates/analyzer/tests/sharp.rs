@@ -35401,6 +35401,23 @@ fn a_bound_class_reaches_code_only_through_injection() {
     assert_eq!(compile_errors(("app/Shop/Checkout.sharp", checkout), &others), [message, message, message]);
 }
 
+/// Spec section 32: a lambda's parameter that plain PHP fills is injection, so a lambda passed to a plain PHP call may
+/// take a bound class, and an `as` or an `is` on the call's result that tests another type compiles. Narrowing the
+/// result to the bound class, as itself or as a type argument, is still the lookup the rule refuses.
+#[test]
+fn a_lambda_a_plain_php_call_takes_receives_a_bound_class_as_its_parameter() {
+    let store = ("app/Shop/StoreService.sharp", "namespace App.Shop;\n\npublic class StoreService\n{\n}\n");
+    let module =
+        ("app/Shop/Module.sharp", "namespace App.Shop;\n\nmodule\n{\n    singleton StoreService = StoreService;\n}\n");
+    let kernel = "<?php\n\nnamespace Lib;\n\nfinal class Kernel\n{\n    public function call(callable $callback): mixed\n    {\n        return $callback();\n    }\n}\n";
+    let console = "namespace App.Shop;\n\nimport Lib.Kernel;\nimport LogicException;\n\npublic class Console\n{\n    internal int used(Kernel kernel) => kernel.call((StoreService store) => 1) as int ?? throw new LogicException(\"no exit code\");\n\n    internal int? cast(Kernel kernel) => kernel.call((StoreService store) => 1) as int;\n\n    internal bool tested(Kernel kernel) => kernel.call((StoreService store) => 1) is int;\n\n    internal StoreService? narrowed(Kernel kernel) => kernel.call(() => 1) as StoreService;\n\n    internal bool narrowedTest(Kernel kernel) => kernel.call(() => 1) is StoreService;\n\n    internal List<StoreService>? listed(Kernel kernel) => kernel.call(() => 1) as List<StoreService>;\n}\n";
+    let others = [store, module, ("src/Lib/Kernel.php", kernel)];
+    let message =
+        "`StoreService` is bound in `App.Shop`'s module, so it reaches code through a constructor or a parameter.";
+
+    assert_eq!(compile_errors(("app/Shop/Console.sharp", console), &others), [message, message, message]);
+}
+
 /// Spec section 32: a binding's expression is where a framework's object enters, as C#'s
 /// `services.AddScoped<T>(sp => …)` adapts one, so a plain PHP call in it, or an `as` on one, gives the plain PHP class
 /// that binding binds. A call there that gives another bound class is refused, as is one that gives a PHP# class,

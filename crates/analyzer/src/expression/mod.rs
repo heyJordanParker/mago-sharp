@@ -470,6 +470,17 @@ where
 
     let tests_function_type = hints.iter().any(|hint| names_function_type(hint));
     let hint_spans: Vec<Span> = hints.iter().map(|hint| hint.span()).collect();
+    // Spec section 32: the classes the test narrows its value to, each type it tests with its type arguments, and
+    // never a type inside the tested value, as a lambda's parameter is.
+    let narrowed: Vec<Word> = hints
+        .iter()
+        .flat_map(|hint| {
+            Node::Hint(hint).filter_map(|node| match node {
+                Node::Hint(Hint::Identifier(name)) => Some(word(context.resolved_names.get(name))),
+                _ => None,
+            })
+        })
+        .collect();
     let mut case_types = generic_case_types(node, &hints, context, block_context, artifacts)?;
     let mut is_refused = false;
     for hint in hints {
@@ -877,13 +888,6 @@ where
 
     // Spec section 32: a plain PHP call's result narrowed to a class a module binds is refused, as such a result is.
     if let Expression::Call(call) = tested_value(node).unparenthesized() {
-        let narrowed: Vec<Word> = node
-            .filter_map(|node| match node {
-                Node::Hint(Hint::Identifier(name)) => Some(word(context.resolved_names.get(name))),
-                _ => None,
-            })
-            .into_iter()
-            .collect();
         crate::statement::module::report_bound_from_plain_php(context, artifacts, call, &narrowed, node.span());
     }
 
