@@ -149,9 +149,12 @@ fn a_thrown_exception_names_its_class_message_and_place() {
 
     let thrown = call(&engine, "throw_exception");
 
-    let Err(EngineError::Threw(message)) = thrown else { panic!("the call threw, and returned {thrown:?}") };
-    assert!(message.starts_with("RuntimeException: the provider refused in "), "{message}");
-    assert!(message.ends_with("functions.php:69"), "{message}");
+    let Err(EngineError::Threw(thrown)) = thrown else { panic!("the call threw, and returned {thrown:?}") };
+    assert_eq!(thrown.class, "RuntimeException");
+    assert_eq!(thrown.message, "the provider refused");
+    assert!(thrown.file.ends_with("fixtures/functions.php"), "{}", thrown.file.display());
+    assert_eq!(thrown.line, 69);
+    assert_eq!(thrown.to_string(), format!("RuntimeException: the provider refused in {}:69", thrown.file.display()));
     assert_eq!(call(&engine, "count_call"), Ok(Value::Int(1)), "an exception keeps the interpreter");
 }
 

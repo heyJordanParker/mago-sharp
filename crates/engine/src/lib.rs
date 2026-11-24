@@ -60,8 +60,8 @@ pub enum EngineError {
     Setting { name: String, value: String },
     /// A script failed while the interpreter ran it at its start, with what it threw or printed.
     Script { script: PathBuf, message: String },
-    /// The called function threw, as `Class: message in file:line`.
-    Threw(String),
+    /// The called function threw `Thrown`.
+    Threw(Thrown),
     /// The call stopped on a fatal error, with what the engine printed. The interpreter is reset.
     Failed(String),
     /// The call ran past its deadline. The interpreter is reset.
@@ -81,7 +81,7 @@ impl fmt::Display for EngineError {
             Self::Interpreter => write!(formatter, "a PHP# interpreter could not start a request"),
             Self::Setting { name, value } => write!(formatter, "PHP refused the setting `{name}` = `{value}`"),
             Self::Script { script, message } => write!(formatter, "{} failed: {message}", script.display()),
-            Self::Threw(message) => write!(formatter, "{message}"),
+            Self::Threw(thrown) => write!(formatter, "{thrown}"),
             Self::Failed(message) => write!(formatter, "{}", message.trim()),
             Self::Deadline(deadline) => {
                 write!(formatter, "the call ran past its deadline of {} ms", deadline.as_millis())
@@ -96,6 +96,49 @@ impl fmt::Display for EngineError {
 }
 
 impl std::error::Error for EngineError {}
+
+/// An exception a call or a script threw: its class, its message, and the file and line it was thrown at.
+///
+/// A `CompileError` the engine throws for a PHP# file it refuses to load names that file. It displays as
+/// `Class: message in file:line`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Thrown {
+    pub class: String,
+    pub message: String,
+    pub file: PathBuf,
+    pub line: i64,
+}
+
+impl Thrown {
+    /// The exception the engine wrote as `read`, the list of its class, message, file and line, or else, when the
+    /// engine could write none, an exception of no class whose message is what the interpreter printed.
+    fn of(read: Result<Value, EngineError>) -> Self {
+        let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+        match read {
+            Ok(Value::List(fields)) => match fields.as_slice() {
+                [Value::String(class), Value::String(message), Value::String(file), Value::Int(line)] => {
+                    Self { class: text(class), message: text(message), file: PathBuf::from(text(file)), line: *line }
+                }
+                _ => Self::printed(),
+            },
+            _ => Self::printed(),
+        }
+    }
+
+    fn printed() -> Self {
+        Self { class: String::new(), message: output(), file: PathBuf::new(), line: 0 }
+    }
+}
+
+impl fmt::Display for Thrown {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.class.is_empty() {
+            return write!(formatter, "{}", self.message);
+        }
+
+        write!(formatter, "{}: {} in {}:{}", self.class, self.message, self.file.display(), self.line)
+    }
+}
 
 const DONE: i32 = 0;
 const THREW: i32 = 1;
@@ -341,12 +384,7 @@ impl Engine {
             engine_value_release(&raw mut result);
             match status {
                 DONE => read,
-                THREW => match read {
-                    Ok(Value::String(message)) => {
-                        Err(EngineError::Threw(String::from_utf8_lossy(&message).into_owned()))
-                    }
-                    _ => Err(EngineError::Threw(output())),
-                },
+                THREW => Err(EngineError::Threw(Thrown::of(read))),
                 _ => Err(EngineError::Failed(output())),
             }
         }
@@ -390,9 +428,9 @@ impl Engine {
                 let status = engine_run_script(path.as_ptr(), &raw mut result);
                 let read = Value::read(&raw const result);
                 engine_value_release(&raw mut result);
-                let message = match (status, read) {
-                    (DONE, _) => continue,
-                    (THREW, Ok(Value::String(message))) => String::from_utf8_lossy(&message).into_owned(),
+                let message = match status {
+                    DONE => continue,
+                    THREW => Thrown::of(read).to_string(),
                     _ => output(),
                 };
 

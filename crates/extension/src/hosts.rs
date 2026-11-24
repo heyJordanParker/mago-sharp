@@ -180,7 +180,14 @@ impl Hosts {
                 let message = error.to_string();
                 return Err(match redeclared(&message) {
                     Some(class) => self.clash(index, class),
-                    None => WorkerError::Load { host: host.name.clone(), message },
+                    None => {
+                        let thrown = match error {
+                            EngineError::Threw(thrown) => Some(Box::new(thrown)),
+                            _ => None,
+                        };
+
+                        WorkerError::Load { host: host.name.clone(), message, thrown }
+                    }
                 });
             }
         }
@@ -538,6 +545,7 @@ fn shared(hosts: &[HostFile], kind: Shared) -> Result<Vec<(CString, CString)>, W
             _ => Err(WorkerError::Load {
                 host: host.to_owned(),
                 message: format!("its {kind} `{name}` holds a NUL byte"),
+                thrown: None,
             }),
         })
         .collect()

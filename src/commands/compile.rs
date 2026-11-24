@@ -993,35 +993,33 @@ fn in_hosts_folder(root: &Path, folder: &Path, compiled: &Path) -> Option<PathBu
     compiled.strip_prefix(root.join(unit::COMPILED_FOLDER)).ok().map(|relative| folder.join(relative))
 }
 
-/// What the extension hosts of a project load as their workers start, before the compile reads what they register, as
-/// [`hosts_reach`] finds it: files of the project's database, and the folder of each enabled host by its name, from the
-/// project's root and ending in `/`.
+/// What the extension hosts of the project at `root` load as their workers start, before the compile reads what they
+/// register, as [`hosts_reach`] finds it: files of the project's database, and the folder of each enabled host by its
+/// name, from the project's root and ending in `/`.
 struct HostsReach {
+    root: PathBuf,
     files: HashSet<FileId>,
     folders: BTreeMap<String, String>,
 }
 
 impl HostsReach {
     /// `error`, the hosts' failure to start, as the error of the class a host loaded from outside this reach when the
-    /// engine refused that class's file, of `database`, as not compiled for the hosts or out of date: the compile
-    /// writes it for them only once they started. Any other error stays.
+    /// engine refused that class's file, of `database`: the `CompileError` a host's file threw in that file, which the
+    /// compile writes for the hosts only once they started. Any other error stays.
     fn refusing(&self, database: &Database<'_>, error: PluginError) -> PluginError {
         let PluginError::External(external) = &error else {
             return error;
         };
-        let ExternalAnalyzerError::Worker(WorkerError::Load { host, message }) = external.as_ref() else {
+        let ExternalAnalyzerError::Worker(WorkerError::Load { host, thrown: Some(thrown), .. }) = external.as_ref()
+        else {
             return error;
         };
-        let Some(folder) = self.folders.get(host) else {
+        let Some(folder) = self.folders.get(host).filter(|_| thrown.class == "CompileError") else {
             return error;
         };
-        let outside = database.files().find(|file| {
-            let name = String::from_utf8_lossy(&file.name);
-            is_lowered(file)
-                && !self.files.contains(&file.id)
-                && (message.contains(&format!("{name} isn't compiled for the extension hosts yet"))
-                    || message.contains(&format!("{name} is out of date (")))
-        });
+        let refused = File::logical_name(&self.root, &thrown.file);
+        let outside =
+            database.files().find(|file| *file.name == *refused && is_lowered(file) && !self.files.contains(&file.id));
         let Some(outside) = outside else {
             return error;
         };
@@ -1038,6 +1036,7 @@ impl HostsReach {
                 "`{class}` isn't in extension host `{host}`'s folder `{folder}` or named from it, so it isn't compiled \
                  before the host starts. Move it under `{folder}` or name it from the host's code."
             ),
+            thrown: Some(thrown.clone()),
         })))
     }
 }
@@ -1143,7 +1142,7 @@ fn hosts_reach(
         }
     }
 
-    HostsReach { files: reach, folders }
+    HostsReach { root: root.to_path_buf(), files: reach, folders }
 }
 
 /// Whether the hosts' `folder` of the project at `root`, whose source files are `sources`, holds for each PHP# file of

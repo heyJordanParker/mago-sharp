@@ -61,8 +61,9 @@ pub enum WorkerError {
     Start(mago_engine::EngineError),
     /// mago could not write its own SDK, which every interpreter loads, to its cache.
     Sdk(io::Error),
-    /// A host's file failed while an interpreter ran it.
-    Load { host: String, message: String },
+    /// A host's file failed while an interpreter ran it, with the exception it threw when it threw one, whose file is
+    /// the PHP# file the engine refused to load when the engine refused one.
+    Load { host: String, message: String, thrown: Option<Box<mago_engine::Thrown>> },
     /// Two hosts declare the class-like `class`, which PHP declares once.
     Clash { class: String, first: String, second: String },
     /// Two hosts set the environment variable `name` to different values.
@@ -86,7 +87,7 @@ impl std::fmt::Display for WorkerError {
         match self {
             Self::Start(error) => write!(formatter, "the extension hosts could not start: {error}"),
             Self::Sdk(error) => write!(formatter, "mago could not write its extension SDK to its cache: {error}"),
-            Self::Load { host, message } => write!(formatter, "extension host `{host}` could not load: {message}"),
+            Self::Load { host, message, .. } => write!(formatter, "extension host `{host}` could not load: {message}"),
             Self::Clash { class, first, second } => write!(
                 formatter,
                 "extension hosts `{first}` and `{second}` both declare `{class}`, which PHP declares once: give one of them another name"

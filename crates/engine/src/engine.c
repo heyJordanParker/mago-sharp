@@ -181,19 +181,18 @@ void engine_thread_end(void)
 	}
 }
 
+/* Writes the exception the engine holds into `result` as the list of its class, message, file and line. */
 static void engine_describe_exception(zval *result)
 {
 	zend_object *exception = EG(exception);
-	zend_string *message = zval_get_string(
-		zend_read_property_ex(exception->ce, exception, ZSTR_KNOWN(ZEND_STR_MESSAGE), 1, &EG(uninitialized_zval)));
-	zend_string *file = zval_get_string(
-		zend_read_property_ex(exception->ce, exception, ZSTR_KNOWN(ZEND_STR_FILE), 1, &EG(uninitialized_zval)));
-	zend_long line = zval_get_long(
-		zend_read_property_ex(exception->ce, exception, ZSTR_KNOWN(ZEND_STR_LINE), 1, &EG(uninitialized_zval)));
-	ZVAL_STR(result, zend_strpprintf(
-		0, "%s: %s in %s:" ZEND_LONG_FMT, ZSTR_VAL(exception->ce->name), ZSTR_VAL(message), ZSTR_VAL(file), line));
-	zend_string_release(message);
-	zend_string_release(file);
+	array_init_size(result, 4);
+	add_next_index_str(result, zend_string_copy(exception->ce->name));
+	add_next_index_str(result, zval_get_string(
+		zend_read_property_ex(exception->ce, exception, ZSTR_KNOWN(ZEND_STR_MESSAGE), 1, &EG(uninitialized_zval))));
+	add_next_index_str(result, zval_get_string(
+		zend_read_property_ex(exception->ce, exception, ZSTR_KNOWN(ZEND_STR_FILE), 1, &EG(uninitialized_zval))));
+	add_next_index_long(result, zval_get_long(
+		zend_read_property_ex(exception->ce, exception, ZSTR_KNOWN(ZEND_STR_LINE), 1, &EG(uninitialized_zval))));
 	zend_clear_exception();
 }
 
