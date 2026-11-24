@@ -495,6 +495,54 @@ fn a_law_whose_module_lean_rejected_is_checked_again_by_the_next_compile() {
     assert!(compiled(root, "app/Shared/Money.sharp").exists());
 }
 
+/// A law Lean judged unproven is an error of its program, which `.sharp/proofs.json` keeps: the compile keeps its record
+/// too, so a compile with every input as it was refuses the law again from the record, without compiling.
+#[test]
+fn a_compile_after_one_that_left_a_law_unproven_with_nothing_changed_refuses_it_again_without_compiling() {
+    let broken =
+        LAWFUL_MONEY.replace("this.amount + other.amount, this.currency", "this.amount + other.amount, other.currency");
+    let directory = library_project(&[("app/Shared/Money.sharp", &broken)]);
+    let root = directory.path();
+    let refused = compile_lines(root);
+    let unproven = "app/Shared/Money.sharp:8:5:error - law-unproven: law addKeepsCurrency is not proven";
+    assert!(printed(&refused).contains(unproven), "{}", printed(&refused));
+    let recorded = || std::fs::metadata(root.join(".sharp/inputs.json")).map(|record| record.modified().unwrap());
+    let record = recorded().expect("the compile kept its record");
+
+    let again = compile_lines(root);
+
+    assert_eq!(again.status.code(), Some(1), "{}", printed(&again));
+    assert_eq!(again.stdout, refused.stdout);
+    assert_eq!(recorded().ok(), Some(record), "the compile kept the record and compiled nothing");
+}
+
+/// A law checker that couldn't be installed, and a generated module Lean rejected, depend on what no record holds, so a
+/// compile that ends a law either way keeps no record: the next compile, with nothing changed, checks the law again and
+/// proves it.
+#[cfg(unix)]
+#[test]
+fn a_compile_after_one_that_could_not_judge_a_law_checks_it_again_with_nothing_changed() {
+    let checks_again = |first: &dyn Fn(&Path) -> std::process::Output, why: &str| {
+        let directory = library_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+        let root = directory.path();
+        let refused = first(root);
+        assert!(printed(&refused).contains(why), "{why}: {}", printed(&refused));
+
+        let output = compile(root);
+
+        assert!(output.status.success(), "{why}: the law was not checked again: {}", printed(&output));
+        assert!(compiled(root, "app/Shared/Money.sharp").exists(), "{why}");
+    };
+    let lake = tempfile::tempdir().unwrap();
+    let rejecting = cache_with_runner(lake.path(), "perl -pe 's/^open Sharp$/open Sharq/' | \"$real\" \"$@\"");
+
+    checks_again(
+        &|root| process::output(command(root, "never").env("XDG_CACHE_HOME", &rejecting)).unwrap(),
+        "the checker translated the code it reaches wrongly",
+    );
+    checks_again(&compile_without_lean, "law-checker-unavailable");
+}
+
 #[test]
 fn compile_proves_a_law_an_edit_adds_from_the_sharp_file_alone() {
     let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);

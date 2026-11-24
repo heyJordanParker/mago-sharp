@@ -124,6 +124,17 @@ pub const PROOFS: &str = "proofs.json";
 /// 20-law bench ran out of time at 35,000 and proved at 50,000, and each of the other 10 proved at 2,000.
 const HEARTBEATS: u32 = 200_000;
 
+/// What [`Lean::check`] found.
+#[derive(Debug)]
+pub struct Checked {
+    /// The issues that refuse each file whose law is not proven.
+    pub issues: HashMap<FileId, IssueCollection>,
+    /// Whether [`PROOFS`] keeps the outcome of each law the check gave one, so a compile with every input as it was gets
+    /// each of them again. It doesn't keep a refusal by a generated module, nor that no law checker could be installed,
+    /// which depend on what no record holds.
+    pub outcomes_kept: bool,
+}
+
 /// The Lean step of one workspace.
 #[derive(Debug)]
 pub struct Lean {
@@ -245,8 +256,8 @@ impl Lean {
         Lean { root: root.to_path_buf(), threads, environment: environment.clone() }
     }
 
-    /// Proves the laws of `translations` and returns the issues that refuse each file whose law is not proven.
-    /// `translations` hold each file whose laws a compile checks, and each file those laws reach, as `reach` gives
+    /// Proves the laws of `translations` and returns the issues that refuse each file whose law is not proven, and
+    /// whether [`PROOFS`] keeps each outcome, as [`Checked`] holds them. `translations` hold each file whose laws a compile checks, and each file those laws reach, as `reach` gives
     /// them, but the files whose errors refuse them. `errored` holds each file the analysis reported an error in: a law
     /// that reaches a declaration no translation holds is refused for the errors of its file when that file is in it,
     /// and else as the checker's bug, as a lowering that panicked leaves its file untranslated.
@@ -267,7 +278,7 @@ impl Lean {
         translations: Vec<Translation>,
         reach: &Reach,
         errored: &HashSet<FileId>,
-    ) -> io::Result<HashMap<FileId, IssueCollection>> {
+    ) -> io::Result<Checked> {
         let package = Package::new(&self.root);
         let record_path = package.directory.with_file_name(PROOFS);
         let mut issues: HashMap<FileId, IssueCollection> = HashMap::default();
@@ -284,7 +295,7 @@ impl Lean {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => {
                     Err(DatabaseError::io(IOAction::DeleteFile, &record_path, error).into())
                 }
-                _ => Ok(issues),
+                _ => Ok(Checked { issues, outcomes_kept: true }),
             };
         }
 
@@ -349,7 +360,7 @@ impl Lean {
         if work.is_empty() {
             record.write(&record_path)?;
 
-            return Ok(issues);
+            return Ok(Checked { issues, outcomes_kept: true });
         }
 
         let writing = Instant::now();
@@ -372,7 +383,7 @@ impl Lean {
                     }
                     record.write(&record_path)?;
 
-                    return Ok(issues);
+                    return Ok(Checked { issues, outcomes_kept: false });
                 }
             },
         };
@@ -402,11 +413,13 @@ impl Lean {
             modules: modules.iter().map(|module| (module.name.as_str(), module)).collect(),
             scripts: &scripts,
         };
+        let mut outcomes_kept = true;
         for (translation, law, ended) in proofs.prove(work)? {
             let judgment = match ended {
                 Ok(judgment) => judgment,
                 Err((module, refusal)) => {
                     report(&mut issues, translation, issues::generated_module_refused(law, &module, &refusal));
+                    outcomes_kept = false;
                     continue;
                 }
             };
@@ -426,7 +439,7 @@ impl Lean {
         }
         record.write(&record_path)?;
 
-        Ok(issues)
+        Ok(Checked { issues, outcomes_kept })
     }
 }
 

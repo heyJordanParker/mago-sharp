@@ -35,7 +35,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use mago_allocator::LocalArena;
-use mago_analyzer::code::IssueCode;
 use mago_analyzer::error::AnalysisError;
 use mago_analyzer::external::ExternalAnalyzerError;
 use mago_analyzer::external::ExternalAnalyzerHandle;
@@ -1776,6 +1775,10 @@ fn compiled(
     let hidden = Hidden::new(configuration)?;
     let read_database = server.database().read_only();
     let lean = Lean::new(&root, configuration.threads, &configuration.environment);
+    // A law Lean judged is an error of its program, which `PROOFS` keeps, as the record keeps every other refusal. A law
+    // checker that couldn't be installed, or a law a generated module refused, depends on what no record holds, so such a
+    // compile keeps no record, and the next one checks the law again.
+    let mut outcomes_kept = true;
     let stamped = Mutex::new(Vec::new());
     let compiled_files_path = compiled_folder.join(COMPILED_FILES);
     let last = CompiledFiles::decode(
@@ -1814,7 +1817,12 @@ fn compiled(
         Folder { last: &last, compiled: &compiled, intact: &mut intact, write: &write },
         hosts_folder,
         recording_stamp(&root, &read_database, &stamped),
-        |translations, reach, errored| lean.check(translations, reach, errored),
+        |translations, reach, errored| {
+            lean.check(translations, reach, errored).map(|checked| {
+                outcomes_kept = checked.outcomes_kept;
+                checked.issues
+            })
+        },
         &library,
         |issues| hidden.shown(issues, &read_database),
     );
@@ -1977,7 +1985,7 @@ fn compiled(
     }
     let failed = !errors.is_empty() || !refusals.is_empty();
     let outcome = Outcome::new(refused, database, errors, summary, failed);
-    let record = record.filter(|_| logger::warnings() == warnings && !outcome.refused_by_law_checker());
+    let record = record.filter(|_| logger::warnings() == warnings && outcomes_kept);
     let listed = inputs.iter().map(|input| recorded(&input.path, Some(input)));
     if let (Some((hosts, outputs, _, record)), Some(compiled), Some(stamped)) = (hosts, hosts_compiled, hosts_stamped) {
         let folder = &hosts.folder;
@@ -2093,15 +2101,6 @@ impl Outcome {
         self.failed = true;
 
         self
-    }
-
-    /// Whether the law checker refused a file, as one it could not install or a proof it stopped at its deadline. What
-    /// it did depends on what no record holds, the checker's install and the machine's load, so a compile with such a
-    /// refusal keeps no record, and the next one runs the checker again.
-    fn refused_by_law_checker(&self) -> bool {
-        let law_checker = [IssueCode::LawCheckerUnavailable.as_str(), IssueCode::LawUnproven.as_str()];
-
-        self.issues.iter().any(|issue| issue.code.as_deref().is_some_and(|code| law_checker.contains(&code)))
     }
 
     /// The files the issues point into, for the report of a compile with nothing to do: each file in the project of
