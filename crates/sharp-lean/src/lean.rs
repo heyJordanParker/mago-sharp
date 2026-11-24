@@ -77,63 +77,26 @@ const PROOF_STEPS: &str = "Sharp.Lean.Proof";
 /// The module of the runtime library that states a law, all a theorem in the [`Form::Steps`] form needs.
 const LAW_STATEMENT: &str = "Sharp.Lean.Law";
 
-/// The lemmas the fixed steps of a case rewrite with, beside the definitions the law uses: an `if` on a condition that
-/// decides, the monad's steps, a law's claim and each choice it makes, a fact about the values a step binds, which a law's `when` and a body's
-/// `sharp_call%` state and `Sharp/Lean/Proof.lean`'s search reads one by one too, a goal over a value one of several
-/// branches gives, which holds when it holds for each, a case no value reaches, the int operations and comparisons,
-/// `b ≤ a` as `¬ a < b` on an `int` and on the exact `Int` a condition computes, so a fact that one comparison states
-/// decides a test that the other writes, an int literal's value, and a value a nullable side holds or lacks.
-const STEP_LEMMAS: &[&str] = &[
-    "↓reduceIte",
-    "bind_assoc",
-    "pure_bind",
-    "holds_bind",
-    "holds_pure",
-    "holds_ite",
-    "pure_inj",
-    "bind_eq_pure",
-    "map_eq_pure",
-    "ite_eq_pure",
-    "throw_eq_pure",
-    "or_imp",
-    "forall_and",
-    "forall_exists_index",
-    "and_imp",
-    "forall_eq'",
-    "implies_true",
-    "false_implies",
-    "← Int64.not_lt",
-    "← Int.not_lt",
-    "bne_iff_ne",
-    "ne_eq",
-    "reduceCtorEq",
-    "int.add_eq_pure",
-    "int.sub_eq_pure",
-    "int.toInt_max",
-    "beq_iff_eq",
-    "beq_self_eq_true",
-    "decide_eq_true_eq",
-    "Bool.and_eq_true",
-    "Int64.le_iff_toInt_le",
-    "Int64.lt_iff_toInt_lt",
-    "Int64.toInt_zero",
-    "Int64.reduceToInt",
-    "Option.isSome_some",
-    "Option.getD_some",
-];
+/// The rewrites of the fixed steps' first two passes, beside the definitions the law uses: `sharp_step`, the simp set of
+/// `Sharp/Lean/Steps.lean` whose lemmas `Sharp/Lean/Law.lean` tags, so the library builds its index once, and the
+/// simprocs that decide an `if`'s condition and a case no value reaches. The set holds the monad's steps, a law's claim
+/// and each choice it makes, a fact about the values a step binds, which a law's `when` and a body's `sharp_call%` state
+/// and `Sharp/Lean/Proof.lean`'s search reads one by one too, a goal over a value one of several branches gives, which
+/// holds when it holds for each, the facts a case holds, split one by one, the comparisons, `b ≤ a` as `¬ a < b` on an
+/// `int` and on the exact `Int` a condition computes, so a fact that one comparison states decides a test that the other
+/// writes, and a value a nullable side holds or lacks. An int step stays folded, so two steps that compute from the same
+/// values stay one term, which `simp_all` reads as one value, as a law that runs a method twice needs, as `at.plus(d)` in
+/// a claim and in a method it calls.
+const MERGING_REWRITES: &[&str] = &["sharp_step", "↓reduceIte", "reduceCtorEq"];
 
-/// The lemmas of [`STEP_LEMMAS`] that read an int step as facts about the `Int` it gives. The fixed steps first rewrite
-/// without them, so two steps that compute from the same values stay one term, which `simp_all` reads as one value, as
-/// a law that runs a method twice needs, as `at.plus(d)` in a claim and in a method it calls.
-const VALUE_LEMMAS: &[&str] = &[
-    "int.add_eq_pure",
-    "int.sub_eq_pure",
-    "int.toInt_max",
-    "Int64.le_iff_toInt_le",
-    "Int64.lt_iff_toInt_lt",
-    "Int64.toInt_zero",
-    "Int64.reduceToInt",
-];
+/// The rewrites of the fixed steps' third pass: `sharp_value`, the lemmas of `sharp_step` but the ones that split a
+/// case's facts, which would read each fact again for each `Int` the pass gives, and the ones that read an int step as
+/// the `Int` it gives, and the simprocs of [`MERGING_REWRITES`] and of an int literal's value.
+const VALUE_REWRITES: &[&str] = &["sharp_value", "↓reduceIte", "reduceCtorEq", "Int64.reduceToInt"];
+
+/// The rewrites of the fixed steps' last rewrite of a goal their passes leave open: `sharp_full`, every lemma of the
+/// other two passes, and their simprocs.
+const FULL_REWRITES: &[&str] = &["sharp_full", "↓reduceIte", "reduceCtorEq", "Int64.reduceToInt"];
 
 /// The lemmas that read a law's `when` as one fact for each step it computes, in each case of each branch it takes,
 /// as `holds_bind` reads the law's claim, so the claim's own steps are those facts.
@@ -527,14 +490,14 @@ fn proof_key(
 }
 
 /// The theorem of `law` with its fixed steps, which close it with the definitions its statement uses: a law without a
-/// body closed by [`steps`] with [`STEP_LEMMAS`], and a law with one with each case closed by them with the statement
-/// of each law whose fact a case can hold too. An invariant of a machine has none.
+/// body closed by [`steps`], and a law with one with each case closed by them with the statement of each law whose fact
+/// a case can hold too. An invariant of a machine has none.
 /// A law without a body that states a `when`, which its one case holds as its first condition, first reads it with
 /// [`CONDITION_LEMMAS`] and the program's own definitions it uses, then closes each case of each branch it takes.
 fn scripted(law: &Law, program: &Program<'_>) -> Option<String> {
     let (plain, recursive) = program.definitions(&law.statement);
     if let Some(opening) = &law.proof.opening {
-        let steps = steps(STEP_LEMMAS, &plain, &recursive);
+        let steps = steps(&[], &plain, &recursive);
         if law.proof.cases.first().is_none_or(|case| case.conditions.is_empty()) {
             return Some(format!("{opening}{steps}"));
         }
@@ -548,40 +511,41 @@ fn scripted(law: &Law, program: &Program<'_>) -> Option<String> {
     if law.proof.closes.is_empty() {
         return None;
     }
-    let lemmas: Vec<&str> = STEP_LEMMAS
-        .iter()
-        .copied()
-        .chain(std::iter::once(law.statement.as_str()))
+    let statements: Vec<&str> = std::iter::once(law.statement.as_str())
         .chain(law.proof.laws.iter().map(|(statement, ..)| statement.as_str()))
         .collect();
 
-    let closed = format!("({})", steps(&lemmas, &plain, &recursive));
+    let closed = format!("({})", steps(&statements, &plain, &recursive));
 
     Some(law.proof.closes.iter().fold(law.proof.text.clone(), |text, close| text.replace(close.as_str(), &closed)))
 }
 
-/// The fixed steps that close a case: `simp_all` with `lemmas` and the definitions `plain` as rewrites, first without
-/// [`VALUE_LEMMAS`] and with the program's own definitions alone, which rewrites the goal with the facts that the
-/// standard library's calls give, then without [`VALUE_LEMMAS`] and with every definition, then with them, then
-/// `omega` or `decide` on each goal it leaves, or that last rewrite again once each value a fact names is in its place,
-/// as a case's value is where a fact names the constructor that built it. With `recursive` definitions, the steps first
-/// unfold each of them once, as a recursion on a value the case does not know needs, and else rewrite with them too,
-/// until each recursion ends, as one on values the law writes out needs.
-fn steps(lemmas: &[&str], plain: &[&str], recursive: &[&str]) -> String {
+/// The fixed steps that close a case: `sharp_simp_all` with the `statements` of the laws a case holds and the definitions
+/// `plain` as rewrites, first with [`MERGING_REWRITES`] and the program's own definitions alone, which rewrites the goal
+/// with the facts that the standard library's calls give, then with [`MERGING_REWRITES`] and every definition, then with
+/// [`VALUE_REWRITES`], then `omega` or `decide` on each goal it leaves, or a rewrite with [`FULL_REWRITES`] once each
+/// value a fact names is in its place, as a case's value is where a fact names the constructor that built it. With
+/// `recursive` definitions, the steps first unfold each of them once, as a recursion on a value the case does not know
+/// needs, and else rewrite with them too, until each recursion ends, as one on values the law writes out needs.
+fn steps(statements: &[&str], plain: &[&str], recursive: &[&str]) -> String {
     let closed = |definitions: &[&[&str]]| {
-        let pass = |lemmas: &[&str], definitions: &[&str]| {
-            let rewrites = [lemmas, definitions].concat();
-            format!("(try simp_all (config := {{ decide := true }}) only [{}])", rewrites.join(", "))
+        let pass = |rewrites: &[&str], definitions: &[&str]| {
+            let rewrites = [rewrites, statements, definitions].concat();
+            format!("(try sharp_simp_all (config := {{ decide := true }}) only [{}])", rewrites.join(", "))
         };
         let reached: Vec<&str> = definitions.concat();
-        let merging: Vec<&str> = lemmas.iter().copied().filter(|lemma| !VALUE_LEMMAS.contains(lemma)).collect();
         let own: Vec<&str> = own(&reached).collect();
-        let full = pass(lemmas, &reached);
         let close = format!(
-            "all_goals (intros; and_intros; all_goals (intros; subst_vars; first | rfl | omega | decide | ({full}; done)))"
+            "all_goals (intros; and_intros; all_goals (intros; subst_vars; first | rfl | omega | decide | ({}; done)))",
+            pass(FULL_REWRITES, &reached)
         );
 
-        format!("({}; {}; {full}; {close}; done)", pass(&merging, &own), pass(&merging, &reached))
+        format!(
+            "({}; {}; {}; {close}; done)",
+            pass(MERGING_REWRITES, &own),
+            pass(MERGING_REWRITES, &reached),
+            pass(VALUE_REWRITES, &reached)
+        )
     };
     let rewritten = closed(&[plain, recursive]);
     if recursive.is_empty() {

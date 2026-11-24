@@ -32,7 +32,7 @@ use sha2::Sha256;
 pub(crate) const TOOLCHAIN: &str = include_str!("../lean/lean-toolchain");
 
 /// The library's Lake package, as `crates/sharp-lean/lean/` holds it.
-const PACKAGE: [(&str, &str); 9] = [
+const PACKAGE: [(&str, &str); 10] = [
     ("lakefile.toml", include_str!("../lean/lakefile.toml")),
     ("lean-toolchain", TOOLCHAIN),
     ("Sharp/Lean/Int.lean", include_str!("../lean/Sharp/Lean/Int.lean")),
@@ -40,6 +40,7 @@ const PACKAGE: [(&str, &str); 9] = [
     ("Sharp/Lean/Law.lean", include_str!("../lean/Sharp/Lean/Law.lean")),
     ("Sharp/Lean/Map.lean", include_str!("../lean/Sharp/Lean/Map.lean")),
     ("Sharp/Lean/Proof.lean", include_str!("../lean/Sharp/Lean/Proof.lean")),
+    ("Sharp/Lean/Steps.lean", include_str!("../lean/Sharp/Lean/Steps.lean")),
     ("Sharp/Lean/String.lean", include_str!("../lean/Sharp/Lean/String.lean")),
     ("Sharp/Lean/Runner.lean", include_str!("../lean/Sharp/Lean/Runner.lean")),
 ];

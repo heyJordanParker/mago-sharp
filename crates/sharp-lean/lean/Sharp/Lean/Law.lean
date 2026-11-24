@@ -1,4 +1,5 @@
 import Sharp.Lean.Int
+import Sharp.Lean.Steps
 
 /-!
 The statement of a PHP# law.
@@ -8,8 +9,9 @@ it, so it does not break the law: `a.add(b)` throws `ArithmeticError` on overflo
 
 The law's claim and its condition compute ints exactly (decision 057).
 
-A law's statement is the one definition of the project's code whose type is a `Prop`, so this module imports nothing of
-Lean's own beyond `Init`, and a runner that checks laws imports no more of Lean than they reach.
+A law's statement is the one definition of the project's code whose type is a `Prop`. This module imports Lean's own
+modules beyond `Init` only for `Sharp/Lean/Steps.lean`: its simp sets, which this module's end tags the fixed steps'
+lemmas with, and `sharp_simp_all`, which the fixed steps run.
 -/
 
 namespace Sharp
@@ -158,6 +160,20 @@ def broken (claim : M Bool) : Option String :=
   if Machine.breaks claim then some "" else none
 
 end Law
+
+/-! The lemmas the fixed steps rewrite with, each in the simp set of each pass that rewrites with it, as `src/lean.rs`
+names the sets. -/
+
+attribute [sharp_step, sharp_value, sharp_full] bind_assoc pure_bind holds_bind holds_pure holds_ite pure_inj
+  bind_eq_pure map_eq_pure ite_eq_pure throw_eq_pure bne_iff_ne ne_eq beq_iff_eq beq_self_eq_true decide_eq_true_eq
+  Bool.and_eq_true Option.isSome_some Option.getD_some
+
+attribute [sharp_step ←, sharp_value ←, sharp_full ←] Int64.not_lt Int.not_lt
+
+attribute [sharp_step, sharp_full] or_imp forall_and forall_exists_index and_imp forall_eq' implies_true false_implies
+
+attribute [sharp_value, sharp_full] int.add_eq_pure int.sub_eq_pure int.toInt_max Int64.le_iff_toInt_le
+  Int64.lt_iff_toInt_lt Int64.toInt_zero
 
 end Sharp
 
