@@ -2281,10 +2281,10 @@ mod tests {
     use mago_syntax::settings::ParserSettings;
 
     use super::*;
+    use crate::service::PRELUDE;
 
     static PLUGIN_REGISTRY: LazyLock<Arc<PluginRegistry>> =
         LazyLock::new(|| Arc::new(PluginRegistry::with_library_providers()));
-    static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 
     fn prelude() -> (CodebaseMetadata, SymbolReferences) {
         let Prelude { metadata, symbol_references, .. } = PRELUDE.clone();

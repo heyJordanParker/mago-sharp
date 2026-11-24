@@ -41,6 +41,9 @@ xxhash-rust = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 mago-sharp-lean = { workspace = true }
 
-[dev-dependencies]
+[build-dependencies]
 mago-prelude = { workspace = true, features = ["build"] }
+
+[dev-dependencies]
+mago-prelude = { workspace = true, features = ["serde"] }
 tempfile = { workspace = true }

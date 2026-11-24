@@ -274,6 +274,7 @@ mod tests {
     use mago_prelude::Prelude;
 
     use super::*;
+    use crate::service::PRELUDE;
 
     /// The analysis of one file, which the playground runs: the file is the whole project, so spec section 5's
     /// too-wide warning reads its uses alone. A `public` member nothing outside its namespace uses warns, an `internal` or `private` one
@@ -282,7 +283,7 @@ mod tests {
     #[test]
     fn oneshot_warns_on_a_public_member_nothing_outside_its_namespace_uses() {
         let source = "namespace App.Shop;\n\npublic class Cart\n{\n    public int total() => this.count();\n\n    internal int count() => this.spare();\n\n    private int spare() => 2;\n}\n";
-        let Prelude { mut database, metadata, symbol_references } = Prelude::build();
+        let Prelude { mut database, metadata, symbol_references } = PRELUDE.clone();
         let mut file = File::ephemeral(Cow::Borrowed(b"src/App/Shop/Cart.sharp"), Cow::Borrowed(source.as_bytes()));
         // The warning runs in a project, whose files the loader marks from its composer.json.
         file.is_project = true;

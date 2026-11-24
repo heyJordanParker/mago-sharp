@@ -39,7 +39,7 @@ xxhash-rust = { workspace = true }
 [dev-dependencies]
 foldhash = { workspace = true }
 indoc = { workspace = true }
-mago-prelude = { workspace = true, features = ["build"] }
+mago-prelude = { workspace = true, features = ["serde"] }
 mago-semantics = { workspace = true }
 regex = { workspace = true }
 stacker = { workspace = true }
@@ -47,3 +47,4 @@ tempfile = { workspace = true }
 
 [build-dependencies]
 cbindgen = { workspace = true }
+mago-prelude = { workspace = true, features = ["build"] }

@@ -7,7 +7,7 @@
 //! A refusal, a parse error or a semantic issue panics, so a count never measures a front end that failed.
 //! `bench.sh` beside this crate generates the classes and runs this example on them.
 
-#![allow(clippy::print_stdout, clippy::expect_used)]
+#![allow(clippy::print_stdout, clippy::expect_used, clippy::large_include_file)]
 
 use std::borrow::Cow;
 use std::env;
@@ -66,7 +66,9 @@ fn main() {
             continue;
         }
 
-        let Prelude { mut metadata, mut symbol_references, .. } = Prelude::build();
+        let Prelude { mut metadata, mut symbol_references, .. } =
+            Prelude::decode(include_bytes!(concat!(env!("OUT_DIR"), "/prelude.bin")))
+                .expect("build.rs writes a prelude that decodes");
         let settings = Settings::default();
         metadata.extend(scan_program(&arena, &file, program, &names, settings.version));
         populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());

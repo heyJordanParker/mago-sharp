@@ -11,9 +11,12 @@ use cbindgen::DocumentationStyle;
 use cbindgen::ExportConfig;
 use cbindgen::Language;
 use cbindgen::Style;
+use mago_prelude::Prelude;
 
 /// Writes the bridge's C header, `sharp_unit.h`, to `OUT_DIR`, and exports that folder to `ext/sharp` as
-/// `DEP_SHARP_BRIDGE_INCLUDE`. The header holds the compiled file's layout and its constants.
+/// `DEP_SHARP_BRIDGE_INCLUDE`. The header holds the compiled file's layout and its constants. It writes the prelude
+/// `mago`'s build script writes there too, so the bridge's tests and examples decode the prelude a user's `mago`
+/// decodes. The library itself embeds nothing.
 fn main() {
     let crate_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
@@ -44,7 +47,9 @@ fn main() {
         .expect("the bridge ABI generates a C header")
         .write_to_file(out_dir.join("sharp_unit.h"));
 
-    for source in [&abi, &unit, &kinds] {
+    Prelude::write(&out_dir.join("prelude.bin")).expect("the prelude builds and writes to OUT_DIR");
+
+    for source in [&abi, &unit, &kinds, &crate_dir.join("../prelude/assets")] {
         println!("cargo:rerun-if-changed={}", source.display());
     }
     println!("cargo:include={}", out_dir.display());

@@ -34,9 +34,12 @@ serde = [
     "dep:serde",
 ]
 
+[build-dependencies]
+mago-prelude = { workspace = true, features = ["build"] }
+
 [dev-dependencies]
 mago-syntax = { workspace = true }
 mago-php-version = { workspace = true }
-mago-prelude = { workspace = true, features = ["build"] }
+mago-prelude = { workspace = true, features = ["serde"] }
 indoc = { workspace = true }
 toml = { workspace = true }

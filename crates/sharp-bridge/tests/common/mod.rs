@@ -108,7 +108,12 @@ pub const FLOAT: (&str, &str) = (
 /// a file whose nearest `composer.json` names the package.
 const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";
 
-pub static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
+/// The prelude a user's `mago` decodes, which build.rs writes, so every test checks against it.
+#[allow(clippy::large_include_file)]
+pub static PRELUDE: LazyLock<Prelude> = LazyLock::new(|| {
+    Prelude::decode(include_bytes!(concat!(env!("OUT_DIR"), "/prelude.bin")))
+        .expect("build.rs writes a prelude that decodes")
+});
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
 
 /// The members of a `List`, a `Map`, a `Set` and an `Iterable`, whose inline forms every project's lowering inlines, as

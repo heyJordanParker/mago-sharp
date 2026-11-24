@@ -27,9 +27,12 @@ mago-text-edit = { workspace = true }
 mago-word = { workspace = true }
 foldhash = { workspace = true }
 
+[build-dependencies]
+mago-prelude = { workspace = true, features = ["build"] }
+
 [dev-dependencies]
 libtest-mimic = { workspace = true }
-mago-prelude = { workspace = true, features = ["build"] }
+mago-prelude = { workspace = true, features = ["serde"] }
 mago-reporting = { workspace = true }
 mago-server = { workspace = true }
 

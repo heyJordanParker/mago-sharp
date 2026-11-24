@@ -60,7 +60,11 @@ use mago_syntax::cst::Statement;
 use mago_syntax::parser::parse_file;
 use mago_syntax::settings::ParserSettings;
 
-static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
+#[allow(clippy::large_include_file)]
+static PRELUDE: LazyLock<Prelude> = LazyLock::new(|| {
+    Prelude::decode(include_bytes!(concat!(env!("OUT_DIR"), "/prelude.bin")))
+        .expect("build.rs writes a prelude that decodes")
+});
 
 fn prelude() -> (CodebaseMetadata, SymbolReferences) {
     let Prelude { metadata, symbol_references, .. } = PRELUDE.clone();

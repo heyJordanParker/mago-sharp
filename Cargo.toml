@@ -419,3 +419,18 @@ opt-level = 0
 lto = 'off'
 panic = 'unwind'
 incremental = false
+
+# The crates the prelude's decode runs in build optimized in every profile. A test process decodes the 7.6 MB prelude
+# build.rs writes, which at opt-level 0 took 96% of one fast analyzer test process's 0.43 CPU-seconds, and 0.089 with
+# these four. Serde's generic decoding of the prelude's types compiles into mago-prelude, which instantiates it.
+[profile.dev.package.mago-prelude]
+opt-level = 3
+
+[profile.dev.package.bincode]
+opt-level = 3
+
+[profile.dev.package.serde]
+opt-level = 3
+
+[profile.dev.package.serde_core]
+opt-level = 3

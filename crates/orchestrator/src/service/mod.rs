@@ -44,6 +44,14 @@ use mago_syntax::dialect::Dialect;
 
 use crate::error::OrchestratorError;
 
+/// The prelude a user's `mago` decodes, which build.rs writes, so every test analyzes against it.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::large_include_file)]
+static PRELUDE: std::sync::LazyLock<mago_prelude::Prelude> = std::sync::LazyLock::new(|| {
+    mago_prelude::Prelude::decode(include_bytes!(concat!(env!("OUT_DIR"), "/prelude.bin")))
+        .expect("build.rs writes a prelude that decodes")
+});
+
 /// Refuses a PHP# file, which only the analyzer reads yet, and which no tool may change.
 ///
 /// # Errors

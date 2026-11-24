@@ -33,7 +33,11 @@ use mago_prelude::Prelude;
 use mago_syntax::parser::parse_file;
 use mago_word::WordSet;
 
-static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
+#[allow(clippy::large_include_file)]
+static PRELUDE: LazyLock<Prelude> = LazyLock::new(|| {
+    Prelude::decode(include_bytes!(concat!(env!("OUT_DIR"), "/prelude.bin")))
+        .expect("build.rs writes a prelude that decodes")
+});
 
 /// Creates settings with a deny-all rule for the App\Module\ namespace.
 /// This is needed because the guard now skips when there's no perimeter config.
