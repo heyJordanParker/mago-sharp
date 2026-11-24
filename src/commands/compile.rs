@@ -1045,7 +1045,9 @@ impl HostsReach {
 /// `root`: the standard library's files, each enabled host's file and every PHP# file under the folder that holds it, as
 /// a package is its folder, every file of the project those files name, and every file those name in turn. A file's
 /// names are those its scan names, every name its code resolves and each class-like a `@var` tag of its bodies names,
-/// as an analysis's scan finds the class-likes a file reaches.
+/// as an analysis's scan finds the class-likes a file reaches. A name reaches the file its namespace's folder holds
+/// under its last part, as a type of PHP# and a class Composer loads by PSR-4 each live in one, so the walk parses only
+/// the files it reaches, and the standard library, which names only itself, not at all.
 fn hosts_reach(
     configuration: &Configuration,
     root: &Path,
@@ -1053,15 +1055,25 @@ fn hosts_reach(
     database: &Database<'_>,
 ) -> HostsReach {
     let parser = configuration.parser.to_settings();
-    let classes = NamespaceClasses::new(database.files().filter_map(|file| match &file.folder_namespace {
-        Some(FolderNamespace::Namespace(namespace)) if Dialect::of(&file).is_sharp() => {
+    let files: Vec<Arc<File>> = database.files().filter(|file| file.file_type == FileType::Host).collect();
+    let declared = |file: &File| match &file.folder_namespace {
+        Some(FolderNamespace::Namespace(namespace)) => {
             let name = String::from_utf8_lossy(&file.name);
             let stem = Path::new(name.as_ref()).file_stem()?.to_string_lossy().into_owned();
 
-            Some((format!("{}\\{stem}", namespace.replace('.', "\\")), true))
+            Some(format!("{}\\{stem}", namespace.replace('.', "\\")))
         }
         _ => None,
-    }));
+    };
+    let classes = NamespaceClasses::new(
+        files.iter().filter(|file| Dialect::of(file).is_sharp()).filter_map(|file| Some((declared(file)?, true))),
+    );
+    let mut declaring: HashMap<Word, usize> = HashMap::default();
+    for (index, file) in files.iter().enumerate() {
+        if let Some(name) = declared(file) {
+            declaring.insert(ascii_lowercase_word(name.as_bytes()), index);
+        }
+    }
     let scan = |file: &File| {
         let arena = LocalArena::new();
         let program = parse_file_with_settings(&arena, file, parser);
@@ -1075,24 +1087,19 @@ fn hosts_reach(
         let mut reached: Vec<Word> = metadata.named_class_likes().into_iter().collect();
         reached.extend(names.iter().map(|(_, _, name, _)| mago_word::word(name)));
         reached.extend(var_tag_class_likes(&arena, program));
-        let declared: Vec<Word> = metadata.class_likes.values().map(|class_like| class_like.name).collect();
 
-        (declared, reached)
+        reached
     };
 
-    let files: Vec<Arc<File>> = database.files().filter(|file| file.file_type == FileType::Host).collect();
-    let scans: Vec<(Vec<Word>, Vec<Word>)> = files.par_iter().map(|file| scan(file)).collect();
-    let mut declaring: HashMap<Word, usize> = HashMap::default();
-    for (index, (declared, _)) in scans.iter().enumerate() {
-        for name in declared {
-            declaring.insert(ascii_lowercase_word(name.as_bytes()), index);
-        }
+    let mut taken = vec![false; files.len()];
+    let mut reach = HashSet::default();
+    for (index, file) in files.iter().enumerate().filter(|(_, file)| file.is_standard_library) {
+        taken[index] = true;
+        reach.insert(file.id);
     }
-
     let mut folders = BTreeMap::new();
-    let mut seeds: Vec<usize> =
-        files.iter().enumerate().filter(|(_, file)| file.is_standard_library).map(|(index, _)| index).collect();
-    let mut reached: Vec<Word> = Vec::new();
+    let mut wave: Vec<usize> = Vec::new();
+    let mut names: Vec<Word> = Vec::new();
     for (name, host) in hosts.extension_hosts.iter().filter(|(_, host)| host.enabled) {
         let path = host.host_file(name).file;
         let path = path.canonicalize().unwrap_or(path);
@@ -1101,45 +1108,35 @@ fn hosts_reach(
             if folder.is_empty() { String::new() } else { format!("{folder}/") }
         });
         if let Some(folder) = folder {
-            seeds.extend(
-                files
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, file)| is_lowered(file) && file.name.starts_with(folder.as_bytes()))
-                    .map(|(index, _)| index),
-            );
+            for (index, file) in files.iter().enumerate() {
+                if is_lowered(file)
+                    && file.name.starts_with(folder.as_bytes())
+                    && !std::mem::replace(&mut taken[index], true)
+                {
+                    wave.push(index);
+                }
+            }
             folders.insert(name.clone(), folder);
         }
         if let Ok(contents) = std::fs::read(&path) {
             let name = Cow::Owned(File::logical_name(root, &path));
-            let file = File::new(name, FileType::Host, Some(path), contents.into());
-            reached.extend(scan(&file).1);
+            names.extend(scan(&File::new(name, FileType::Host, Some(path), contents.into())));
         }
     }
-
-    let mut taken = vec![false; files.len()];
-    let mut queue: Vec<usize> = Vec::new();
-    let mut take = |index: usize, queue: &mut Vec<usize>| {
-        if !std::mem::replace(&mut taken[index], true) {
-            queue.push(index);
-        }
-    };
-    for index in seeds {
-        take(index, &mut queue);
-    }
-    for name in reached {
-        if let Some(&index) = declaring.get(&ascii_lowercase_word(name.as_bytes())) {
-            take(index, &mut queue);
-        }
-    }
-    let mut reach = HashSet::default();
-    while let Some(index) = queue.pop() {
-        reach.insert(files[index].id);
-        for name in &scans[index].1 {
-            if let Some(&named) = declaring.get(&ascii_lowercase_word(name.as_bytes())) {
-                take(named, &mut queue);
+    loop {
+        for name in names.drain(..) {
+            if let Some(&index) = declaring.get(&ascii_lowercase_word(name.as_bytes()))
+                && !std::mem::replace(&mut taken[index], true)
+            {
+                wave.push(index);
             }
         }
+        if wave.is_empty() {
+            break;
+        }
+        reach.extend(wave.iter().map(|&index| files[index].id));
+        names = wave.par_iter().flat_map_iter(|&index| scan(&files[index])).collect();
+        wave.clear();
     }
 
     HostsReach { root: root.to_path_buf(), files: reach, folders }
