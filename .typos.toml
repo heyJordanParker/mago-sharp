@@ -33,7 +33,8 @@ extend-ignore-re = [
 "caf" = "caf"
 
 [type.lean.extend-identifiers]
-# Lean's names for the constant that holds a theorem and for the declaration that adds one.
+# Lean's names for a theorem, the constant that holds one and the declaration that adds one.
+"thm" = "thm"
 "thmInfo" = "thmInfo"
 "thmDecl" = "thmDecl"
 
