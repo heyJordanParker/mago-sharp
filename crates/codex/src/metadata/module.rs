@@ -5,6 +5,8 @@ use mago_word::word;
 use crate::metadata::CodebaseMetadata;
 use crate::metadata::ttype::TypeMetadata;
 use crate::ttype::TType;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::object::TObject;
 use crate::ttype::union::TUnion;
 
 /// The namespace of the standard library's module, in lowercase, as a module keeps it.
@@ -122,8 +124,19 @@ pub enum BindingValueMetadata {
 /// spec section 13, because the mark promises only what the constructor does with it.
 #[must_use]
 pub fn service_id(r#type: &TUnion, codebase: &CodebaseMetadata) -> Word {
-    let id = r#type.clone().without_readonly().get_id();
     let is_name = |byte: &u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'\\');
+    // A class with no type arguments, the type nearly every parameter takes, has its name as its id.
+    if let [TAtomic::Object(TObject::Named(object))] = r#type.types.as_ref()
+        && object.type_parameters.is_none()
+        && object.intersection_types.is_none()
+        && !object.is_this
+        && !object.is_static
+        && object.name.as_bytes().iter().all(is_name)
+    {
+        return codebase.class_key(object.name);
+    }
+
+    let id = r#type.clone().without_readonly().get_id();
     let mut keyed = Vec::with_capacity(id.len());
     for part in id.as_bytes().chunk_by(|left, right| is_name(left) == is_name(right)) {
         if part.iter().all(is_name) {

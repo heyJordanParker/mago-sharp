@@ -6,6 +6,10 @@
 //! A module also lists the namespaces its namespace imports from, as Java's `module-info.java` lists what a module
 //! `requires`, and the checker refuses an import outside the list and two lists that name each other.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_allocator::Arena;
 use mago_codex::metadata::CodebaseMetadata;
@@ -227,12 +231,10 @@ where
                     .is_some_and(|(_, found)| std::ptr::eq(found, *binding))
         });
     let mut reported: Vec<(IssueCode, *const BindingMetadata)> = Vec::new();
+    let (mut seen, mut classes) = (HashSet::default(), HashSet::default());
     for (module, binding) in starts {
-        let mut walk = Walk::new(&services, own, binding);
+        let mut walk = Walk::new(&services, own, binding, seen, classes);
         walk.dependencies_of((module, binding));
-        for class in &walk.classes {
-            artifacts.symbol_references.add_reference(origin, (*class, empty_word()), true);
-        }
         let mut first = |code: IssueCode, at: &BindingMetadata| {
             let key = (code, std::ptr::from_ref(at));
             !reported.contains(&key) && {
@@ -250,6 +252,10 @@ where
         {
             report_captive(context, binding, captive, at);
         }
+        (seen, classes) = (walk.seen, walk.classes);
+    }
+    for class in classes {
+        artifacts.symbol_references.add_reference(origin, (class, empty_word()), true);
     }
 
     Ok(())
@@ -262,7 +268,7 @@ pub(crate) fn check_listener_services<A>(context: &mut Context<'_, '_, A>, class
 where
     A: Arena,
 {
-    let services = Services { codebase: context.codebase, overrides: Vec::new() };
+    let services = Services::reading(context.codebase, Vec::new());
 
     check_class_services(context, &services, class, Builds::Listener(class.original_name, event));
 }
@@ -274,7 +280,7 @@ pub(crate) fn check_program_services<A>(context: &mut Context<'_, '_, A>, class:
 where
     A: Arena,
 {
-    let services = Services { codebase: context.codebase, overrides: Vec::new() };
+    let services = Services::reading(context.codebase, Vec::new());
 
     check_class_services(context, &services, class, Builds::Program(class.original_name));
 }
@@ -427,11 +433,26 @@ where
     }
 }
 
+/// The modules of one namespace that bind one service, in the order the container reads them, each with its bindings
+/// of that service as written.
+type Serving<'ctx> = Vec<(&'ctx ModuleMetadata, Vec<&'ctx BindingMetadata>)>;
+
+/// A class a binding builds, or its binding expression, with the binding that serves each parameter the container fills
+/// to build it, in the order it takes them. A parameter no binding serves has none.
+struct Built<'ctx> {
+    /// The class, or `None` for a binding expression.
+    class: Option<&'ctx ClassLikeMetadata>,
+    served: Vec<Node<'ctx>>,
+}
+
 /// The modules one set of services reads: every folder's base module, and the modules whose bindings win over them,
 /// every module of one environment or one test module.
 struct Services<'ctx> {
     codebase: &'ctx CodebaseMetadata,
-    overrides: Vec<&'ctx ModuleMetadata>,
+    /// The modules that serve each service id in each namespace.
+    serving: HashMap<&'ctx [u8], HashMap<Word, Serving<'ctx>>>,
+    /// What each binding the set has walked builds, by the binding.
+    built: RefCell<HashMap<*const BindingMetadata, Rc<[Built<'ctx>]>>>,
 }
 
 impl<'ctx> Services<'ctx> {
@@ -457,6 +478,50 @@ impl<'ctx> Services<'ctx> {
             .then_some(Missing::Unbound(service))
     }
 
+    /// What `node` builds: a bound class's main constructor's parameters, which resolve from the class's namespace, or
+    /// a binding expression's own, which resolve from the module that holds the binding. Resolved once for each
+    /// binding the set walks.
+    fn built_by(&self, (module, binding): Node<'ctx>) -> Rc<[Built<'ctx>]> {
+        if let Some(built) = self.built.borrow().get(&std::ptr::from_ref(binding)) {
+            return Rc::clone(built);
+        }
+
+        let codebase = self.codebase;
+        let serve = |namespace: &[u8], requester: Option<Word>, parameters: &[FunctionLikeParameterMetadata]| {
+            parameters
+                .iter()
+                .filter_map(parameter_service)
+                .filter_map(|service| self.binding_for(namespace, service_id(service, codebase), requester))
+                .collect::<Vec<Node<'ctx>>>()
+        };
+        let of_class = |class: Word| {
+            let class = codebase.get_class_like(class)?;
+            let constructor = codebase.get_declaring_method(class.name, word("__construct"));
+            let served = constructor.map_or_else(Vec::new, |constructor| {
+                serve(&namespace_of(class.name), Some(class.original_name), &constructor.parameters)
+            });
+
+            Some(Built { class: Some(class), served })
+        };
+        let built: Rc<[Built<'ctx>]> = match &binding.value {
+            BindingValueMetadata::Class(class, _) => of_class(*class).into_iter().collect(),
+            BindingValueMetadata::Classes(classes) => {
+                classes.iter().filter_map(|(class, _)| of_class(*class)).collect()
+            }
+            BindingValueMetadata::Expression(lambda) => codebase
+                .get_closure(lambda)
+                .map(|lambda| Built {
+                    class: None,
+                    served: serve(module.namespace.as_bytes(), None, &lambda.parameters),
+                })
+                .into_iter()
+                .collect(),
+        };
+        self.built.borrow_mut().insert(std::ptr::from_ref(binding), Rc::clone(&built));
+
+        built
+    }
+
     /// The set of services `module` belongs to: the base set for a base module, the base set under every module of
     /// its environment for an environment module, as the container reads each `Module.<SHARP_ENV>.sharp` of the class's
     /// namespace and each one above it, and the base set under its own bindings for a test module.
@@ -467,7 +532,25 @@ impl<'ctx> Services<'ctx> {
             ModuleKind::Test => vec![module],
         };
 
-        Self { codebase, overrides }
+        Self::reading(codebase, overrides)
+    }
+
+    /// The set that reads `overrides` before every folder's base module.
+    fn reading(codebase: &'ctx CodebaseMetadata, overrides: Vec<&'ctx ModuleMetadata>) -> Self {
+        let mut serving: HashMap<&[u8], HashMap<Word, Serving<'ctx>>> = HashMap::default();
+        let base = codebase.modules.iter().filter(|module| module.kind == ModuleKind::Base);
+        for module in overrides.into_iter().chain(base) {
+            let services = serving.entry(module.namespace.as_bytes()).or_default();
+            for binding in &module.bindings {
+                let modules = services.entry(binding.service_id).or_default();
+                match modules.last_mut() {
+                    Some((last, bindings)) if std::ptr::eq(*last, module) => bindings.push(binding),
+                    _ => modules.push((module, vec![binding])),
+                }
+            }
+        }
+
+        Self { codebase, serving, built: RefCell::default() }
     }
 
     /// The binding that serves the service of the id `service` to `requester`, a class of `namespace`: the nearest
@@ -487,22 +570,15 @@ impl<'ctx> Services<'ctx> {
         })
         .chain([STANDARD_LIBRARY_NAMESPACE.as_bytes()]);
         for namespace in namespaces {
-            let modules = self
-                .overrides
-                .iter()
-                .copied()
-                .chain(self.codebase.modules.iter().filter(|module| module.kind == ModuleKind::Base));
-            for module in modules.filter(|module| module.namespace.as_bytes() == namespace) {
-                let serves = |binding: &&BindingMetadata| binding.service_id == service;
-                let targeted = module.bindings.iter().filter(serves).find(|binding| {
+            let modules = self.serving.get(namespace).and_then(|services| services.get(&service));
+            for (module, bindings) in modules.into_iter().flatten() {
+                let targeted = bindings.iter().find(|binding| {
                     binding.target.zip(requester).is_some_and(|(target, requester)| {
                         self.codebase.class_key(target) == self.codebase.class_key(requester)
                     })
                 });
-                if let Some(binding) =
-                    targeted.or_else(|| module.bindings.iter().filter(serves).find(|binding| binding.target.is_none()))
-                {
-                    return Some((module, binding));
+                if let Some(binding) = targeted.or_else(|| bindings.iter().find(|binding| binding.target.is_none())) {
+                    return Some((*module, *binding));
                 }
             }
         }
@@ -525,25 +601,31 @@ struct Walk<'services, 'ctx> {
     path: Vec<Word>,
     bindings: Vec<&'ctx BindingMetadata>,
     seen: HashSet<(*const BindingMetadata, bool, bool)>,
-    classes: Vec<Word>,
+    /// Every class this walk and the walks before it read.
+    classes: HashSet<Word>,
     cycle: Option<(Vec<Word>, &'ctx BindingMetadata)>,
     captive: Option<(&'ctx BindingMetadata, &'ctx BindingMetadata)>,
 }
 
 impl<'services, 'ctx> Walk<'services, 'ctx> {
+    /// A walk from `start` that adds to `classes`, the classes the walks before it read, and keeps `seen`'s room.
     fn new(
         services: &'services Services<'ctx>,
         own: Option<&'ctx ModuleMetadata>,
         start: &'ctx BindingMetadata,
+        mut seen: HashSet<(*const BindingMetadata, bool, bool)>,
+        classes: HashSet<Word>,
     ) -> Self {
+        seen.clear();
+
         Self {
             services,
             own,
             start,
             path: Vec::new(),
             bindings: vec![start],
-            seen: HashSet::default(),
-            classes: Vec::new(),
+            seen,
+            classes,
             cycle: None,
             captive: None,
         }
@@ -568,29 +650,26 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
             .find(|binding| own.bindings.iter().any(|written| std::ptr::eq(written, *binding)))
     }
 
-    /// Visits the services each class `node` builds takes, with that class on the path a cycle names.
+    /// Visits the binding that serves each service each class `node` builds takes, with that class on the path a cycle
+    /// names. A service no binding serves is reported at the binding of the class that takes it, so the walk stops
+    /// there.
     fn visit_parameters_of(&mut self, node: Node<'ctx>, held: bool) {
-        for (namespace, requester, parameters) in self.parameters_of(node) {
-            self.path.extend(requester);
-            for parameter in parameters {
-                if let Some(service) = parameter_service(parameter) {
-                    self.visit(&namespace, requester, service, held);
-                }
+        for built in self.services.built_by(node).iter() {
+            if let Some(class) = built.class {
+                self.classes.insert(class.name);
+                self.path.push(class.original_name);
             }
-            if requester.is_some() {
+            for served in &built.served {
+                self.visit(*served, held);
+            }
+            if built.class.is_some() {
                 self.path.pop();
             }
         }
     }
 
-    /// Visits the binding that serves `service` to `requester`. A service no binding serves is reported at the
-    /// binding of the class that takes it, so the walk stops there.
-    fn visit(&mut self, namespace: &[u8], requester: Option<Word>, service: &TUnion, held: bool) {
-        let service = service_id(service, self.services.codebase);
-        let Some((module, binding)) = self.services.binding_for(namespace, service, requester) else {
-            return;
-        };
-
+    /// Visits `binding`, which serves a service the walk reached.
+    fn visit(&mut self, (module, binding): Node<'ctx>, held: bool) {
         if std::ptr::eq(binding, self.start) {
             if self.cycle.is_none()
                 && let Some(at) = self.reported_at(None)
@@ -614,39 +693,6 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
             self.visit_parameters_of((module, binding), held);
             self.bindings.pop();
         }
-    }
-
-    /// The parameters the container fills to build `node`, each list with the namespace its services resolve from
-    /// and the class they serve: a bound class's main constructor, or a binding expression's own parameters, which
-    /// resolve from the module that holds the binding.
-    fn parameters_of(
-        &mut self,
-        node: Node<'ctx>,
-    ) -> Vec<(Vec<u8>, Option<Word>, &'ctx [FunctionLikeParameterMetadata])> {
-        let codebase = self.services.codebase;
-        let classes: Vec<Word> = match node {
-            (_, BindingMetadata { value: BindingValueMetadata::Class(class, _), .. }) => vec![*class],
-            (_, BindingMetadata { value: BindingValueMetadata::Classes(classes), .. }) => {
-                classes.iter().map(|(class, _)| *class).collect()
-            }
-            (module, BindingMetadata { value: BindingValueMetadata::Expression(lambda), .. }) => {
-                return codebase
-                    .get_closure(lambda)
-                    .map(|lambda| vec![(module.namespace.as_bytes().to_vec(), None, lambda.parameters.as_slice())])
-                    .unwrap_or_default();
-            }
-        };
-
-        classes
-            .into_iter()
-            .filter_map(|class| {
-                let metadata = codebase.get_class_like(class)?;
-                self.classes.push(metadata.name);
-                let constructor = codebase.get_declaring_method(metadata.name, word("__construct"))?;
-                let namespace = namespace_of(metadata.name);
-                Some((namespace, Some(metadata.original_name), constructor.parameters.as_slice()))
-            })
-            .collect()
     }
 }
 
