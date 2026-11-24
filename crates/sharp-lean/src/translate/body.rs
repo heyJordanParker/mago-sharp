@@ -268,7 +268,7 @@ impl<'body, 'program> Body<'body, 'program> {
                     // Spec section 25: a `Class<F>` of a family `F` of classes is one of its classes.
                     self.class_value_type(&family)
                 } else if is_collection(name) {
-                    self.unmodeled(hint.span(), "a collection".to_owned(), issues::COLLECTION)
+                    self.unmodeled(hint.span(), "a collection".to_owned(), issues::list_members(&LIST_MEMBERS))
                 } else {
                     self.named_type(hint.span(), name)
                 }
@@ -607,7 +607,7 @@ impl<'body, 'program> Body<'body, 'program> {
             | Expression::List(_)
             | Expression::ArrayAccess(_)
             | Expression::ArrayAppend(_) => {
-                self.unmodeled(expression.span(), "a collection".to_owned(), issues::COLLECTION)
+                self.unmodeled(expression.span(), "a collection".to_owned(), issues::list_members(&LIST_MEMBERS))
             }
             Expression::Closure(_) | Expression::ArrowFunction(_) | Expression::PartialApplication(_) => {
                 self.unmodeled(expression.span(), "a lambda".to_owned(), issues::LAMBDA)
@@ -857,7 +857,9 @@ impl<'body, 'program> Body<'body, 'program> {
                 })
             }
             Equality::Numbers => return self.unmodeled(span, "a float".to_owned(), issues::FLOAT),
-            Equality::Tables => return self.unmodeled(span, "a collection".to_owned(), issues::COLLECTION),
+            Equality::Tables => {
+                return self.unmodeled(span, "a collection".to_owned(), issues::list_members(&LIST_MEMBERS));
+            }
             Equality::OwnType if let Some(interface) = self.equatable_interface(types) => {
                 self.lifted(nullable, (lhs, rhs), |body, sides| body.own_type_equal(span, &interface, sides))
             }
@@ -1929,47 +1931,39 @@ impl<'body, 'program> Body<'body, 'program> {
         types.peek().is_some() && types.all(TAtomic::is_list)
     }
 
-    /// A `List` method a law reasons about, as the Lean function it is: `count()` is `int.count`, the list's length,
-    /// or that length checked into the int range in a body that computes exactly, `isEmpty()` and `isNotEmpty()` are
-    /// `List.isEmpty` and its negation, `map` and `filter` of a lambda are `List.map` and `List.filter`, and `join` of a
-    /// list of strings is `Sharp.join`. Every other method of a collection is refused by name.
+    /// A `List` member a law reads, one of [`LIST_MEMBERS`], as the Lean function it is: `count()` is `int.count`, the
+    /// list's length, or that length checked into the int range in a body that computes exactly, `isEmpty()` and
+    /// `isNotEmpty()` are `List.isEmpty` and its negation, `map`, `filter`, `any` and `all` of a lambda are Lean's own
+    /// functions of their names, and `join` of a list of strings is `Sharp.join`. Every other member is refused, naming
+    /// those.
     fn list_call(&mut self, expression: &Expression, call: &MethodCall) -> String {
         let Some(method) = self.method_name(&call.method) else {
             return "default".to_owned();
         };
+        let name = String::from_utf8_lossy(method).into_owned();
         let arguments = &call.argument_list.arguments;
-        match (method, arguments.len()) {
-            (b"count", 0) => {
-                let list = self.value(call.object);
-                if self.exact {
-                    return self.bind(format!("int.ofInt (List.length {list} : Int)"));
+        if !LIST_MEMBERS.contains(&(name.as_str(), arguments.len())) {
+            let what = format!("the List method {name}");
+            return self.unmodeled(expression.span(), what, issues::list_members(&LIST_MEMBERS));
+        }
+        let list = self.value(call.object);
+        match (name.as_str(), arguments.first()) {
+            ("count", _) if self.exact => self.bind(format!("int.ofInt (List.length {list} : Int)")),
+            ("count", _) => format!("(int.count {list})"),
+            ("isEmpty", _) => format!("(List.isEmpty {list})"),
+            ("isNotEmpty", _) => format!("(!(List.isEmpty {list}))"),
+            ("join", Some(separator)) => format!("(Sharp.join {} {list})", self.value(separator.value())),
+            ("map" | "filter" | "any" | "all", Some(argument)) => {
+                let Some(function) = self.lambda(argument.value()) else {
+                    return "default".to_owned();
+                };
+                if name == "any" || name == "all" {
+                    return format!("(List.{name} {list} {function})");
                 }
 
-                format!("(int.count {list})")
+                format!("(List.{name} {function} {list})")
             }
-            (b"isEmpty", 0) => format!("(List.isEmpty {})", self.value(call.object)),
-            (b"isNotEmpty", 0) => format!("(!(List.isEmpty {}))", self.value(call.object)),
-            (b"map" | b"filter", 1) => {
-                let list = self.value(call.object);
-                let Some(function) = arguments.first().and_then(|argument| self.lambda(argument.value())) else {
-                    return "default".to_owned();
-                };
-                let lean = if method == b"map" { "map" } else { "filter" };
-
-                format!("(List.{lean} {function} {list})")
-            }
-            (b"join", 1) => {
-                let list = self.value(call.object);
-                let Some(separator) = arguments.first() else {
-                    return "default".to_owned();
-                };
-
-                format!("(Sharp.join {} {list})", self.value(separator.value()))
-            }
-            _ => {
-                let what = format!("the List method {}", String::from_utf8_lossy(method));
-                self.unmodeled(expression.span(), what, issues::COLLECTION)
-            }
+            _ => unreachable!("LIST_MEMBERS holds only the members list_call translates, with their arguments"),
         }
     }
 
@@ -2011,7 +2005,7 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// A `Map` member a law reads, spec section 28, as the function of `Sharp/Lean/Map.lean` of its name, one of
     /// [`MAP_MEMBERS`]: `count()` in a body that computes exactly is the entries' length checked into the int range,
-    /// and `filter` takes a lambda, as a `List`'s does. Every other member is refused, naming those.
+    /// and `filter` and `any` take a lambda, as a `List`'s do. Every other member is refused, naming those.
     fn map_call(&mut self, expression: &Expression, call: &MethodCall) -> String {
         let Some(method) = self.method_name(&call.method) else {
             return "default".to_owned();
@@ -2022,12 +2016,12 @@ impl<'body, 'program> Body<'body, 'program> {
             return self.unmodeled(expression.span(), what, issues::map_members(&MAP_MEMBERS));
         }
         let map = self.value(call.object);
-        if let ("filter", [argument]) = (name.as_str(), call.argument_list.arguments.as_slice()) {
+        if let ("filter" | "any", [argument]) = (name.as_str(), call.argument_list.arguments.as_slice()) {
             let Some(predicate) = self.lambda(argument.value()) else {
                 return "default".to_owned();
             };
 
-            return format!("(Sharp.Map.filter {predicate} {map})");
+            return format!("(Sharp.Map.{name} {predicate} {map})");
         }
         let Some(arguments) = self.arguments(&call.argument_list, None) else {
             return "default".to_owned();
@@ -2592,7 +2586,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 TAtomic::Object(TObject::Named(named)) => classes.push(named.name.as_bytes()),
                 TAtomic::Object(TObject::Enum(r#enum)) => classes.push(r#enum.name.as_bytes()),
                 TAtomic::Array(TArray::List(_) | TArray::Keyed(_)) => {
-                    self.unmodeled(object.span(), "a collection".to_owned(), issues::COLLECTION);
+                    self.unmodeled(object.span(), "a collection".to_owned(), issues::list_members(&LIST_MEMBERS));
                     return None;
                 }
                 TAtomic::Scalar(TScalar::ClassLikeString(_)) => {
@@ -2621,7 +2615,7 @@ impl<'body, 'program> Body<'body, 'program> {
     /// Whether `class` is PHP# code a law can reach. Records why it is not.
     fn is_translated_class(&mut self, span: Span, class: &[u8]) -> bool {
         if is_collection(class) {
-            self.unmodeled(span, "a collection".to_owned(), issues::COLLECTION);
+            self.unmodeled(span, "a collection".to_owned(), issues::list_members(&LIST_MEMBERS));
             return false;
         }
         if !self.reach.class(class).is_some_and(|reached| reached.sharp) {
@@ -3023,9 +3017,14 @@ pub(crate) fn indented(lines: &[String], by: usize) -> impl Iterator<Item = Stri
     lines.iter().map(move |line| format!("{}{line}", " ".repeat(by)))
 }
 
+/// The `List` members a law reads, each by its name and the arguments it takes, spec section 28: [`Body::list_call`]
+/// translates each. The refusal of any other member names them.
+const LIST_MEMBERS: [(&str, usize); 8] =
+    [("count", 0), ("isEmpty", 0), ("isNotEmpty", 0), ("map", 1), ("filter", 1), ("join", 1), ("any", 1), ("all", 1)];
+
 /// The `Map` members a law reads, each by its name and the arguments it takes, spec section 28: each is the function of
 /// `Sharp/Lean/Map.lean` of its name. The refusal of any other member names them.
-const MAP_MEMBERS: [(&str, usize); 8] = [
+const MAP_MEMBERS: [(&str, usize); 9] = [
     ("count", 0),
     ("isEmpty", 0),
     ("isNotEmpty", 0),
@@ -3034,6 +3033,7 @@ const MAP_MEMBERS: [(&str, usize); 8] = [
     ("keys", 0),
     ("values", 0),
     ("filter", 1),
+    ("any", 1),
 ];
 
 /// The type of an element of a value of `collection`, a `List` or a `Map` type: a list's element type, or a map's value
