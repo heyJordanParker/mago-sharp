@@ -55,7 +55,7 @@ pub const EFFECT_CLASSES: [(&str, &str); 64] = [
     library_file!("Sharp/Time/Date.sharp"),
     library_file!("Sharp/Time/TimeOfDay.sharp"),
     library_file!("Sharp/Time/TimeZone.sharp"),
-    library_file!("Sharp/Time/DateTimeInterfaceMembers.sharp"),
+    library_file!("Sharp/Interop/PhpDates.sharp"),
     library_file!("Sharp/Time/Weekday.sharp"),
     library_file!("Sharp/Time/Month.sharp"),
     library_file!("Sharp/Int.sharp"),

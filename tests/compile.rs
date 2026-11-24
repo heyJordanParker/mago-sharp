@@ -4827,3 +4827,32 @@ fn a_named_constructor_named_construct_is_refused_and_lowers_without_a_panic() {
         printed(&output)
     );
 }
+
+/// An `Instant` that crosses to a plain PHP date, as a plain PHP library takes one, written as PHP's `date("c")` writes it.
+fn stamp_of_an_instant(imports: &str) -> String {
+    format!(
+        "namespace App;\n\n{imports}import Sharp.Time.Instant;\n\npublic class Stamp\n{{\n    public static string of(Instant at) => at.toPhpDateTime().format(\"c\");\n}}\n"
+    )
+}
+
+/// `toPhpDateTime()` names PHP, so it lives in `Sharp.Interop`, which a program imports only to work with plain PHP: an
+/// `Instant` has it after `import Sharp.Interop.PhpDates;`, and without the import the call is the error any member the
+/// type lacks gets.
+#[test]
+fn an_instant_crosses_to_a_plain_php_date_only_after_the_interop_import() {
+    let without = library_project(&[("app/Stamp.sharp", &stamp_of_an_instant(""))]);
+    let with = library_project(&[("app/Stamp.sharp", &stamp_of_an_instant("import Sharp.Interop.PhpDates;\n"))]);
+
+    let refused = compile_lines(without.path());
+    let compiled = compile_lines(with.path());
+
+    assert_eq!(
+        issue_lines(&refused),
+        [
+            "app/Stamp.sharp:7:47:error - non-existent-method: `toPhpDateTime` is an extension this file does not import. Add `import Sharp.Interop.PhpDates;` to the file."
+        ],
+        "{}",
+        printed(&refused)
+    );
+    assert!(compiled.status.success(), "{}", printed(&compiled));
+}
