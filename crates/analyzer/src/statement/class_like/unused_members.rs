@@ -41,6 +41,7 @@ use mago_text_edit::Safety;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
 use mago_word::WordMap;
+use mago_word::empty_word;
 use mago_word::word;
 
 use crate::code::IssueCode;
@@ -617,8 +618,12 @@ enum Access {
 /// constructor, which takes its class's reach, and the code that reads a member's or its class's marked attribute
 /// reaches the member through reflection, which no use records, so none of them is refused.
 #[must_use]
-pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferences) -> IssueCollection {
-    let uses_on = uses_on(codebase, references);
+pub fn too_wide_members(
+    codebase: &CodebaseMetadata,
+    references: &SymbolReferences,
+    test_files: &[FileId],
+) -> IssueCollection {
+    let uses_on = uses_on(codebase, references, test_files);
     let namespace_types = namespace_types(codebase, &uses_on);
     // The same uses by the member and each class-like the class the code names it on is an instance of, as
     // `CodebaseMetadata::is_instance_of` decides.
@@ -637,11 +642,6 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
     let mut issues = IssueCollection::default();
     for (class_name, class) in &codebase.class_likes {
         if !class.flags.is_user_defined() || !class.flags.is_project() || class.flags.is_internal_reach() {
-            continue;
-        }
-
-        // A marked attribute on the class says its framework reaches it and every public member of it.
-        if is_dynamically_accessed(codebase, &class.attributes) {
             continue;
         }
 
@@ -667,7 +667,7 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
                             .with_message("Declared `public` here."),
                     )
                     .with_note("A type is as wide as its uses, so one that only its namespace uses is `internal`.")
-                    .with_help("Declare it `internal`."),
+                    .with_help("Declare it `internal`, or, when a framework reaches it by name or by reflection, put an attribute whose class is marked `[DynamicallyAccessed]` on it."),
             );
         }
 
@@ -715,7 +715,7 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
                 .with_code(IssueCode::TooWideMember)
                 .with_annotation(Annotation::primary(span).with_message("Declared `public` here."))
                 .with_note(note)
-                .with_help(format!("Declare it `{keyword}`.")),
+                .with_help(format!("Declare it `{keyword}`, or, when a framework reaches it by name or by reflection, put an attribute whose class is marked `[DynamicallyAccessed]` on its class.")),
             );
         }
     }
@@ -733,15 +733,23 @@ pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferenc
 /// an `[Export]` method or a framework reading a marked attribute of the type or of one of its members reaches it from
 /// outside any namespace, so none of them is in the set.
 #[must_use]
-pub fn types_only_their_namespace_uses(codebase: &CodebaseMetadata, references: &SymbolReferences) -> HashSet<Word> {
-    namespace_types(codebase, &uses_on(codebase, references))
+pub fn types_only_their_namespace_uses(
+    codebase: &CodebaseMetadata,
+    references: &SymbolReferences,
+    test_files: &[FileId],
+) -> HashSet<Word> {
+    namespace_types(codebase, &uses_on(codebase, references, test_files))
 }
 
 /// The code each use of a member is in, the class or function, `None` for code outside both, by the member and the
 /// class the code names it on, an empty member for a use of the class itself. A member must be visible to each class
 /// that overrides or implements it, so each override uses the member it replaces from the class that declares the
-/// override.
-fn uses_on(codebase: &CodebaseMetadata, references: &SymbolReferences) -> HashMap<(Word, Word), Vec<Option<Word>>> {
+/// override. Each reach the checker can't see is a use from outside, as [`unseen_reaches`] records it.
+fn uses_on(
+    codebase: &CodebaseMetadata,
+    references: &SymbolReferences,
+    test_files: &[FileId],
+) -> HashMap<(Word, Word), Vec<Option<Word>>> {
     let mut uses_on = HashMap::<(Word, Word), Vec<Option<Word>>>::default();
     references.for_each_reference(|origin, (class, member), _| {
         let code_in = match origin {
@@ -767,8 +775,62 @@ fn uses_on(codebase: &CodebaseMetadata, references: &SymbolReferences) -> HashMa
             }
         }
     }
+    for (member, on) in unseen_reaches(codebase, test_files) {
+        uses_on.entry((member, on)).or_default().push(None);
+    }
 
     uses_on
+}
+
+/// Each reach of spec section 5 the checker can't see, as the member and the class it is on, an empty member for the
+/// class itself, each a use from outside any namespace:
+///
+/// - a class that carries a marked attribute, whose framework reaches the class and every member it has, the ones it
+///   inherits included, each on the class that declares it, so that class is reached as a type too
+/// - a member that carries a marked attribute, an `[Export]` method, which plain PHP calls through the global function
+///   it declares, section 23, and a program's `main`, which the engine calls, section 27: the member and its class
+/// - a class in one of `test_files`, the files of an `autoload-dev` folder, which its test runner creates, as PHPUnit
+///   creates a test class
+fn unseen_reaches(codebase: &CodebaseMetadata, test_files: &[FileId]) -> Vec<(Word, Word)> {
+    let test_files: HashSet<FileId> = test_files.iter().copied().collect();
+    let mut reaches = Vec::new();
+    for (class_name, class) in &codebase.class_likes {
+        if is_dynamically_accessed(codebase, &class.attributes) {
+            reaches.push((empty_word(), *class_name));
+            reaches.extend(
+                class.declaring_method_ids.iter().map(|(method, declared)| (*method, declared.get_class_name())),
+            );
+            reaches.extend(class.declaring_property_ids.iter().map(|(property, declaring)| (*property, *declaring)));
+            reaches.extend(class.constants.keys().map(|constant| (*constant, *class_name)));
+            continue;
+        }
+        if test_files.contains(&class.span.file_id) {
+            reaches.push((empty_word(), *class_name));
+        }
+        let mut members: Vec<Word> = class
+            .properties
+            .iter()
+            .filter_map(|(name, property)| is_dynamically_accessed(codebase, &property.attributes).then_some(*name))
+            .collect();
+        members.extend(
+            class.constants.iter().filter_map(|(name, constant)| {
+                is_dynamically_accessed(codebase, &constant.attributes).then_some(*name)
+            }),
+        );
+        members.extend(class.methods.iter().copied().filter(|name| {
+            codebase.function_likes.get(&(*class_name, *name)).is_some_and(|method| {
+                method.has_attribute(codebase, word(EXPORT))
+                    || is_program_entry(class, method)
+                    || is_dynamically_accessed(codebase, &method.attributes)
+            })
+        }));
+        if !members.is_empty() {
+            reaches.push((empty_word(), *class_name));
+            reaches.extend(members.into_iter().map(|member| (member, *class_name)));
+        }
+    }
+
+    reaches
 }
 
 /// [`types_only_their_namespace_uses`], of the uses [`uses_on`] gives.
@@ -781,14 +843,10 @@ fn namespace_types(codebase: &CodebaseMetadata, uses_on: &HashMap<(Word, Word), 
     codebase
         .class_likes
         .iter()
-        .filter(|(class_name, class)| {
-            class.flags.is_user_defined()
-                && !class.flags.is_module()
-                && !class.flags.is_enum_case_class()
-                && !is_dynamically_accessed(codebase, &class.attributes)
-                && !is_reached_by_its_members(codebase, **class_name, class)
-        })
         .filter_map(|(class_name, class)| {
+            if !class.flags.is_user_defined() || class.flags.is_module() || class.flags.is_enum_case_class() {
+                return None;
+            }
             let class_key = codebase.class_key(*class_name);
             let namespace = namespace_of(class.original_name.as_bytes());
             let is_used_outside = type_uses.get(&class_key).into_iter().flatten().any(|code_in| {
@@ -821,8 +879,7 @@ pub fn unused_classes(
     references: &SymbolReferences,
     test_files: &[FileId],
 ) -> IssueCollection {
-    let test_files: HashSet<FileId> = test_files.iter().copied().collect();
-    let mut used = HashSet::<Word>::default();
+    let mut used: HashSet<Word> = unseen_reaches(codebase, test_files).into_iter().map(|reach| reach.1).collect();
     references.for_each_reference(|origin, (class, _), _| {
         let from_inside = match origin {
             ReferenceOrigin::Symbol((symbol, _)) => {
@@ -844,15 +901,12 @@ pub fn unused_classes(
             || !class.flags.is_project()
             || class.flags.is_module()
             || class.flags.is_enum_case_class()
-            || test_files.contains(&class.span.file_id)
             || class.direct_parent_class.iter().chain(&class.direct_parent_interfaces).any(|parent| {
                 codebase
                     .get_class_like(*parent)
                     .is_some_and(|parent| codebase.dev_package(class.span.file_id, parent.span.file_id).is_some())
             })
             || used.contains(class_name)
-            || is_dynamically_accessed(codebase, &class.attributes)
-            || is_reached_by_its_members(codebase, *class_name, class)
             || class
                 .methods
                 .iter()
@@ -872,19 +926,6 @@ pub fn unused_classes(
     }
 
     issues
-}
-
-/// Whether plain PHP or a framework reaches `class` through one of its members, from outside any namespace: plain PHP
-/// calls an `[Export]` method through the global function it declares, spec section 23, PHP runs a class's `main` as
-/// its script, section 27, and the code that reads a member's marked attribute reaches the member's class.
-fn is_reached_by_its_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLikeMetadata) -> bool {
-    class.properties.values().any(|property| is_dynamically_accessed(codebase, &property.attributes))
-        || class.constants.values().any(|constant| is_dynamically_accessed(codebase, &constant.attributes))
-        || class.methods.iter().filter_map(|name| codebase.function_likes.get(&(class_name, *name))).any(|method| {
-            method.has_attribute(codebase, word(EXPORT))
-                || is_program_entry(class, method)
-                || is_dynamically_accessed(codebase, &method.attributes)
-        })
 }
 
 /// Whether `method` of `class` is the entry of a program, spec section 27: a class's `main`, which the engine calls
@@ -911,7 +952,6 @@ fn public_members(
         if !class.flags.is_event()
             && class.declaring_property_ids.get(name) == Some(&class_name)
             && property.read_visibility.is_public()
-            && !is_dynamically_accessed(codebase, &property.attributes)
             && !property.flags.is_internal_reach()
             && !class.overridden_property_ids.contains_key(name)
             && let Some(span) = property.name_span.or(property.span)
@@ -925,17 +965,12 @@ fn public_members(
         class.methods.iter().filter_map(|name| Some((name, codebase.function_likes.get(&(class_name, *name))?)));
     for (name, method) in methods {
         // A method the codex gives the class, such as section 10's `parse`, spans the whole class, and nobody wrote it.
-        // PHP calls a magic method itself, and `new` calls the constructor, which takes the reach of its class. Plain
-        // PHP calls an `[Export]` method through the global function it declares, spec section 23, and the engine a
-        // program's `main`, section 27, which the checker never sees.
+        // PHP calls a magic method itself, and `new` calls the constructor, which takes the reach of its class.
         if method.span != class.span
             && !case_spans.contains(&method.span)
             && class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
             && let Some(metadata) = method.method_metadata.as_ref()
             && metadata.visibility.is_public()
-            && !is_dynamically_accessed(codebase, &method.attributes)
-            && !method.has_attribute(codebase, word(EXPORT))
-            && !is_program_entry(class, method)
             && !method.flags.is_internal_reach()
             && !name.as_bytes().starts_with(b"__")
             && !class.overridden_method_ids.contains_key(name)
@@ -951,7 +986,6 @@ fn public_members(
             && class.span.contains(&constant.span)
             && !case_spans.contains(&constant.span)
             && constant.visibility.is_public()
-            && !is_dynamically_accessed(codebase, &constant.attributes)
             && !constant.flags.is_internal_reach()
         {
             members.push((*name, *name, constant.span, false));
