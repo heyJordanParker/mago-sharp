@@ -34,6 +34,8 @@
 //! for debugging or testing purposes.
 
 use std::borrow::Cow;
+use std::hash::DefaultHasher;
+use std::hash::Hasher;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -857,7 +859,6 @@ fn setup_restart_watcher(configuration: &Configuration) -> Result<RestartWatcher
     let workspace = configuration.source.workspace.as_path();
     let (tx, rx) = mpsc::channel();
     let files = restart_files(configuration);
-    let file_labels = files.clone();
 
     let mut watched_dirs: Vec<(PathBuf, RecursiveMode)> = Vec::new();
     for (path, label) in &files {
@@ -873,10 +874,12 @@ fn setup_restart_watcher(configuration: &Configuration) -> Result<RestartWatcher
         }
     }
 
+    let loaded: Vec<(PathBuf, &'static str, Option<u64>)> =
+        files.iter().map(|(path, label)| (path.clone(), *label, contents_hash(path))).collect();
     let watcher = start_watcher(
         move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res
-                && let Some(reason) = restart_reason(&event, &file_labels)
+                && let Some(reason) = restart_reason(&event, &loaded)
             {
                 let _ = tx.send(reason);
             }
@@ -888,39 +891,40 @@ fn setup_restart_watcher(configuration: &Configuration) -> Result<RestartWatcher
     Ok(RestartWatcher { _watcher: watcher, files, reasons: rx })
 }
 
-/// The reason `event` gives to restart watch mode: a change to one of the restart `files`, or events the operating
-/// system dropped in no named folder or in a folder that holds one of them.
-fn restart_reason(event: &notify::Event, files: &[(PathBuf, &'static str)]) -> Option<String> {
-    // FSEvents names the folder whose events it dropped, and inotify names none.
-    if event.need_rescan() {
-        let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let holds_a_file = |folder: &PathBuf| {
-            files.iter().any(|(path, _)| path.parent().is_some_and(|parent| real(parent).starts_with(real(folder))))
-        };
+/// The hash of the contents of the file at `path`, or none when it can't be read, as when it doesn't exist.
+fn contents_hash(path: &Path) -> Option<u64> {
+    let contents = std::fs::read(path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    hasher.write(&contents);
 
-        return (event.paths.is_empty() || event.paths.iter().any(holds_a_file))
-            .then(|| "the file watcher dropped events".to_owned());
-    }
+    Some(hasher.finish())
+}
 
-    if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
+/// The reason `event` gives to restart watch mode: a change to one of the restart `files`, each given with the hash of
+/// the contents the session loaded. An event that names a restart file, or events the operating system dropped, as a
+/// `chmod -R` or a branch switch floods it into, restart it only when a file's contents differ from those it loaded:
+/// FSEvents also reports a write made just before the watcher started, as a project's files written as `mago` starts.
+fn restart_reason(event: &notify::Event, files: &[(PathBuf, &'static str, Option<u64>)]) -> Option<String> {
+    let named = |file: &Path| {
+        event.paths.iter().any(|path| match (path.canonicalize(), file.canonicalize()) {
+            (Ok(path), Ok(file)) => path == file,
+            _ => path == file,
+        })
+    };
+    let reported: Vec<&(PathBuf, &'static str, Option<u64>)> = if event.need_rescan() {
+        files.iter().collect()
+    } else if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
+        files.iter().filter(|(path, _, _)| named(path)).collect()
+    } else {
         return None;
+    };
+
+    let changed = reported.iter().find(|(path, _, loaded)| contents_hash(path) != *loaded);
+    if changed.is_none() && !reported.is_empty() {
+        tracing::info!("Each restart file the watcher reported holds what this session loaded.");
     }
 
-    for event_path in &event.paths {
-        for (watched_path, label) in files {
-            let matches = event_path
-                .canonicalize()
-                .ok()
-                .and_then(|canon| watched_path.canonicalize().ok().map(|wc| canon == wc))
-                .unwrap_or_else(|| event_path == watched_path);
-
-            if matches {
-                return Some(format!("{label} changed ({})", event_path.display()));
-            }
-        }
-    }
-
-    None
+    changed.map(|(path, label, _)| format!("{label} changed ({})", path.display()))
 }
 
 #[cfg(test)]
@@ -986,23 +990,45 @@ mod tests {
         assert!(configuration.extension_hosts.is_empty(), "{:?}", configuration.extension_hosts.keys());
     }
 
-    /// A rescan restarts the watch when it names no folder, as inotify's does, or a folder that holds a restart file,
-    /// as FSEvents' does, and not when its folder holds none. An edit to a restart file restarts it with the file's label.
+    /// A rescan, as a `chmod -R` or a branch switch floods the watcher into, restarts the watch only when a restart
+    /// file's contents differ from those the session loaded, whether it names no folder, as inotify's does, or the
+    /// folder that holds the file, as FSEvents' does. An edit to a restart file restarts it with the file's label.
     #[test]
-    fn a_rescan_that_can_hide_a_restart_file_s_change_restarts_the_watch() {
+    fn a_rescan_restarts_the_watch_only_when_a_restart_file_changed() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
-        std::fs::create_dir(root.join("app")).unwrap();
         let file = root.join("mago.toml");
-        let files = [(file.clone(), "configuration file")];
+        std::fs::write(&file, "php-version = \"8.4\"\n").unwrap();
+        let files = [(file.clone(), "configuration file", contents_hash(&file))];
         let rescan = || notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
-        let dropped = Some("the file watcher dropped events".to_owned());
 
-        assert_eq!(restart_reason(&rescan(), &files), dropped);
-        assert_eq!(restart_reason(&rescan().add_path(root.clone()), &files), dropped);
-        assert_eq!(restart_reason(&rescan().add_path(root.join("app")), &files), None);
+        assert_eq!(restart_reason(&rescan(), &files), None);
+        assert_eq!(restart_reason(&rescan().add_path(root.clone()), &files), None);
+
+        std::fs::write(&file, "php-version = \"8.5\"\n").unwrap();
+        let changed = Some(format!("configuration file changed ({})", file.display()));
+        assert_eq!(restart_reason(&rescan(), &files), changed);
+        assert_eq!(restart_reason(&rescan().add_path(root.clone()), &files), changed);
         let edit = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(file.clone());
-        assert_eq!(restart_reason(&edit, &files), Some(format!("configuration file changed ({})", file.display())));
+        assert_eq!(restart_reason(&edit, &files), changed);
+    }
+
+    /// FSEvents reports a write made just before the watcher started, as a project's files written as `mago` starts,
+    /// once the watcher is live. Such an event names a restart file that holds what the session loaded, which restarts
+    /// nothing, so the session keeps the hosts it started.
+    #[test]
+    fn an_event_that_names_an_unchanged_restart_file_restarts_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let file = root.join("composer.json");
+        std::fs::write(&file, "{}\n").unwrap();
+        let files = [(file.clone(), "composer.json", contents_hash(&file))];
+
+        let created = notify::Event::new(EventKind::Create(notify::event::CreateKind::File)).add_path(file.clone());
+        assert_eq!(restart_reason(&created, &files), None);
+
+        std::fs::write(&file, "{\"require\": {}}\n").unwrap();
+        assert_eq!(restart_reason(&created, &files), Some(format!("composer.json changed ({})", file.display())));
     }
 
     /// A reload reads each value the edited configuration file gives, as a fresh start does, while a `--php-version`
