@@ -1332,6 +1332,15 @@ impl IncrementalAnalysisService {
             );
             naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| renaming.contains(file_id)));
         }
+        // Population refuses a PHP# bound that names a missing type, and only a scan reads the bound again, so each
+        // unchanged file with a bound that names a class-like a changed file now declares is scanned again too.
+        let declared_class_likes: WordSet = scans
+            .iter()
+            .flat_map(|((_, metadata, _), _)| metadata.class_likes.keys())
+            .map(|name| mago_word::ascii_lowercase_word(name.as_bytes()))
+            .collect();
+        let bounding = files_with_a_refused_bound(&self.codebase, &declared_class_likes);
+        naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| bounding.contains(file_id)));
         if !naming_removed.is_empty() {
             unchanged_file_ids.retain(|file_id| !naming_removed.contains(file_id));
             scans.extend(scan(source_files.iter().filter(|file| naming_removed.contains(&file.id)).collect())?);
@@ -1831,12 +1840,6 @@ impl IncrementalAnalysisService {
             }
         }
         self.apply_scan_results(&mut merged_codebase, &new_file_scans);
-
-        // Population refuses a PHP# bound that names a missing type, and only a scan reads the bound again, so a
-        // class-like declared under a name such a bound writes runs a full analysis too.
-        if names_a_refused_bound_type(&merged_codebase, &scanned_class_likes) {
-            return self.analyze();
-        }
 
         merged_codebase.safe_symbols.clear();
         merged_codebase.safe_symbol_members.clear();
@@ -2855,39 +2858,39 @@ fn reaches_extension(codebase: &CodebaseMetadata, references: &SymbolReferences)
     reaches_extension
 }
 
-/// Whether a PHP# bound of a populated declaration in `codebase` names a type that population left missing and that
-/// `declared`, the keys of the class-likes a scan just declared, now holds: such a bound was refused, spec
-/// section 11. A declaration the scan just read is unpopulated, and reads its bounds afresh.
-fn names_a_refused_bound_type(codebase: &CodebaseMetadata, declared: &WordSet) -> bool {
-    let class_templates = codebase
+/// The file of each populated PHP# declaration in `codebase` whose bound names a type that population left missing and
+/// that `declared`, the lowercase names of the class-likes a scan just declared, now holds: such a bound was refused,
+/// spec section 11, and only a scan of its file reads the bound again. The names compare in lowercase, since the type
+/// is missing from `codebase`, which keys it as a plain PHP class-like.
+fn files_with_a_refused_bound(codebase: &CodebaseMetadata, declared: &WordSet) -> HashSet<FileId> {
+    // A bound population refused for a missing type is the refused type, and a bound the checker refuses stays refused.
+    let names_a_declared_type = |template: &GenericTemplate| {
+        !template.bound_refused
+            && template.constraint.types.iter().all(|atomic| matches!(atomic, TAtomic::Error))
+            && template.written_bound.as_ref().is_some_and(|bound| {
+                bound.type_union.get_all_child_nodes().into_iter().any(|node| {
+                    matches!(
+                        node,
+                        TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. }))
+                            if declared.contains(&mago_word::ascii_lowercase_word(name.as_bytes()))
+                    )
+                })
+            })
+    };
+    let classes = codebase
         .class_likes
         .values()
         .filter(|class| class.flags.is_sharp() && class.flags.is_populated())
-        .flat_map(|class| class.template_types.values());
-    let function_templates = codebase
+        .filter(|class| class.template_types.values().any(names_a_declared_type))
+        .map(|class| class.span.file_id);
+    let functions = codebase
         .function_likes
         .values()
         .filter(|function| function.flags.is_sharp() && function.flags.is_populated())
-        .flat_map(|function| function.template_types.values());
+        .filter(|function| function.template_types.values().any(names_a_declared_type))
+        .map(|function| function.span.file_id);
 
-    // A bound population refused for a missing type is the refused type, and a bound the checker refuses stays refused.
-    let refused_for_missing_type = |template: &&GenericTemplate| {
-        !template.bound_refused && template.constraint.types.iter().all(|atomic| matches!(atomic, TAtomic::Error))
-    };
-
-    class_templates
-        .chain(function_templates)
-        .filter(refused_for_missing_type)
-        .filter_map(|template| template.written_bound.as_ref())
-        .any(|bound| {
-            bound.type_union.get_all_child_nodes().into_iter().any(|node| {
-                matches!(
-                    node,
-                    TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. }))
-                        if declared.contains(&codebase.class_key(*name))
-                )
-            })
-        })
+    classes.chain(functions).collect()
 }
 
 /// A file's scan: the file, the hash of its contents, the metadata it declares, what the codebase scan plan captures of
@@ -5052,7 +5055,10 @@ mod tests {
     fn test_watch_a_bound_whose_missing_type_is_declared_later_bounds_again() {
         let bounded = "namespace App;\n\npublic static class Bounded\n{\n    public static T held<T : Holder<TOther>, TOther>(T value, TOther other) => value;\n\n    public static Any? written() => Bounded.held<int, int>(1, 2);\n\n    public static void touch<TBox : Holder<int>>(readonly TBox box)\n    {\n        box.size = 1;\n    }\n}\n";
         let holder = "namespace App;\n\npublic interface Holder<TItem>\n{\n    int size { get; }\n}\n";
-        let mut db = make_database(vec![("src/Bounded.sharp", bounded)]);
+        let mut db = make_database(vec![
+            ("src/Bounded.sharp", bounded),
+            ("src/Other.sharp", "namespace App;\n\npublic class Other\n{\n}\n"),
+        ]);
         let errors = |service: &IncrementalAnalysisService| {
             service
                 .collect_all_issues()
@@ -5097,11 +5103,15 @@ mod tests {
             ]
         );
         assert_eq!(bounds(&service), (false, false), "the bound is Holder<TOther> again");
+        assert_eq!(
+            service.analyzed_files,
+            HashSet::from_iter([FileId::new(b"src/Holder.sharp"), FileId::new(b"src/Bounded.sharp")])
+        );
         assert_matches_full(&service, &db, "Holder is declared");
     }
 
-    /// Only a bound population refused for a missing type runs a full analysis once a file declares that type, so an
-    /// edit of a class-like that an accepted bound names stays incremental.
+    /// Only a bound population refused for a missing type scans its file again once a file declares that type, so an
+    /// edit of a class-like that an accepted bound names rechecks what its signature reaches alone.
     #[test]
     fn test_watch_an_edit_of_a_type_an_accepted_bound_names_stays_incremental() {
         let bounded = "namespace App;\n\npublic static class Bounded\n{\n    public static T held<T : Holder<int>>(T value) => value;\n}\n";
