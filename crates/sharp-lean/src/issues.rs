@@ -29,7 +29,6 @@ pub(crate) const RESERVED_NAME: &str =
     "The checker gives every class a member of that name, so a law cannot reach a member that has it.";
 pub(crate) const PLAIN_PHP: &str =
     "Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.";
-pub(crate) const COLLECTION: &str = "Hold the values in a List, and read it with `count()`, `isEmpty()`, `isNotEmpty()`, an index, `map`, `filter`, `join`, a list pattern or a spread.";
 pub(crate) const LOOP: &str = "Write the method as recursion that calls itself on a smaller value.";
 pub(crate) const RECURSION: &str = "Write the method as recursion that calls itself on a smaller value: a list's rest from a list pattern, or an int one step towards a bound a condition tested.";
 pub(crate) const NAMED_PATTERN: &str =
@@ -74,15 +73,27 @@ pub(crate) fn open_interface(interface: &str) -> String {
     format!("A law tells apart only the implementers of a sealed interface. Declare `{interface}` sealed.")
 }
 
+/// Why a law cannot read a collection other than a `List` or a `Map`, or a `List` member outside `members`, the members
+/// it reads, each by its name and the arguments it takes.
+pub(crate) fn list_members(members: &[(&str, usize)]) -> String {
+    format!("Hold the values in a List, and read it with {}, an index, a list pattern or a spread.", named(members))
+}
+
 /// Why a law cannot read a `Map` member outside `members`, the members it reads, each by its name and the arguments it
 /// takes.
 pub(crate) fn map_members(members: &[(&str, usize)]) -> String {
+    format!("Read a Map with {}, an index or a loop over its entries.", named(members))
+}
+
+/// `members`, each by its name and the arguments it takes, as a refusal names them: `` `count()` `` for a member of no
+/// arguments, and `` `filter` `` for one of some.
+fn named(members: &[(&str, usize)]) -> String {
     let named: Vec<String> = members
         .iter()
         .map(|(name, arguments)| if *arguments == 0 { format!("`{name}()`") } else { format!("`{name}`") })
         .collect();
 
-    format!("Read a Map with {}, an index or a loop over its entries.", named.join(", "))
+    named.join(", ")
 }
 
 /// Why a law cannot take a value of a class that is a state of the sealed interfaces `first` and `second`: in a law, a

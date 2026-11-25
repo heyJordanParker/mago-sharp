@@ -3,8 +3,8 @@ import Sharp.Lean.Int
 /-!
 PHP# `Map<TKey, TValue>` (spec section 12): its entries in the order their keys were first set, each key once.
 
-A law reads a `Map` with `get`, `has`, `keys()`, `values()`, `count()`, `isEmpty()`, `isNotEmpty()`, `filter` of a
-lambda, a read `map[key]`, `==` on two maps and a loop over its entries.
+A law reads a `Map` with `get`, `has`, `keys()`, `values()`, `count()`, `isEmpty()`, `isNotEmpty()`, `filter` and `any`
+of a lambda, a read `map[key]`, `==` on two maps and a loop over its entries.
 Each is a function of the entries, which the automatic steps rewrite to Lean's own list functions.
 -/
 
@@ -89,6 +89,9 @@ def isNotEmpty (map : Map κ ν) : Bool := !map.entries.isEmpty
 def filter (predicate : ν → Bool) (map : Map κ ν) : Map κ ν :=
   ⟨map.entries.filter (predicate ·.2), map.distinct.sublist (List.filter_sublist.map Prod.fst)⟩
 
+/-- `any(predicate)`: whether `predicate` holds of the value of an entry. -/
+def any (predicate : ν → Bool) (map : Map κ ν) : Bool := map.entries.any (predicate ·.2)
+
 /-- The value `get` finds is the value of an entry, so what holds of every entry, as what `filter` drops, holds of it. -/
 theorem mem_of_lookup : ∀ {entries : List (κ × ν)} {key : κ} {value : ν},
     entries.lookup key = some value → (key, value) ∈ entries
@@ -155,7 +158,7 @@ instance [DecidableEq ν] : DecidableEq (Map κ ν) := fun a b =>
 /-! The automatic steps read each member as the list function of the entries it is, and a map a law writes out as
 its entries. -/
 
-attribute [simp] get has keys values count isEmpty isNotEmpty filter equalBy set ofList empty setIn
+attribute [simp] get has keys values count isEmpty isNotEmpty filter any equalBy set ofList empty setIn
 
 /-! A `Map` of nullable values reads a missing key and a stored null alike, as `Option.join` of what `get` finds, which
 the automatic steps split into the two. -/

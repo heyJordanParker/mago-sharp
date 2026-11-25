@@ -3202,7 +3202,7 @@ fn a_law_reaching_a_member_lean_reserves_is_refused() {
 fn a_law_reading_a_map_member_it_has_no_model_of_is_refused_naming_the_members_it_reads() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(Map<string, int> items) => items.toList().count() == items.count();\n}\n",
-        "Law sized reaches the Map method toList in Shape.sized. Read a Map with `count()`, `isEmpty()`, `isNotEmpty()`, `get`, `has`, `keys()`, `values()`, `filter`, an index or a loop over its entries.",
+        "Law sized reaches the Map method toList in Shape.sized. Read a Map with `count()`, `isEmpty()`, `isNotEmpty()`, `get`, `has`, `keys()`, `values()`, `filter`, `any`, an index or a loop over its entries.",
     );
 }
 
@@ -3418,6 +3418,22 @@ fn compile_proves_a_law_over_map_filter_and_count() {
         "namespace App.Shared;\n\npublic class Basket\n{\n    public static List<bool> flags(List<int> items) => items.map(x => x > 0);\n\n    public static List<int> positives(List<int> items) => items.filter(x => x > 0);\n\n    law flagsKeepCount(List<int> items) => Basket.flags(items).count() == items.count();\n\n    law positivesDropTheRest(int unused) => Basket.positives([1, -2, 3]) == [1, 3];\n}\n",
         "law positivesKeepAll(List<int> items) => Basket.positives(items).count() == items.count();",
     );
+}
+
+/// Spec section 28: a law reads a List's `all` and `any` of a lambda, and a Map's `any` of one over its values, as it
+/// reads their `filter`, so a rule that every value or some value matches proves as it is written.
+#[test]
+fn a_law_reads_a_lists_all_and_any_and_a_maps_any() {
+    let directory = library_project(&[(
+        "app/Probe/Scores.sharp",
+        "namespace App.Probe;\n\ninternal final class Scores\n{\n    private static bool allPositive(List<int> values) => values.all((int value) => value > 0);\n\n    private static bool noneAtMostZero(List<int> values) => values.any((int value) => value <= 0) == false;\n\n    private static bool anyZero(Map<string, int> scores) => scores.any((int score) => score == 0);\n\n    law aNegativeValueFailsAll(int negative) => negative >= 0 || !Scores.allPositive([1, negative]);\n\n    law aNegativeValueFailsAny(int negative) => negative >= 0 || !Scores.noneAtMostZero([1, negative]);\n\n    law aZeroScoreIsFound(string name, int score) => !Scores.anyZero([name: score]) || score == 0;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Probe/Scores.sharp").exists());
 }
 
 /// `App.Jobs.Retry`, an enum whose `backoff()` gives each case's growing list of delays, of 0 to 9 entries,
@@ -4298,12 +4314,13 @@ fn a_law_body_s_match_on_a_value_that_runs_code_is_refused() {
     );
 }
 
-/// A law reaches only `map`, `filter` and `count` of a `List`, so any other method of one is refused by its name.
+/// Spec section 28: a law reads a `List` with the members whose model the checker has, and a member it has none of is
+/// refused by its name, with those members named.
 #[test]
-fn a_law_reaching_another_list_method_is_refused_by_name() {
+fn a_law_reaching_another_list_method_is_refused_naming_the_members_it_reads() {
     assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Shape\n{\n    public static bool known(List<int> items) => items.contains(3);\n\n    law knows(List<int> items) => Shape.known(items);\n}\n",
-        "Law knows reaches the List method contains in Shape.known. Hold the values in a List, and read it with `count()`, `isEmpty()`, `isNotEmpty()`, an index, `map`, `filter`, `join`, a list pattern or a spread.",
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static List<int> turned(List<int> items) => items.reversed();\n\n    law turns(List<int> items) => Shape.turned(items).count() == items.count();\n}\n",
+        "Law turns reaches the List method reversed in Shape.turned. Hold the values in a List, and read it with `count()`, `isEmpty()`, `isNotEmpty()`, `map`, `filter`, `join`, `any`, `all`, an index, a list pattern or a spread.",
     );
 }
 

@@ -14,7 +14,6 @@ workspace = true
 
 [dependencies]
 mago-allocator = { workspace = true }
-mago-build-id = { workspace = true }
 mago-syntax = { workspace = true }
 mago-reporting = { workspace = true }
 mago-bytes = { workspace = true }

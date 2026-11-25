@@ -5508,7 +5508,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let collection = if holds_map && self.may_be_php_array(for_of.expression) && self.takes_keys_back(&r#type) {
             self.crossed_value(for_of.expression, Some(&r#type))
         } else {
-            self.expression(for_of.expression)
+            self.entries_read(for_of.expression)
         };
         let mut fresh = Vec::new();
         let mut variable = |this: &mut Self, variable: &ForOfVariable| {
@@ -6758,9 +6758,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // Spec section 12: `yield ...plans` gives a `Map`'s entries.
             Expression::Yield(Yield::Spread(spread)) => {
                 let iterator = if self.types.holds_map(spread.iterator) {
-                    self.map_entries(spread.iterator)
+                    let own = self.types.expression_type(spread.iterator).clone();
+                    let map = self.crossed_value(spread.iterator, Some(&own));
+
+                    self.sequence_from(line, map)
                 } else {
-                    self.expression(spread.iterator)
+                    self.entries_read(spread.iterator)
                 };
                 self.temporaries += 1;
                 let element = format!("element#{}", self.temporaries).into_bytes();
@@ -6965,34 +6968,29 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             && matches!(self.types.call_target(call).kind, DeclarationKind::Property { .. })
     }
 
-    /// The `Map` `value` as the `Iterable<[TKey, TValue]>` of its entries, spec section 12, a `Sequence` of the object a
-    /// PHP array plain PHP gave becomes first: `\Sharp\Internal\Sequence::from($plans)`.
-    fn map_entries(&mut self, value: &Expression) -> u32 {
-        let line = self.line(value.span());
-        let own = self.types.expression_type(value).clone();
-        let map = self.crossed_value(value, Some(&own));
-
-        self.sequence_from(line, map)
-    }
-
-    /// `$name = $name instanceof \Sharp\Map ? \Sharp\Internal\Sequence::from($name) : $name;`, the statement that
-    /// gives the parameter `parameter` a `Map` argument's entries, when it is a PHP# `Iterable<T>`, which holds a `Map`
-    /// by its entries, spec section 12. A plain PHP caller's `Map` is a checking `Sequence` of them already.
-    fn map_entries_parameter(&mut self, parameter: &FunctionLikeParameter) -> Option<u32> {
-        let hint = parameter.hint.as_ref()?;
-        if parameter.is_variadic() || !holds_entries(self.types.declared_type(hint)) {
-            return None;
+    /// `value` as a reader of an `Iterable` takes it, spec section 12, which reads a `Map` as the
+    /// `Iterable<[TKey, TValue]>` of its entries: a loop, a `yield ...` and each member of an `Iterable` read the
+    /// entries, while the value keeps its identity wherever it is widened to an `Iterable`. A value whose type is an
+    /// `Iterable` that may hold a `Map` reads through
+    /// `($entries#N = value) instanceof \Sharp\Map ? \Sharp\Internal\Sequence::from($entries#N) : $entries#N`, and any
+    /// other value as it is.
+    fn entries_read(&mut self, value: &Expression) -> u32 {
+        let lowered = self.expression(value);
+        if !holds_entries(self.types.expression_type(value)) {
+            return lowered;
         }
 
-        let line = self.line(parameter);
-        let variable = &parameter.variable;
-        let [tested, source, kept, place] = [(); 4].map(|()| self.variable(variable.span, variable.name));
+        let span = value.span();
+        let line = self.line(span);
+        let held = self.hidden("entries");
+        let tested = self.assign(span, &held, lowered);
         let class = self.string(ZEND_NAME_FQ, line, b"Sharp\\Map");
         let is_map = self.node(SHARP_AST_INSTANCEOF, 0, line, &[tested, class]);
+        let source = self.variable(span, &held);
         let entries = self.sequence_from(line, source);
-        let value = self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_map, entries, kept]);
+        let kept = self.variable(span, &held);
 
-        Some(self.node(SHARP_AST_ASSIGN, 0, line, &[place, value]))
+        self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_map, entries, kept])
     }
 
     /// `\Sharp\Internal\Sequence::from($source)`, the `Iterable<T>` that reads `source` lazily, spec section 12: a
@@ -8387,7 +8385,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 statements.extend(self.behavior_creations(&parameter.variable, behaviors));
             }
             let Some(r#type) = self.crossing_type(parameter) else {
-                statements.extend(self.map_entries_parameter(parameter));
                 if self.promoted_beside && parameter.is_promoted_property() {
                     let place = self.parameter_place(parameter);
                     let value = self.variable(parameter.variable.span, parameter.variable.name);
@@ -10164,9 +10161,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         {
             return self.set_literal(array, declared);
         }
-        if declared.is_some_and(holds_entries) && self.types.holds_map(value) {
-            return self.map_entries(value);
-        }
         if let Some((text, target)) = declared.and_then(|declared| self.types.lazy_call_check(value, declared)) {
             let line = self.line(value);
             let lowered = self.expression(value);
@@ -10261,7 +10255,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     pub(super) fn read_receiver(&mut self, receiver: &Expression) -> u32 {
         let r#type = self.types.expression_type(receiver);
         if !self.may_be_php_array(receiver) || self.crossing_array(r#type).is_none() {
-            return self.expression(receiver);
+            return self.entries_read(receiver);
         }
         let r#type = r#type.clone();
 

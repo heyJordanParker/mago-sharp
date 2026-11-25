@@ -695,6 +695,7 @@ impl<'configuration> Session<'configuration> {
             None,
             |path| unit::stamp(&prover.root, path),
             |_, _, _| Ok(Default::default()),
+            crate::consts::BUILD_ID,
             &prover.standard_library,
             |issues| prover.hidden.shown(issues, &database),
         )?;

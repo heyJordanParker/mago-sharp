@@ -14,6 +14,11 @@ pub const SUPPORTED_TARGETS: &[&str] =
 /// The current version of mago.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The ID of this build of the checker, as each compiled file's header and each compile's record name it. Only this
+/// package reads `mago_build_id`, which a change to any crate changes, so the crates below it get the ID as a value
+/// and compile again only when their own code changes.
+pub const BUILD_ID: [u8; 16] = mago_build_id::BUILD_ID.to_be_bytes();
+
 /// The `version` pin this binary satisfies. Below 1.0 a minor release may break the
 /// configuration, as in Cargo's caret rule, so the pin names the minor there.
 pub fn version_pin() -> String {

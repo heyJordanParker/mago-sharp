@@ -21,7 +21,6 @@ use std::path::Path;
 use std::process::Command;
 use std::slice;
 
-use mago_build_id::BUILD_ID;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use mago_database::file::File;
@@ -64,10 +63,12 @@ fn lowered(source: &str) -> Unit {
 
 /// The compiled file of `source`, with the test key, declarations hash, inputs and standard library.
 fn encoded(source: &str) -> Vec<u8> {
-    encode(&lowered(source), source.as_bytes(), KEY, DECLARATIONS, &inputs(), &library())
+    encode(&lowered(source), source.as_bytes(), KEY, DECLARATIONS, &inputs(), CHECKER, &library())
 }
 
 const KEY: [u8; 16] = *b"0123456789abcdef";
+/// The build ID of the checker the tests compile with.
+const CHECKER: [u8; 16] = *b"the checker's id";
 
 const DECLARATIONS: [u8; 16] = *b"declarations0123";
 
@@ -183,7 +184,8 @@ fn an_absent_input_reads_back_as_an_all_zero_stamp_that_no_existing_file_has() {
     let absent =
         Input { path: b"composer.lock".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16], declarations_hash: [0; 16] };
 
-    let decoded = Decoded::new(&encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, DECLARATIONS, &[absent], &library()));
+    let decoded =
+        Decoded::new(&encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, DECLARATIONS, &[absent], CHECKER, &library()));
 
     let [input] = decoded.inputs[..] else { panic!("one input: {:?}", decoded.inputs.len()) };
     assert_eq!(decoded.text(input.path), b"composer.lock");
@@ -194,13 +196,13 @@ fn an_absent_input_reads_back_as_an_all_zero_stamp_that_no_existing_file_has() {
 #[test]
 fn a_compiled_file_reads_back_through_the_c_layout() {
     let lowered = lowered(SOURCE);
-    let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, DECLARATIONS, &inputs(), &library()));
+    let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, DECLARATIONS, &inputs(), CHECKER, &library()));
     let header = decoded.header;
 
     assert_eq!(header.magic, *b"SHARPC\0\0");
     assert_eq!(header.magic, SHARP_UNIT_MAGIC);
     assert_eq!(header.abi, SHARP_UNIT_ABI);
-    assert_eq!(header.checker, BUILD_ID.to_be_bytes());
+    assert_eq!(header.checker, CHECKER);
     assert_eq!(header.key, KEY);
     assert_eq!(header.source_hash, xxh3_128(SOURCE.as_bytes()).to_be_bytes());
     assert_eq!(header.source_size, SOURCE.len() as u64);
@@ -302,8 +304,15 @@ fn every_header_field_and_section_starts_aligned_for_its_type() {
 
     let lowered = lowered(SOURCE);
     for count in 0..=inputs().len() {
-        let decoded =
-            Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, DECLARATIONS, &inputs()[..count], &library()));
+        let decoded = Decoded::new(&encode(
+            &lowered,
+            SOURCE.as_bytes(),
+            KEY,
+            DECLARATIONS,
+            &inputs()[..count],
+            CHECKER,
+            &library(),
+        ));
         let [inputs_at, nodes_at, children_at, ..] = decoded.offsets;
 
         assert_eq!(inputs_at % align_of::<sharp_input>(), 0, "{count} inputs");
@@ -337,7 +346,7 @@ fn header_reads_the_fields_of_a_current_file() {
     let header = header(&bytes).unwrap();
 
     assert_eq!(header.abi, SHARP_UNIT_ABI);
-    assert_eq!(header.checker, BUILD_ID.to_be_bytes());
+    assert_eq!(header.checker, CHECKER);
     assert_eq!(header.key, KEY);
     assert_eq!(header.source_hash, source_hash(SOURCE.as_bytes()));
     assert_eq!(header.source_hash, xxh3_128(SOURCE.as_bytes()).to_be_bytes());
@@ -548,7 +557,7 @@ fn compiled_with_inputs(root: &Path, names: &[&str]) -> Vec<u8> {
         })
         .collect();
 
-    encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, DECLARATIONS, &inputs, &library())
+    encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, DECLARATIONS, &inputs, CHECKER, &library())
 }
 
 /// The engine checks a compiled file's inputs before it runs it: the file is out of date once one changed.
@@ -590,13 +599,13 @@ fn a_declaration_input_is_current_while_the_compiled_file_of_its_import_names_it
     let declarations = |hash: [u8; 16]| {
         let compiled = root.join(".sharp/app/Money.sharpc");
         fs::create_dir_all(compiled.parent().unwrap()).unwrap();
-        fs::write(compiled, encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, hash, &[], &library())).unwrap();
+        fs::write(compiled, encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, hash, &[], CHECKER, &library())).unwrap();
     };
     declarations([5; 16]);
     let mut imported = stamp(&root, b"app/Money.sharp").unwrap().unwrap();
     imported.declarations_hash = [5; 16];
     let inputs = [stamp(&root, b"app/Report.sharp").unwrap().unwrap(), imported];
-    let bytes = encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, DECLARATIONS, &inputs, &library());
+    let bytes = encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, DECLARATIONS, &inputs, CHECKER, &library());
 
     assert!(!inputs_changed(&root, &bytes).unwrap(), "every input is as it was stamped");
 
@@ -627,13 +636,13 @@ fn a_compiled_file_is_stale_once_its_key_changes_or_another_checker_build_wrote_
     let mut damaged = bytes.clone();
     *damaged.last_mut().unwrap() ^= 1;
 
-    assert!(!is_stale(&bytes, KEY));
+    assert!(!is_stale(&bytes, CHECKER, KEY));
     write(root, "app/Report.sharp", &format!("{SOURCE}\n"));
-    assert!(!is_stale(&bytes, KEY), "an input's bytes are no part of the key");
-    assert!(is_stale(&bytes, *b"fedcba9876543210"));
-    assert!(is_stale(&other_build, KEY));
-    assert!(is_stale(&damaged, KEY));
-    assert!(is_stale(b"not a compiled file", KEY));
+    assert!(!is_stale(&bytes, CHECKER, KEY), "an input's bytes are no part of the key");
+    assert!(is_stale(&bytes, CHECKER, *b"fedcba9876543210"));
+    assert!(is_stale(&other_build, CHECKER, KEY));
+    assert!(is_stale(&damaged, CHECKER, KEY));
+    assert!(is_stale(b"not a compiled file", CHECKER, KEY));
 }
 
 /// A compiled file restamped with a new declarations hash, new inputs and a new standard library is the file the encoder
@@ -656,11 +665,11 @@ fn a_restamped_compiled_file_is_the_one_the_encoder_writes_with_its_new_inputs()
         Library { native_fingerprint: *b"0000000000000001", version: b"v0.4.0-with-a-longer-name".to_vec() };
 
     let restamped =
-        restamp(&encoded(SOURCE), [1; 16], &other_inputs, &other_library).expect("a compiled file restamps");
+        restamp(&encoded(SOURCE), [1; 16], &other_inputs, CHECKER, &other_library).expect("a compiled file restamps");
 
-    assert_eq!(restamped, encode(&unit, SOURCE.as_bytes(), KEY, [1; 16], &other_inputs, &other_library));
-    assert_eq!(restamp(&restamped, DECLARATIONS, &inputs(), &library()), Some(encoded(SOURCE)));
-    assert_eq!(restamp(b"not a compiled file", DECLARATIONS, &inputs(), &library()), None);
+    assert_eq!(restamped, encode(&unit, SOURCE.as_bytes(), KEY, [1; 16], &other_inputs, CHECKER, &other_library));
+    assert_eq!(restamp(&restamped, DECLARATIONS, &inputs(), CHECKER, &library()), Some(encoded(SOURCE)));
+    assert_eq!(restamp(b"not a compiled file", DECLARATIONS, &inputs(), CHECKER, &library()), None);
 }
 
 /// The engine checks a compiled file's inputs whichever checker build wrote it, so a file another build wrote keeps its
@@ -699,14 +708,14 @@ fn changing_only_an_inlined_body_changes_the_key() {
     let mut changed = reads();
     changed.inlined[0].fingerprint = xxhash_rust::xxh3::xxh3_64(b"return \\count($this->items);");
 
-    assert_ne!(key(source, &changed), key(source, &reads()));
+    assert_ne!(key(CHECKER, source, &changed), key(CHECKER, source, &reads()));
 }
 
 #[test]
 fn the_key_changes_with_the_source_and_with_each_read() {
     let source = source_hash(b"namespace App.Orders;");
-    let base = key(source, &reads());
-    assert_eq!(base, key(source, &reads()));
+    let base = key(CHECKER, source, &reads());
+    assert_eq!(base, key(CHECKER, source, &reads()));
 
     let mut changes: Vec<(&str, [u8; 16], Reads)> = vec![("the source", source_hash(b"namespace App.Bills;"), reads())];
     for (change, edit) in [
@@ -739,7 +748,7 @@ fn the_key_changes_with_the_source_and_with_each_read() {
     }
 
     for (change, source, reads) in changes {
-        assert_ne!(key(source, &reads), base, "{change}");
+        assert_ne!(key(CHECKER, source, &reads), base, "{change}");
     }
 }
 
@@ -751,7 +760,7 @@ fn the_key_ignores_the_order_and_repeats_of_reads() {
     shuffled.signatures.push(read("App\\Shared\\Money", 11));
     shuffled.bodies.push(read("App\\Shared\\Money::total", 13));
 
-    assert_eq!(key(source, &shuffled), key(source, &reads()));
+    assert_eq!(key(CHECKER, source, &shuffled), key(CHECKER, source, &reads()));
 }
 
 #[test]
@@ -764,10 +773,10 @@ fn a_body_edit_keeps_the_key_until_the_inferred_return_changes() {
         listed: Vec::new(),
         function_types: Vec::new(),
     };
-    let before = key(source, &total("int"));
+    let before = key(CHECKER, source, &total("int"));
 
-    assert_eq!(key(source, &total("int")), before, "the body changed and still returns int");
-    assert_ne!(key(source, &total("float")), before, "the body now returns float");
+    assert_eq!(key(CHECKER, source, &total("int")), before, "the body changed and still returns int");
+    assert_ne!(key(CHECKER, source, &total("float")), before, "the body now returns float");
 }
 
 /// The C header cbindgen writes for `ext/sharp`.

@@ -722,6 +722,7 @@ fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
                 Ok(input)
             },
             |_, _, _| Ok(Default::default()),
+            *b"the checker's id",
             &Library::default(),
             |issues| issues,
         )
