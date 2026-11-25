@@ -4713,6 +4713,26 @@ fn a_class_value_reflects_and_reaches_no_static() {
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
 }
 
+/// Spec section 25: a class's members, as `properties()` and `constructor()`, read a class value of a type without
+/// `?`, so on `typeof(Box<Label>?)` each is refused with the `?` and `nonNullable()`, which gives the type without it.
+/// Through `nonNullable()` the same member compiles.
+#[test]
+fn a_class_member_on_a_nullable_class_value_names_the_question_mark_and_non_nullable() {
+    let declared = [
+        ("src/Demo/Label.sharp", "namespace Demo;\n\npublic class Label\n{\n}\n"),
+        ("src/Demo/Box.sharp", "namespace Demo;\n\npublic class Box<T>\n{\n}\n"),
+    ];
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public void run()\n    {\n        const nullable = typeof(Box<Label>?);\n        nullable.properties();\n        nullable.constructor();\n        nullable.nonNullable().constructor();\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[REFLECTION.as_slice(), &declared].concat()),
+        [
+            "8:9 invalid-class-string-expression Box<Label>? holds null, so it has no `properties`: call `nonNullable()` first. | ",
+            "9:9 invalid-class-string-expression Box<Label>? holds null, so it has no `constructor`: call `nonNullable()` first. | ",
+        ]
+    );
+}
+
 /// PHP reads a class-string's members only through `::`. An arrow read of one stays the error it is in PHP.
 #[test]
 fn an_arrow_read_of_a_class_string_stays_an_error_in_php() {
