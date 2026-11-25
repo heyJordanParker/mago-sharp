@@ -14,6 +14,7 @@ mod external_linter;
 mod external_worker_reduction;
 mod fix;
 mod lint_stats;
+mod outline;
 mod scoped_check;
 mod server_engine;
 mod sharp;

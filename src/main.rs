@@ -193,6 +193,11 @@ pub fn run(main_start: Instant) -> Result<ExitCode, Error> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    // An outline reads its files alone, so it loads no configuration.
+    if let MagoCommand::Outline(command) = &arguments.command {
+        return Ok(command.execute(arguments.threads));
+    }
+
     // Configure global color settings based on the color choice.
     // This must be done before initializing the logger or any other
     // component that uses colors.
@@ -281,6 +286,9 @@ pub fn run(main_start: Instant) -> Result<ExitCode, Error> {
         }
         MagoCommand::Version => {
             unreachable!("The version command should have been handled before this point.")
+        }
+        MagoCommand::Outline(_) => {
+            unreachable!("The outline command should have been handled before this point.")
         }
     };
 
