@@ -207,12 +207,12 @@ impl<K: Referrer> References<K> {
     }
 
     /// The sources that reference `target`.
-    pub fn referrers(&self, target: &SymbolIdentifier) -> impl Iterator<Item = &K> {
+    pub fn referrers<'this>(&'this self, target: &SymbolIdentifier) -> impl Iterator<Item = &'this K> + use<'this, K> {
         self.referrers.get(target).into_iter().flatten()
     }
 
     /// The sources that are the class-like `class` or one of its members.
-    pub fn sources_of_class(&self, class: &Word) -> impl Iterator<Item = &K> {
+    pub fn sources_of_class<'this>(&'this self, class: &Word) -> impl Iterator<Item = &'this K> + use<'this, K> {
         self.by_class.get(class).into_iter().flatten()
     }
 
@@ -930,6 +930,22 @@ impl SymbolReferences {
                 visit(ReferenceOrigin::File(*source), *target, SymbolReferenceKind::PropertyWrite);
             }
         }
+    }
+
+    /// Each symbol, member and file whose body, signature or attributes reference `target`.
+    pub fn referrers_of(&self, target: &SymbolIdentifier) -> impl Iterator<Item = ReferenceOrigin> + use<'_> {
+        self.symbol_references_to_symbols
+            .referrers(target)
+            .chain(self.symbol_references_to_symbols_in_signature.referrers(target))
+            .chain(self.attribute_references.referrers(target))
+            .chain(self.attribute_references_in_signature.referrers(target))
+            .map(|from| ReferenceOrigin::Symbol(*from))
+            .chain(
+                self.file_references_to_symbols
+                    .referrers(target)
+                    .chain(self.file_references_to_symbols_in_signature.referrers(target))
+                    .map(|file| ReferenceOrigin::File(*file)),
+            )
     }
 
     /// Finds all symbols/members that reference a specific target symbol/member.

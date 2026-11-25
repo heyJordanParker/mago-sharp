@@ -53,6 +53,7 @@ use mago_codex::metadata::r#extern::extern_namespace_classes;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::populator::populate_codebase_targeted;
+use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
 use mago_codex::scanner::var_tag_class_likes;
@@ -447,38 +448,43 @@ impl IncrementalAnalysisService {
 
     /// Takes in that the compiled files of `classes`, each a lowercase class name, changed: starts again each extension
     /// interpreter that loaded one or failed to, since PHP declares a class once, and gives up what the last analysis found
-    /// in each file whose extension callbacks read one, so the next
-    /// [`analyze_incremental()`](Self::analyze_incremental) given the returned files analyzes them again. A callback
-    /// reads every class its worker loaded before it ran. Returns `None` when the before-analysis hooks read one, which
-    /// every file reads, so only an analysis from scratch is exact.
+    /// in each file whose extension callbacks read one, and in each file that declares one when the before-analysis
+    /// hooks read one, so the next [`analyze_incremental()`](Self::analyze_incremental) given the returned files
+    /// analyzes them again. A callback reads every class its worker loaded before it ran.
     ///
     /// # Errors
     ///
     /// Returns an error when the external analyzer failed to start.
-    pub fn reload_classes(&mut self, classes: &HashSet<Word>) -> Result<Option<Vec<FileId>>, OrchestratorError> {
+    pub fn reload_classes(&mut self, classes: &HashSet<Word>) -> Result<Vec<FileId>, OrchestratorError> {
         if classes.is_empty() {
-            return Ok(Some(Vec::new()));
+            return Ok(Vec::new());
         }
 
         let names: Vec<&[u8]> = classes.iter().map(Word::as_bytes).collect();
         self.plugin_registry
             .reload_external_workers_holding(&names)
             .map_err(mago_analyzer::error::AnalysisError::from)?;
-        if self.class_logs.read_any(&self.before_analysis_reads, classes) {
-            return Ok(None);
-        }
+        let declaring: HashSet<FileId> = if self.class_logs.read_any(&self.before_analysis_reads, classes) {
+            self.codebase
+                .class_likes
+                .values()
+                .filter(|class| classes.contains(&mago_word::ascii_lowercase_word(class.original_name.as_bytes())))
+                .map(|class| class.span.file_id)
+                .collect()
+        } else {
+            HashSet::default()
+        };
 
         let logs = &self.class_logs;
-        Ok(Some(
-            self.file_states
-                .iter_mut()
-                .filter(|(_, state)| logs.read_any(&state.reads.extension, classes))
-                .map(|(file_id, state)| {
-                    state.content_hash = 0;
-                    *file_id
-                })
-                .collect(),
-        ))
+        Ok(self
+            .file_states
+            .iter_mut()
+            .filter(|(file_id, state)| declaring.contains(file_id) || logs.read_any(&state.reads.extension, classes))
+            .map(|(file_id, state)| {
+                state.content_hash = 0;
+                *file_id
+            })
+            .collect())
     }
 
     /// Analyzes with the extension hosts of `plugin_registry` from the last analysis, which ran with none and recorded
@@ -501,6 +507,8 @@ impl IncrementalAnalysisService {
         self.keeps_lowering_inputs = false;
         self.keeps_scans = false;
         if self.plugin_registry.external_hosts_reach_every_file().map_err(mago_analyzer::error::AnalysisError::from)? {
+            tracing::debug!("The extension hosts reach every file, so each file is analyzed with them from scratch.");
+
             return self.analyze();
         }
         self.codebase_scan_plan = self
@@ -1269,11 +1277,61 @@ impl IncrementalAnalysisService {
                 .map_err(mago_analyzer::error::AnalysisError::from)
         };
         let mut scans = scan(changed_files)?;
-        let (removed_class_likes, naming_removed) = self.removed_class_likes(
+        let (removed_class_likes, mut naming_removed) = self.removed_class_likes(
             scans.iter().map(|((file_id, metadata, _), _)| (*file_id, metadata)),
             &current_file_ids,
             &unchanged_file_ids,
         );
+        // An alias or an `extern` changes what each file that names its target means, which the signature diff can't
+        // see, so each unchanged file that references a changed alias or the target of a changed `extern`, as the last
+        // analysis recorded it, is scanned again, as an edit of it is, and so is each file that declares an `extern` of
+        // the same target, since the second declaration of a target is an error in its own file.
+        let mut renamed: HashSet<(mago_word::Word, mago_word::Word)> = HashSet::default();
+        for ((file_id, metadata, _), _) in &scans {
+            let current: HashSet<_> =
+                metadata.class_like_alias_declarations().map(|(alias, target, _)| (alias, target)).collect();
+            let previous: HashSet<_> = self
+                .file_states
+                .get(file_id)
+                .into_iter()
+                .flat_map(|state| &state.entry_keys.class_like_aliases)
+                .map(|(alias, target, _)| (*alias, *target))
+                .collect();
+            renamed.extend(current.symmetric_difference(&previous).map(|(alias, _)| (*alias, mago_word::empty_word())));
+            let (externs_now, externs_before) = (externs_in(metadata, *file_id), externs_in(&self.codebase, *file_id));
+            if externs_now != externs_before {
+                renamed.extend(
+                    externs_now
+                        .iter()
+                        .chain(&externs_before)
+                        .filter_map(|declaration| extern_symbol(&self.codebase, declaration)),
+                );
+            }
+        }
+        for (file_id, state) in self.file_states.iter().filter(|(file_id, _)| !current_file_ids.contains(file_id)) {
+            renamed.extend(
+                state.entry_keys.class_like_aliases.iter().map(|(alias, _, _)| (*alias, mago_word::empty_word())),
+            );
+            renamed.extend(
+                externs_in(&self.codebase, *file_id)
+                    .iter()
+                    .filter_map(|declaration| extern_symbol(&self.codebase, declaration)),
+            );
+        }
+        if !renamed.is_empty() {
+            let mut renaming = self.files_naming(&renamed);
+            renaming.extend(
+                self.codebase
+                    .externs
+                    .values()
+                    .flatten()
+                    .filter(|declaration| {
+                        extern_symbol(&self.codebase, declaration).is_some_and(|symbol| renamed.contains(&symbol))
+                    })
+                    .map(|declaration| declaration.span.file_id),
+            );
+            naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| renaming.contains(file_id)));
+        }
         if !naming_removed.is_empty() {
             unchanged_file_ids.retain(|file_id| !naming_removed.contains(file_id));
             scans.extend(scan(source_files.iter().filter(|file| naming_removed.contains(&file.id)).collect())?);
@@ -1439,38 +1497,6 @@ impl IncrementalAnalysisService {
             );
             diff
         };
-
-        let aliases_changed = new_file_scans.iter().any(|(file_id, metadata)| {
-            let current: HashSet<_> =
-                metadata.class_like_alias_declarations().map(|(alias, target, _)| (alias, target)).collect();
-            let previous: HashSet<_> = self
-                .file_states
-                .get(file_id)
-                .map(|state| {
-                    state.entry_keys.class_like_aliases.iter().map(|(alias, target, _)| (*alias, *target)).collect()
-                })
-                .unwrap_or_default();
-
-            current != previous
-        }) || self.file_states.iter().any(|(file_id, state)| {
-            !current_file_ids.contains(file_id) && !state.entry_keys.class_like_aliases.is_empty()
-        });
-
-        if aliases_changed {
-            return self.analyze();
-        }
-
-        let externs_changed = new_file_scans
-            .iter()
-            .any(|(file_id, metadata)| externs_in(metadata, *file_id) != externs_in(&self.codebase, *file_id))
-            || self
-                .file_states
-                .keys()
-                .any(|file_id| !current_file_ids.contains(file_id) && !externs_in(&self.codebase, *file_id).is_empty());
-
-        if externs_changed {
-            return self.analyze();
-        }
 
         // A module serves the files of its namespace and of each namespace below it, and the analyzer reads every module
         // beside each module, spec section 32, so a module that changed, before or after, re-analyzes those files.
@@ -2258,6 +2284,29 @@ impl IncrementalAnalysisService {
         analyzer
     }
 
+    /// The files that declare one of `symbols` or whose code or declarations reference one, as the last analysis
+    /// recorded it: the file of each declaration that is one or whose signature, body or attributes reference one, and
+    /// each file whose top-level code does.
+    fn files_naming(&self, symbols: &HashSet<(mago_word::Word, mago_word::Word)>) -> HashSet<FileId> {
+        let declared_in: HashMap<mago_word::Word, FileId> = self
+            .codebase
+            .file_signatures
+            .iter()
+            .flat_map(|(file_id, signature)| signature.ast_nodes.iter().map(move |node| (node.name, *file_id)))
+            .collect();
+        symbols
+            .iter()
+            .flat_map(|symbol| self.native_symbol_references.referrers_of(symbol))
+            .chain(symbols.iter().map(|symbol| ReferenceOrigin::Symbol(*symbol)))
+            .filter_map(|origin| match origin {
+                ReferenceOrigin::File(name) => Some(FileId::new(name.as_bytes())),
+                ReferenceOrigin::Symbol((symbol, member)) => {
+                    declared_in.get(if symbol.is_empty() { &member } else { &symbol }).copied()
+                }
+            })
+            .collect()
+    }
+
     /// The `unchanged` files that need no new analysis once [`CodebaseMetadata::mark_safe_symbols`] marked `codebase`'s
     /// safe symbols: each one's
     /// top-level code is not in `invalid_files`, and every symbol and member it declares stayed safe.
@@ -3027,6 +3076,17 @@ pub(crate) fn receiver_changing_members(metadata: &CodebaseMetadata) -> impl Ite
                 && member.parameters.first().is_some_and(|receiver| receiver.flags.is_by_reference())
         })
         .map(|member| member.original_name)
+}
+
+/// The symbol `declaration` declares in `codebase`, as the reference graph keys it: a function by its name, and a class
+/// or a member by the class and the member.
+fn extern_symbol(
+    codebase: &CodebaseMetadata,
+    declaration: &ExternMetadata,
+) -> Option<(mago_word::Word, mago_word::Word)> {
+    codebase
+        .extern_declaration(declaration)
+        .map(|(class, member)| if class.is_empty() { (member, mago_word::empty_word()) } else { (class, member) })
 }
 
 /// The `extern` declarations in `file_id`, in the codebase's order. A body's summary records the effects of the
@@ -4380,6 +4440,8 @@ mod tests {
         );
     }
 
+    /// A class alias whose target changes, that is removed, or that is added again re-analyzes the file that declares
+    /// it and each file that names it, and leaves the other files as they were.
     #[test]
     fn test_watch_class_alias_target_changes() {
         let real = concat!(
@@ -4387,31 +4449,37 @@ mod tests {
             "class First { public function value(): int { return 1; } }\n",
             "class Second { public function value(): string { return ''; } }\n",
         );
-        let alias = "<?php\nclass_alias(First::class, Alias::class);\n";
+        let alias = |target: &str| format!("<?php\nclass_alias({target}::class, Alias::class);\n");
         let consumer = concat!(
             "<?php\n",
             "function consume(Alias $value): int { return $value->value(); }\n",
             "consume(new First());\n",
         );
+        let other = "<?php\nfunction other(): int { return 1; }\n";
+        let alias_id = FileId::new(b"src/Alias.php");
+        let rechecked = HashSet::from_iter([alias_id, FileId::new(b"src/Consumer.php")]);
 
-        let mut db =
-            make_database(vec![("src/Real.php", real), ("src/Alias.php", alias), ("src/Consumer.php", consumer)]);
+        let mut db = make_database(vec![
+            ("src/Real.php", real),
+            ("src/Alias.php", alias("First").as_str()),
+            ("src/Consumer.php", consumer),
+            ("src/Other.php", other),
+        ]);
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
         assert_matches_full(&service, &db, "initial class alias");
 
-        db.update(
-            FileId::new(b"src/Alias.php"),
-            Cow::Owned(b"<?php\nclass_alias(Second::class, Alias::class);\n".to_vec()),
-        );
-        service.update_database(db.read_only());
-        service.analyze_incremental(None).expect("Incremental failed.");
-        assert_matches_full(&service, &db, "changed class alias target");
-
-        db.update(FileId::new(b"src/Alias.php"), Cow::Owned(b"<?php\n".to_vec()));
-        service.update_database(db.read_only());
-        service.analyze_incremental(None).expect("Incremental failed.");
-        assert_matches_full(&service, &db, "removed class alias");
+        for (contents, context) in [
+            (alias("Second"), "changed class alias target"),
+            ("<?php\n".to_owned(), "removed class alias"),
+            (alias("First"), "the class alias is added again"),
+        ] {
+            db.update(alias_id, Cow::Owned(contents.into_bytes()));
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental failed.");
+            assert_eq!(service.analyzed_files, rechecked, "{context}");
+            assert_matches_full(&service, &db, context);
+        }
     }
 
     /// A body edit changes what every caller's body reaches, so the warm run re-analyzes only the edited file and
@@ -4543,7 +4611,8 @@ mod tests {
     }
 
     /// A body records the effects its `extern` declarations list, so an edit of a declaration changes the summaries
-    /// of every file that calls what it declares.
+    /// of every file that calls what it declares: the watch analyzes again the file of the declaration, the file of
+    /// what it declares and each file that calls it, and leaves the other files as they were.
     #[test]
     fn test_watch_extern_edit_reaches_every_caller() {
         let clock = |uses: &str| format!("namespace App.Stubs;\n\nimport Acme.Chrono;\n\nextern Chrono.now{uses};\n");
@@ -4554,7 +4623,10 @@ mod tests {
             ("src/Clock.sharp", clock("").as_str()),
             ("src/Report.sharp", report),
             ("src/Acme/Chrono/now.php", now),
+            ("src/Other.sharp", "namespace App;\n\npublic class Other\n{\n}\n"),
         ]);
+        let rechecked =
+            HashSet::from_iter([clock_id, FileId::new(b"src/Report.sharp"), FileId::new(b"src/Acme/Chrono/now.php")]);
         let impure_laws = |service: &IncrementalAnalysisService| {
             service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-law")).count()
         };
@@ -4567,12 +4639,14 @@ mod tests {
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[clock_id])).expect("Incremental analysis failed.");
         assert_eq!(impure_laws(&service), 1);
+        assert_eq!(service.analyzed_files, rechecked, "now uses Clock");
         assert_matches_full(&service, &db, "now uses Clock");
 
         db.update(clock_id, Cow::Owned(clock("").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[clock_id])).expect("Incremental analysis failed.");
         assert_eq!(impure_laws(&service), 0);
+        assert_eq!(service.analyzed_files, rechecked, "now is pure again");
         assert_matches_full(&service, &db, "now is pure again");
     }
 

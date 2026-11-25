@@ -643,11 +643,8 @@ impl AnalyzeCommand {
                 HostsChange::Unknown => declared_classes(server.codebase(), |_| true),
             };
             *server.database_mut() = watcher.database().clone().into_static();
-            let mut issues = match server.reload_classes(changed)? {
-                Some(read) => server.analyze_incremental(&[changed_file_ids, read].concat())?,
-                None => server.analyze()?,
-            }
-            .issues;
+            let read = server.reload_classes(changed)?;
+            let mut issues = server.analyze_incremental(&[changed_file_ids, read].concat())?.issues;
             issues.extend(server.law_refusals()?);
             issues.filter_out_ignored(&ignore_set, |file_id| {
                 server.database().get_ref(&file_id).ok().map(|f| String::from_utf8_lossy(&f.name).into_owned())
