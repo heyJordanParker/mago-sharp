@@ -846,7 +846,7 @@ fn namespace_types(codebase: &CodebaseMetadata, uses_on: &HashMap<(Word, Word), 
     codebase
         .class_likes
         .iter()
-        .filter(|(class_name, class)| {
+        .filter(|(_, class)| {
             class.flags.is_user_defined() && !class.flags.is_module() && !class.flags.is_enum_case_class()
         })
         .filter_map(|(class_name, class)| {
