@@ -810,15 +810,12 @@ fn unseen_reaches(codebase: &CodebaseMetadata, test_files: &[FileId]) -> Vec<(Wo
         let mut members: Vec<Word> = class
             .properties
             .iter()
-            .filter(|(_, property)| is_dynamically_accessed(codebase, &property.attributes))
-            .map(|(name, _)| *name)
+            .filter_map(|(name, property)| is_dynamically_accessed(codebase, &property.attributes).then_some(*name))
             .collect();
         members.extend(
-            class
-                .constants
-                .iter()
-                .filter(|(_, constant)| is_dynamically_accessed(codebase, &constant.attributes))
-                .map(|(name, _)| *name),
+            class.constants.iter().filter_map(|(name, constant)| {
+                is_dynamically_accessed(codebase, &constant.attributes).then_some(*name)
+            }),
         );
         members.extend(class.methods.iter().copied().filter(|name| {
             codebase.function_likes.get(&(*class_name, *name)).is_some_and(|method| {
@@ -846,10 +843,10 @@ fn namespace_types(codebase: &CodebaseMetadata, uses_on: &HashMap<(Word, Word), 
     codebase
         .class_likes
         .iter()
-        .filter(|(_, class)| {
-            class.flags.is_user_defined() && !class.flags.is_module() && !class.flags.is_enum_case_class()
-        })
         .filter_map(|(class_name, class)| {
+            if !class.flags.is_user_defined() || class.flags.is_module() || class.flags.is_enum_case_class() {
+                return None;
+            }
             let class_key = codebase.class_key(*class_name);
             let namespace = namespace_of(class.original_name.as_bytes());
             let is_used_outside = type_uses.get(&class_key).into_iter().flatten().any(|code_in| {
@@ -882,7 +879,7 @@ pub fn unused_classes(
     references: &SymbolReferences,
     test_files: &[FileId],
 ) -> IssueCollection {
-    let mut used: HashSet<Word> = unseen_reaches(codebase, test_files).into_iter().map(|(_, class)| class).collect();
+    let mut used: HashSet<Word> = unseen_reaches(codebase, test_files).into_iter().map(|reach| reach.1).collect();
     references.for_each_reference(|origin, (class, _), _| {
         let from_inside = match origin {
             ReferenceOrigin::Symbol((symbol, _)) => {
