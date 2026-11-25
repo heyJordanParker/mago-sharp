@@ -1020,6 +1020,10 @@ generate_ast_walker! {
             walker.walk_type_parameter_list(type_parameters, context);
         }
 
+        if let Some(backing_type_hint) = &r#struct.backing_type_hint {
+            walker.walk_enum_backing_type_hint(backing_type_hint, context);
+        }
+
         if let Some(inheritance) = &r#struct.inheritance {
             walker.walk_inheritance(inheritance, context);
         }

@@ -3,7 +3,10 @@ use mago_bytes::BytesDisplay;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
+use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::property::PropertyMetadata;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
@@ -16,6 +19,8 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Struct;
 use mago_word::word;
@@ -126,6 +131,18 @@ where
         }
 
         inherits = true;
+        // A struct after the colon reads as a backing type, spec section 10, which is only a built-in one.
+        if named.flags.is_struct() {
+            context.collector.report_with_code(
+                IssueCode::InvalidStruct,
+                Issue::error(format!(
+                    "`{}` is a struct, and a struct is stored as `string`, `int`, `float` or `bool`.",
+                    display_class_like_name(context, named.original_name)
+                ))
+                .with_annotation(Annotation::primary(type_name.span()).with_message("Named here.")),
+            );
+            continue;
+        }
         context.collector.report_with_code(
             IssueCode::InvalidStruct,
             Issue::error(format!(
@@ -140,8 +157,115 @@ where
             )),
         );
     }
+    report_unstored_parts(r#struct, class_like_metadata, context);
+    report_text_pair_fields(class_like_metadata, context);
 
     !inherits
+}
+
+/// Reports what a backed struct can't be stored as, spec section 10: a backing type other than `string`, `int`,
+/// `float` or `bool`, and, with no fields, a constructor that takes anything but the one value it holds, and with
+/// fields, a missing `value` it is stored as or `parse` that builds it back from that value.
+fn report_unstored_parts<A>(r#struct: &Struct<'_>, class: &ClassLikeMetadata, context: &mut Context<'_, '_, A>)
+where
+    A: Arena,
+{
+    let Some(hint) = r#struct.backing_type_hint.as_ref().map(|backing| &backing.hint) else {
+        return;
+    };
+    let name = display_class_like_name(context, class.original_name);
+    let mut report = |message: String, span: Span| {
+        context.collector.report_with_code(
+            IssueCode::InvalidStruct,
+            Issue::error(message).with_annotation(Annotation::primary(span).with_message("Declared here.")),
+        );
+    };
+    let backing = match hint {
+        Hint::String(_) => "string",
+        Hint::Integer(_) => "int",
+        Hint::Float(_) => "float",
+        Hint::Bool(_) => "bool",
+        _ => {
+            report(
+                format!("`{name}` is stored as `string`, `int`, `float` or `bool`, and no other type."),
+                hint.span(),
+            );
+
+            return;
+        }
+    };
+    let value = word("$value");
+    let held = class.properties.get(&value).is_some_and(|value| value.flags.contains(MetadataFlags::GENERATED));
+    if held {
+        let constructor = context.codebase.get_method(class.name, word("__construct"));
+        let takes_value = constructor.is_some_and(|constructor| {
+            matches!(constructor.parameters.as_slice(), [parameter] if parameter.name.0 == value
+                && parameter.type_metadata.as_ref().is_some_and(|written| written.type_union.types.as_ref() == class.struct_backing_type.as_slice()))
+        });
+        if !takes_value {
+            report(
+                format!(
+                    "`{name}` holds the `{backing}` it is stored as, so its constructor takes `{backing} value` alone."
+                ),
+                constructor.map_or(r#struct.name.span, |constructor| constructor.span),
+            );
+        }
+
+        return;
+    }
+
+    if !class.properties.contains_key(&value) {
+        report(
+            format!("`{name}` has fields, so it declares `public {backing} value`, the `{backing}` it is stored as."),
+            r#struct.name.span,
+        );
+    }
+    let declares_parse = r#struct
+        .members
+        .iter()
+        .any(|member| matches!(member, ClassLikeMember::Method(method) if method.name.value == b"parse"));
+    if !declares_parse {
+        report(
+            format!(
+                "`{name}` has fields, so it declares `public static {name} parse({backing} value)`, which builds it back from the `{backing}` it is stored as."
+            ),
+            r#struct.name.span,
+        );
+    }
+}
+
+/// Reports each field of `class`, a struct, whose type holds a class with a static `parse(string)` and a `toString()`
+/// but no backing type, spec section 10, at the field's type: that pair stores nothing, since `toString()` is display
+/// only, and a struct's fields are its stored form.
+fn report_text_pair_fields<A>(class: &ClassLikeMetadata, context: &mut Context<'_, '_, A>)
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    for property in class.struct_properties() {
+        let Some(written) = property.type_declaration_metadata.as_ref() else {
+            continue;
+        };
+        let paired = written.type_union.get_all_child_nodes().into_iter().find_map(|node| match node {
+            TypeRef::Atomic(TAtomic::Object(TObject::Named(object))) if codebase.declares_text_pair(object.name) => {
+                codebase.get_class_like(object.name)
+            }
+            _ => None,
+        });
+        let Some(paired) = paired else {
+            continue;
+        };
+
+        let paired = display_class_like_name(context, paired.original_name);
+        context.collector.report_with_code(
+            IssueCode::InvalidStruct,
+            Issue::error(format!(
+                "`{paired}` has `parse(string)` and `toString()`, which store nothing: declare `: string` on it, with the `value` it is stored as and the `parse` that reads it back."
+            ))
+            .with_annotation(Annotation::primary(written.span).with_message("Stored here."))
+            .with_note("`toString()` is display only, and a struct's fields are its stored form."),
+        );
+    }
 }
 
 /// Reports each key the stored form of a struct or a PHP# class in `r#type` would read into two fields, spec section
@@ -609,7 +733,7 @@ where
 /// no `parse` builds, or any other type but `Any`, a scalar or a union of them, and a collection, which the bridge
 /// writes no `parse` for, also inside a collection or a struct or class `parse` reads through, which `visiting` holds
 /// while it is read. A family, an interface or an abstract class included, reads through each of its variants, and a
-/// value as text, as `Decimal`, and a class whose `parse` reads any value, as `JsonValue`, read through their own, and
+/// backed struct, as `Decimal`, and a class whose `parse` reads any value, as `JsonValue`, read through their own, and
 /// a machine that stores as its case's value reads that value, spec section 20.2.
 fn unreadable_part(
     codebase: &CodebaseMetadata,
@@ -624,7 +748,7 @@ fn unreadable_part(
         TAtomic::Callable(_) => Some((atomic.clone(), "is a function")),
         TAtomic::Object(TObject::Named(object))
             if visiting.contains(&object.name)
-                || codebase.is_text_value(object.name)
+                || codebase.is_backed_struct(object.name)
                 || codebase.parses_any_value(object.name)
                 || codebase.stores_as_value(object.name) =>
         {

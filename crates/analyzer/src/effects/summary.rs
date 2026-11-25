@@ -279,7 +279,7 @@ fn parsed_classes<'codebase>(
         match atomic {
             TAtomic::Object(TObject::Named(object))
                 if codebase.parses(object.name)
-                    || codebase.is_text_value(object.name)
+                    || codebase.is_backed_struct(object.name)
                     || codebase.parses_any_value(object.name) =>
             {
                 let Some(class) = codebase.get_class_like(object.name) else {

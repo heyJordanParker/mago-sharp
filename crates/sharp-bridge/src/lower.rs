@@ -1077,6 +1077,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.push(self.value_equality(r#struct.name.span, &[self.class]));
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
+        members.extend(self.held_value(r#struct.name.span));
         members.extend(self.json_encoding(r#struct.name.span));
         members.extend(self.masked_dump(r#struct.name.span));
         members.extend(self.string_conversion(r#struct.members.as_slice(), r#struct.left_brace, r#struct.right_brace));
@@ -1226,8 +1227,54 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
+    /// What a backed struct with no fields holds, spec section 10, at its name's `span`: the property its value is
+    /// stored in, which [`Self::class_members`]'s constructor sets, and the `parse` that runs that constructor. None for
+    /// any other class.
+    ///
+    /// ```php
+    /// public readonly string $value;
+    /// public static function parse(string $value): \App\Email { return new \App\Email($value); }
+    /// ```
+    fn held_value(&mut self, span: Span) -> Vec<u32> {
+        let Some(backing) = self.types.held_value(word(self.class)) else {
+            return Vec::new();
+        };
+        let line = self.line(span);
+        let hint = self.string(ZEND_NAME_NOT_FQ, line, backing);
+        let name = self.string(0, line, b"value");
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, NULL]);
+        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+        let property =
+            self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC | ZEND_ACC_READONLY, line, &[hint, declaration, NULL]);
+
+        self.enter(b"parse");
+        let class = self.string(ZEND_NAME_FQ, line, self.class);
+        let value = self.variable(span, b"value");
+        let argument = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+        let built = self.node(SHARP_AST_NEW, 0, line, &[class, argument]);
+        let built = self.node(SHARP_AST_RETURN, 0, line, &[built]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[built]);
+        let hint = self.string(ZEND_NAME_NOT_FQ, line, backing);
+        let name = self.string(0, line, b"value");
+        let parameter = self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
+        let return_type = self.string(ZEND_NAME_FQ, line, self.class);
+        let return_type =
+            self.function_type(return_type, self.types.method_type(word(self.class), word("parse")), 0, line);
+        let parse = self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC,
+            span,
+            span,
+            b"parse",
+            &[parameters, NULL, body, return_type, NULL],
+        );
+
+        vec![property, parse]
+    }
+
     /// The `#json` method of the class being lowered, at `span`, which the engine's JSON encoder calls, spec section
-    /// 10, so `Json.encode` writes what `parse` reads: a value as text as its `toString()`, and a struct, class or enum
+    /// 10, so `Json.encode` writes what `parse` reads: a backed struct as its `value`, and a struct, class or enum
     /// case whose `parse` the codex gives as an object that holds its family's key and its name first when it is a
     /// variant, then each field `parse` reads under its key, without a `[Key(omitNull: true)]` field that holds null.
     /// A field is read from the property of its name, so a main constructor parameter that declares none is not
@@ -1252,12 +1299,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let this = self.variable(span, b"this");
             let sealed = self.global_call(line, b"Sharp\\Internal\\seal", &[this]);
             statements.push(self.node(SHARP_AST_RETURN, 0, line, &[sealed]));
-        } else if self.types.is_text_value(word(self.class)) {
-            let this = self.variable(span, b"this");
-            let method = self.string(0, line, b"toString");
-            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
-            let text = self.node(SHARP_AST_METHOD_CALL, 0, line, &[this, method, arguments]);
-            statements.push(self.node(SHARP_AST_RETURN, 0, line, &[text]));
+        } else if self.types.is_backed_struct(word(self.class)) {
+            let value = self.this_property(span, b"value");
+            statements.push(self.node(SHARP_AST_RETURN, 0, line, &[value]));
         } else {
             let tag = self.types.variant_tag(self.class);
             let parses = self.types.parses(word(self.class)) && !self.types.is_family(word(self.class));
@@ -1634,6 +1678,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
         }
 
+        // A backed struct with no fields stores the one value its constructor takes, spec section 10, before its body
+        // checks it.
+        let held = self.types.held_value(word(self.class));
+        if held.is_some() {
+            let line = self.line(left_brace);
+            let property = self.this_property(left_brace, b"value");
+            let value = self.variable(left_brace, b"value");
+            initial_values.insert(0, self.node(SHARP_AST_ASSIGN, 0, line, &[property, value]));
+        }
+
         let mut members = Vec::new();
         let mut has_constructor = false;
         let keeps_statics = self.types.bounds(word(self.class)).is_some();
@@ -1757,7 +1811,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
                 initial_values.push(self.parent_construct(line, arguments));
             }
-            let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+            let parameters: Vec<u32> = held
+                .map(|backing| {
+                    let hint = self.string(ZEND_NAME_NOT_FQ, line, backing);
+                    let name = self.string(0, line, b"value");
+
+                    self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL])
+                })
+                .into_iter()
+                .collect();
+            let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
             let body = self.node(SHARP_AST_STMT_LIST, 0, line, &initial_values);
 
             members.push(self.declaration(

@@ -907,42 +907,57 @@ fn a_generic_struct_takes_type_parameters() {
     }
 }
 
-/// A struct's header lists interfaces only, spec section 10, a generic one with its type arguments, so a type such as
-/// `string` there is one error at the type, and the interfaces after it still parse.
+/// A struct's header opens with the built-in type it is stored as, when it has one, then lists its interfaces, spec
+/// section 10, a generic one with its type arguments, as an enum's header does.
 #[test]
-fn a_struct_header_lists_interfaces_only() {
-    for (header, refused, interfaces) in [
+fn a_struct_header_holds_a_backing_type_then_interfaces() {
+    let headers = [
         (" : HasLabel, Sortable", None, &[&b"HasLabel"[..], b"Sortable"][..]),
         (" : Comparable<Username>, HasLabel", None, &[b"Comparable", b"HasLabel"]),
         (" : string", Some("string"), &[]),
         (" : int, HasLabel", Some("int"), &[b"HasLabel"]),
-    ] {
-        let arena = LocalArena::new();
-        let code: &'static str = Box::leak(
-            format!("struct Username{header}\n{{\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
-        );
-        let program = parse(&arena, "src/Username.sharp", code);
-
-        let errors: Vec<(String, &str)> =
-            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
-        let expected: Vec<(String, &str)> = refused
-            .map(|refused| {
-                (
-                    "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value."
-                        .to_owned(),
-                    refused,
+    ];
+    for declaration in ["struct", "public struct"] {
+        for (header, backing, interfaces) in headers {
+            let arena = LocalArena::new();
+            let code: &'static str = Box::leak(
+                format!(
+                    "namespace App;\n\n{declaration} Username{header}\n{{\n    public int run() {{ return 1; }}\n}}\n"
                 )
-            })
-            .into_iter()
-            .collect();
-        assert_eq!(errors, expected, "{header}");
-        let Some(Statement::Struct(username)) = program.statements.first() else {
-            panic!("expected a struct for `{header}`, got {:#?}", program.statements);
-        };
-        let named: Vec<&[u8]> =
-            username.inheritance.iter().flat_map(|inheritance| inheritance.names()).map(|name| name.value()).collect();
-        assert_eq!(named, interfaces, "{header}");
-        assert!(matches!(username.members.as_slice(), [ClassLikeMember::Method(_)]), "{header}");
+                .into_boxed_str(),
+            );
+            let program = parse(&arena, "src/Username.sharp", code);
+
+            assert!(program.errors.is_empty(), "{declaration}{header}: {:?}", program.errors);
+            let username = program
+                .statements
+                .iter()
+                .find_map(|statement| match statement {
+                    Statement::Namespace(namespace) => {
+                        namespace.statements().iter().find_map(|statement| match statement {
+                            Statement::Struct(username) => Some(username),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    panic!("expected a struct for `{declaration}{header}`, got {:#?}", program.statements)
+                });
+            assert_eq!(
+                username.backing_type_hint.as_ref().map(|backing| source(code, &backing.hint)),
+                backing,
+                "{declaration}{header}"
+            );
+            let named: Vec<&[u8]> = username
+                .inheritance
+                .iter()
+                .flat_map(|inheritance| inheritance.names())
+                .map(|name| name.value())
+                .collect();
+            assert_eq!(named, interfaces, "{declaration}{header}");
+            assert!(matches!(username.members.as_slice(), [ClassLikeMember::Method(_)]), "{declaration}{header}");
+        }
     }
 }
 
@@ -958,10 +973,6 @@ fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
         (
             "class Report\n{\n    public required int count() { return 1; }\n}\n",
             "`required` goes on the constructor or a property, never on a method: remove it here.",
-        ),
-        (
-            "struct Username : string\n{\n}\n",
-            "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value.",
         ),
         (
             "class Report\n{\n    public void run() { const check = handler ?? item => item.ready; }\n}\n",

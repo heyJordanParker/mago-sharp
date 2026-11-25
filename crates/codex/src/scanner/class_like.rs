@@ -3,6 +3,7 @@ use mago_word::Word;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use mago_names::binding::php_method_name;
 use mago_names::binding::php_variable_name;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
@@ -667,11 +668,28 @@ where
         scope,
     )?;
     class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::STRUCT;
+    class_like_metadata.struct_backing_type =
+        r#struct.backing_type_hint.as_ref().and_then(|backing| match backing.hint {
+            Hint::String(_) => Some(TAtomic::Scalar(TScalar::string())),
+            Hint::Integer(_) => Some(TAtomic::Scalar(TScalar::int())),
+            Hint::Float(_) => Some(TAtomic::Scalar(TScalar::float())),
+            Hint::Bool(_) => Some(TAtomic::Scalar(TScalar::bool())),
+            _ => None,
+        });
     require_struct_properties(&mut class_like_metadata, &r#struct.members);
     if !declares_equality(&r#struct.members) {
         create_value_equality(codebase, &mut class_like_metadata, span);
     }
-    if leaves_parse_free(&r#struct.members) {
+    if let (Some(backing), Some(hint)) =
+        (class_like_metadata.struct_backing_type.clone(), r#struct.backing_type_hint.as_ref())
+    {
+        if !declares_fields(&r#struct.members) {
+            let declares_constructor = r#struct.members.iter().any(
+                |member| matches!(member, ClassLikeMember::Method(method) if php_method_name(method) == b"__construct"),
+            );
+            create_held_value(codebase, &mut class_like_metadata, backing, hint.hint.span(), declares_constructor);
+        }
+    } else if leaves_parse_free(&r#struct.members) {
         create_parse_methods(codebase, &mut class_like_metadata, span);
     }
 
@@ -2337,6 +2355,58 @@ fn leaves_parse_free(members: &Sequence<ClassLikeMember<'_>>) -> bool {
 
         name == b"parse" || name == b"tryParse"
     })
+}
+
+/// Whether `members`, a struct's, declare a field: a property with storage, or a main constructor parameter that
+/// declares one. The scanner registers a main constructor's parameters after the struct, so its metadata can't tell yet.
+fn declares_fields(members: &Sequence<ClassLikeMember<'_>>) -> bool {
+    members.iter().any(|member| match member {
+        ClassLikeMember::Method(method) => {
+            method.parameter_list.parameters.iter().any(|parameter| parameter.is_promoted_property())
+        }
+        ClassLikeMember::Property(property) => {
+            !property.modifiers().contains_static() && !matches!(property, Property::Computed(_))
+        }
+        _ => false,
+    })
+}
+
+/// What a backed struct with no fields holds, spec section 10, at its backing type's `span`: the `public T value` it is
+/// stored as, which its constructor's one parameter sets before its body runs, as a promoted parameter does, the
+/// constructor that takes it when it `declares_constructor` none, and the `parse(T value)` that runs that constructor.
+fn create_held_value(
+    codebase: &mut CodebaseMetadata,
+    class_like: &mut ClassLikeMetadata,
+    backing: TAtomic,
+    span: Span,
+    declares_constructor: bool,
+) {
+    let value = word("$value");
+    let backing = TUnion::from_atomic(backing);
+    let flags = MetadataFlags::READONLY | MetadataFlags::PROMOTED_PROPERTY | MetadataFlags::GENERATED;
+    let mut property = PropertyMetadata::new(VariableIdentifier(value), flags);
+    property.name_span = Some(span);
+    property.write_visibility = Visibility::Private;
+    property.set_type_declaration_metadata(Some(TypeMetadata::new(backing.clone(), span)));
+    class_like.add_property_metadata(property);
+
+    if !declares_constructor {
+        let mut constructor = create_static_method(
+            "__construct",
+            span,
+            vec![create_parameter("$value", backing.clone(), span)],
+            get_void(),
+            vec![],
+        );
+        if let Some(metadata) = constructor.method_metadata.as_mut() {
+            metadata.is_static = false;
+            metadata.is_constructor = true;
+        }
+        add_method(codebase, b"__construct", class_like, constructor);
+    }
+    let instance = get_named_object(class_like.original_name, None);
+    let parse = create_static_method("parse", span, vec![create_parameter("$value", backing, span)], instance, vec![]);
+    add_method(codebase, b"parse", class_like, parse);
 }
 
 /// A struct's or a PHP# class's `parse` and `tryParse`, spec section 10, which read a `Map<string, Any?>` or an

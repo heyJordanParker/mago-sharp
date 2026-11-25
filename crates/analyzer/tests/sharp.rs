@@ -17484,6 +17484,77 @@ fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
     assert_keeps_name(structure, (class, "Class `Dup` is already defined in `app/Demo/Dup.sharp`."), &[]);
 }
 
+/// Spec section 10: a struct's header may open with the built-in type it is stored as, `string`, `int`, `float` or
+/// `bool`, and a struct or any other type in that place is refused naming the four. A backed struct with no fields
+/// holds the one value its constructor takes, so a constructor that takes another is refused, and one that declares
+/// none gets it, with its `value` and its `parse`. One with fields declares the `value` it is stored as and the `parse`
+/// that reads it back, and each it lacks is refused by name. A class with `parse(string)` and `toString()` declares no
+/// stored form, so a struct field of it is refused naming `: string`.
+#[test]
+fn a_struct_declares_a_built_in_backing_type_and_the_value_and_parse_its_stored_form_needs() {
+    let sharp = [
+        (
+            "src/Demo/Email.sharp",
+            "namespace Demo;\n\npublic struct Email : string\n{\n    public Email(string value)\n    {\n        if (value == \"\") {\n            throw new ValueError(\"no email address\");\n        }\n    }\n}\n",
+        ),
+        (
+            "src/Demo/Address.sharp",
+            "namespace Demo;\n\npublic struct Address\n{\n    public Address(public string street { get; }) { }\n}\n",
+        ),
+        ("src/Demo/Home.sharp", "namespace Demo;\n\npublic struct Home : Address\n{\n    public Home() { }\n}\n"),
+        (
+            "src/Demo/Point.sharp",
+            "namespace Demo;\n\npublic struct Point : string\n{\n    public Point(public int x { get; }, public int y { get; }) { }\n\n    public string value => `${this.x},${this.y}`;\n}\n",
+        ),
+        (
+            "src/Demo/Spot.sharp",
+            "namespace Demo;\n\npublic struct Spot : int\n{\n    public Spot(public int x { get; }) { }\n\n    public static Spot parse(int value) => new Spot(value);\n}\n",
+        ),
+        (
+            "src/Demo/Money.sharp",
+            "namespace Demo;\n\npublic class Money\n{\n    public Money(public int cents { get; }) { }\n\n    public static Money parse(string text) => new Money(Int.parse(text));\n\n    public string toString() => `${this.cents}`;\n}\n",
+        ),
+        (
+            "src/Demo/Price.sharp",
+            "namespace Demo;\n\npublic struct Price\n{\n    public Price(public Money amount { get; }) { }\n}\n",
+        ),
+        ("src/Demo/Rows.sharp", "namespace Demo;\n\npublic struct Rows : array\n{\n}\n"),
+        ("src/Demo/Pin.sharp", "namespace Demo;\n\npublic struct Pin : int\n{\n    public Pin(int code) { }\n}\n"),
+        ("src/Demo/UserId.sharp", "namespace Demo;\n\npublic struct UserId : int\n{\n}\n"),
+        (
+            "src/Demo/Users.sharp",
+            "namespace Demo;\n\npublic static class Users\n{\n    public static int first() => new UserId(7).value;\n\n    public static UserId read() => UserId.parse(3);\n}\n",
+        ),
+    ];
+
+    assert_eq!(
+        each_file(reported, &sharp, &[]),
+        [
+            vec![],
+            vec![],
+            vec![
+                "3:22 invalid-struct `Address` is a struct, and a struct is stored as `string`, `int`, `float` or `bool`."
+            ],
+            vec![
+                "3:15 invalid-struct `Point` has fields, so it declares `public static Point parse(string value)`, which builds it back from the `string` it is stored as."
+            ],
+            vec![
+                "3:15 invalid-struct `Spot` has fields, so it declares `public int value`, the `int` it is stored as."
+            ],
+            vec![],
+            vec![
+                "5:25 invalid-struct `Money` has `parse(string)` and `toString()`, which store nothing: declare `: string` on it, with the `value` it is stored as and the `parse` that reads it back."
+            ],
+            vec!["3:22 invalid-struct `Rows` is stored as `string`, `int`, `float` or `bool`, and no other type."],
+            vec![
+                "5:5 invalid-struct `Pin` holds the `int` it is stored as, so its constructor takes `int value` alone."
+            ],
+            vec![],
+            vec![],
+        ]
+    );
+}
+
 /// Spec section 10: `==` on a struct compares each property with its own `==`, so a struct with a property `==` can't
 /// compare is refused at the `==`, naming the property and why: a class with no `operator ==` or one that takes no two
 /// of it, `Any`, a `List` of such, or a struct that can't compare, also as a list's element or beside `Any?`. A `Set`
@@ -35102,10 +35173,10 @@ const JSON_VALUE: (&str, &str) = (
 );
 
 /// Spec sections 10 and 24: `Json.encode` takes any value, and a JSON object's key is text, so a `Map` keyed by an
-/// object without `toString()`, wherever the value holds it, is an error. A struct with `toString()`, a backed enum,
-/// an `int` and a `string` key a JSON object.
+/// object stored as no `int` or `string`, wherever the value holds it, is an error. A struct backed by `string`, a
+/// backed enum, an `int` and a `string` key a JSON object.
 #[test]
-fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
+fn json_encode_refuses_a_map_keyed_by_an_object_stored_as_no_int_or_string() {
     let shapes = [
         JSON,
         JSON_VALUE,
@@ -35113,10 +35184,7 @@ fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
             "app/Shop/Point.sharp",
             "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n",
         ),
-        (
-            "app/Shop/Tag.sharp",
-            "namespace App.Shop;\n\npublic struct Tag\n{\n    public Tag(public string name { get; }) { }\n\n    public string toString() => this.name;\n}\n",
-        ),
+        ("app/Shop/Tag.sharp", "namespace App.Shop;\n\npublic struct Tag : string\n{\n}\n"),
         (
             "app/Shop/Board.sharp",
             "namespace App.Shop;\n\npublic struct Board\n{\n    public Board(public Map<Point, int> counts { get; }) { }\n}\n",
@@ -35128,7 +35196,7 @@ fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
         "app/Shop/Report.sharp",
         "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class Report\n{\n    public static void run(Map<Point, int> points, Map<Tag, int> tags, List<Map<Point, int>> nested, Map<string, Point> values, Map<int, string> numbered, Any? raw, Board board, Map<float, int> floats, Map<Plain, int> plains, Map<bool, int> flags, Map<Coded, int> coded)\n    {\n        Report.keep(Json.encode(tags));\n        Report.keep(Json.encode(values));\n        Report.keep(Json.encode(numbered));\n        Report.keep(Json.encode(raw));\n        Report.keep(Json.encode(points));\n        Report.keep(Json.encode(nested));\n        Report.keep(Json.encode(board));\n        Report.keep(Json.encode(floats));\n        Report.keep(Json.encode(plains));\n        Report.keep(Json.encode(flags));\n        Report.keep(Json.encode(coded));\n    }\n\n    public static void keep(string json)\n    {\n    }\n}\n",
     );
-    let point = "invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.";
+    let point = "invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` is stored as no `int` or `string`. | Back `Point` by `string` or `int`, as `: string` after its name, or encode a `Map` keyed by text.";
 
     assert_eq!(worded(JSON, &[JSON_VALUE]), Vec::<String>::new());
     assert_eq!(
@@ -35137,9 +35205,9 @@ fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
             format!("13:33 {point}"),
             format!("14:33 {point}"),
             format!("15:33 {point}"),
-            "16:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and a `float` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
-            "17:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Plain` has no `toString()`. | Declare `public string toString()` on `Plain`, or encode a `Map` keyed by text.".to_owned(),
-            "18:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and a `bool` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
+            "16:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and a `float` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a struct backed by `int` or `string`.".to_owned(),
+            "17:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Plain` is stored as no `int` or `string`. | Back `Plain` by `string` or `int`, as `: string` after its name, or encode a `Map` keyed by text.".to_owned(),
+            "18:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and a `bool` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a struct backed by `int` or `string`.".to_owned(),
         ]
     );
 }
@@ -35162,7 +35230,7 @@ fn a_parameter_marked_encoded_as_json_refuses_a_map_key_with_no_json_text() {
     assert_eq!(
         refusals(report, &[feed, JSON, JSON_VALUE]),
         [
-            "7:71 invalid-json-key `Feed.write` writes each `Map` key as JSON text, and a `float` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`."
+            "7:71 invalid-json-key `Feed.write` writes each `Map` key as JSON text, and a `float` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a struct backed by `int` or `string`."
         ]
     );
 }

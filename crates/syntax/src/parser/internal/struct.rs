@@ -1,10 +1,7 @@
 use mago_allocator::prelude::*;
-use mago_span::HasSpan;
 
 use crate::T;
 use crate::cst::cst::AttributeList;
-use crate::cst::cst::Hint;
-use crate::cst::cst::Inheritance;
 use crate::cst::cst::Modifier;
 use crate::cst::cst::Struct;
 use crate::cst::sequence::Sequence;
@@ -31,7 +28,7 @@ where
     }
 
     /// Parses a PHP# struct, spec section 10: `struct`, its name, the type parameters a class takes, the header an enum
-    /// uses and class members.
+    /// uses, its backing type and its interfaces, and class members.
     pub(crate) fn parse_struct_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -41,6 +38,7 @@ where
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;
         let type_parameter_names = self.type_parameter_names(type_parameters.as_ref());
+        let (backing_type_hint, inheritance) = self.parse_enum_header()?;
 
         Ok(Struct {
             attribute_lists: attributes,
@@ -48,32 +46,11 @@ where
             r#struct,
             name,
             type_parameters,
-            inheritance: self.parse_struct_header()?,
+            backing_type_hint,
+            inheritance,
             left_brace: self.stream.eat_span(T!["{"])?,
             members: self.parse_class_like_members("A struct", Some(&name), type_parameter_names)?,
             right_brace: self.stream.eat_span(T!["}"])?,
         })
-    }
-
-    /// A struct's header, `: Interface, Other`, each a class name with or without type arguments. A type that names no
-    /// interface, such as `string`, is refused where it stands, and the interfaces after it still parse.
-    fn parse_struct_header(&mut self) -> Result<Option<Inheritance<'arena>>, ParseError<'arena>> {
-        if !self.stream.is_at(T![":"])? {
-            return Ok(None);
-        }
-
-        let mut separator = self.stream.eat_span(T![":"])?;
-        loop {
-            match self.parse_type_hint()? {
-                first @ (Hint::Identifier(_) | Hint::Generic(_)) => {
-                    return Ok(Some(self.parse_inheritance_from(separator, first)?));
-                }
-                hint => self.errors.push(ParseError::StructHeaderTypeInSharp(hint.span())),
-            }
-            if !self.stream.is_at(T![","])? {
-                return Ok(None);
-            }
-            separator = self.stream.eat_span(T![","])?;
-        }
     }
 }

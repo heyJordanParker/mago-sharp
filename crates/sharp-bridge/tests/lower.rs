@@ -36592,6 +36592,207 @@ fn a_field_of_a_generic_type_reads_with_its_type_arguments() {
     );
 }
 
+/// Spec section 10: a backed struct with no fields holds its value in a `public readonly` property that its constructor
+/// sets before its body checks it, a declared constructor and one the struct declares none of alike. Its `parse` runs
+/// that constructor, and `#json` writes the value.
+#[test]
+fn a_backed_struct_with_no_fields_holds_the_value_its_constructor_takes() {
+    let email = Lowered::new(
+        "namespace App;\n\npublic struct Email : string\n{\n    public Email(string value)\n    {\n        if (value == \"\") {\n            throw new ValueError(\"empty\");\n        }\n    }\n}\n",
+    );
+    let user = Lowered::new("namespace App;\n\npublic struct UserId : int\n{\n}\n");
+
+    assert_eq!(email.diagnostics(), Vec::<String>::new());
+    assert_eq!(user.diagnostics(), Vec::<String>::new());
+    assert_eq!(
+        email.declared("__construct"),
+        indoc! {r##"
+            METHOD [1] "__construct" @5-10
+              PARAM_LIST
+                PARAM
+                  ZVAL [1] "string"
+                  ZVAL "value"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  null
+                  ZVAL "string"
+              null
+              STMT_LIST
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "value"
+                  VAR
+                    ZVAL "value"
+                IF
+                  IF_ELEM
+                    BINARY_OP [16]
+                      VAR
+                        ZVAL "value"
+                      ZVAL ""
+                    STMT_LIST
+                      THROW
+                        NEW
+                          ZVAL "ValueError"
+                          ARG_LIST
+                            ZVAL "empty"
+              null
+              null
+        "##}
+    );
+    assert_eq!(
+        user.tree(),
+        indoc! {r##"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App"
+                null
+              CLASS [32] "UserId" @3-5
+                null
+                NAME_LIST
+                  ZVAL "Sharp\\Struct"
+                STMT_LIST
+                  METHOD [1] "__construct" @3-5
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "int"
+                        ZVAL "value"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      ASSIGN
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "value"
+                        VAR
+                          ZVAL "value"
+                    null
+                    null
+                  METHOD [17] "op_Equality" @3-3
+                    PARAM_LIST
+                      PARAM
+                        ZVAL [1] "mixed"
+                        ZVAL "a"
+                        null
+                        null
+                        null
+                        null
+                      PARAM
+                        ZVAL [1] "mixed"
+                        ZVAL "b"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      IF
+                        IF_ELEM
+                          AND
+                            INSTANCEOF
+                              VAR
+                                ZVAL "a"
+                              ZVAL "App\\UserId"
+                            INSTANCEOF
+                              VAR
+                                ZVAL "b"
+                              ZVAL "App\\UserId"
+                          STMT_LIST
+                            RETURN
+                              BINARY_OP [16]
+                                PROP
+                                  VAR
+                                    ZVAL "a"
+                                  ZVAL "value"
+                                PROP
+                                  VAR
+                                    ZVAL "b"
+                                  ZVAL "value"
+                      RETURN
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "a"
+                          VAR
+                            ZVAL "b"
+                    ZVAL [1] "bool"
+                    null
+                  PROP_GROUP [129]
+                    ZVAL [1] "int"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "value"
+                        null
+                        null
+                        null
+                    null
+                  SHARP_CLASS_METADATA
+                    null
+                    null
+                    null
+                    ZVAL "\n$value: int\nop_Equality: Function<bool(Any?, Any?)>\n__construct: Function<void(int)>\nparse: Function<App.UserId(int)>"
+                null
+                null
+        "##}
+    );
+    assert_eq!(
+        user.declared("parse"),
+        indoc! {r##"
+            METHOD [17] "parse" @3-3
+              PARAM_LIST
+                PARAM
+                  ZVAL [1] "int"
+                  ZVAL "value"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                RETURN
+                  NEW
+                    ZVAL "App\\UserId"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
+              SHARP_TYPE_ARGS
+                ZVAL "App\\UserId"
+                ZVAL ": App.UserId"
+              null
+        "##}
+    );
+    assert_eq!(
+        user.declared("#json"),
+        indoc! {r##"
+            METHOD [1] "#json" @3-3
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "value"
+              null
+              null
+        "##}
+    );
+}
+
 /// `Sharp\Key` and `Sharp\Tag`, as `sharp/composer/` ships them.
 const FAMILY_ATTRIBUTES: [(&str, &str); 2] = [
     ("src/Sharp/Key.sharp", include_str!("../../../../composer/library/Sharp/Key.sharp")),
@@ -36611,7 +36812,7 @@ const METHOD_FAMILY: [(&str, &str); 2] = [
 ];
 
 /// Spec section 10: `Json.encode` writes a variant with its name under its family's key and leaves out a null
-/// `[Key(omitNull: true)]` field, and a value as text as its `toString()`. A family's `parse` asks the engine for the
+/// `[Key(omitNull: true)]` field, and a backed struct as its `value`. A family's `parse` asks the engine for the
 /// variant its input names, and a call of an interface family's `parse` or `tryParse`, which holds no body, does so
 /// itself. A tuple field reads as each of its elements.
 #[test]
@@ -36619,7 +36820,7 @@ fn a_family_reads_and_writes_a_variant_by_its_name() {
     let library = [FAMILY_ATTRIBUTES.as_slice(), METHOD_FAMILY.as_slice()].concat();
     let card = Lowered::with(METHOD_FAMILY[1].1, &[FAMILY_ATTRIBUTES.as_slice(), &METHOD_FAMILY[..1]].concat());
     let code = Lowered::with(
-        "namespace App;\n\npublic struct Code\n{\n    private Code(private string text { get; }) { }\n\n    public static Code parse(string text) => new Code(text);\n\n    public string toString() => this.text;\n}\n",
+        "namespace App;\n\npublic struct Code : string\n{\n    private Code(private string text { get; }) { }\n\n    public string value => this.text;\n\n    public static Code parse(string text) => new Code(text);\n}\n",
         &[],
     );
     let shape = Lowered::with(
@@ -36703,11 +36904,10 @@ fn a_family_reads_and_writes_a_variant_by_its_name() {
               null
               STMT_LIST
                 RETURN
-                  METHOD_CALL
+                  PROP
                     VAR
                       ZVAL "this"
-                    ZVAL "toString"
-                    ARG_LIST
+                    ZVAL "value"
               null
               null
         "##}

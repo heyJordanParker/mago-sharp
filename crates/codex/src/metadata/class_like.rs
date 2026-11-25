@@ -126,8 +126,10 @@ pub struct ClassLikeMetadata {
     pub enum_cases: WordMap<EnumCaseMetadata>,
     pub invalid_dependencies: WordSet,
     pub attributes: Vec<AttributeMetadata>,
-    /// The backing type of a backed enum, or of a PHP# struct that declares one, spec section 10.
+    /// The backing type of a backed enum.
     pub enum_type: Option<TAtomic>,
+    /// The built-in type a PHP# struct is stored as, `string`, `int`, `float` or `bool`, spec section 10.
+    pub struct_backing_type: Option<TAtomic>,
     pub has_sealed_methods: Option<bool>,
     pub has_sealed_properties: Option<bool>,
     pub permitted_inheritors: Option<WordSet>,
@@ -261,6 +263,7 @@ impl ClassLikeMetadata {
             require_implements: WordSet::default(),
             inheritable_method_ids: WordMap::default(),
             enum_type: None,
+            struct_backing_type: None,
             inheritable_property_ids: WordMap::default(),
             initialized_properties: WordSet::default(),
             invalid_dependencies: WordSet::default(),

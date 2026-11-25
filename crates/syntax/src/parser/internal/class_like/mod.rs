@@ -298,9 +298,10 @@ where
     }
 
     /// The backing type after `:`, as PHP writes `: string`, and in PHP# the interfaces, as in `: string, HasLabel` or
-    /// `: HasLabel`. A leading class name, with or without type arguments, opens the interfaces, and any other type is
-    /// the backing type, which `check_enum` holds to `int` or `string`.
-    fn parse_enum_header(
+    /// `: HasLabel`, of an enum or a struct. A leading class name, with or without type arguments, opens the
+    /// interfaces, and any other type is the backing type, which `check_enum` holds to `int` or `string` and the struct
+    /// checks to `string`, `int`, `float` or `bool`.
+    pub(crate) fn parse_enum_header(
         &mut self,
     ) -> Result<(Option<EnumBackingTypeHint<'arena>>, Option<Inheritance<'arena>>), ParseError<'arena>> {
         if !matches!(self.stream.peek_kind(0)?, Some(T![":"])) {

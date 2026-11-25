@@ -19,6 +19,7 @@ use mago_codex::metadata::Member;
 use mago_codex::metadata::attribute::ConstantExpression;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
+use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::machine::MachineMetadata;
 use mago_codex::metadata::module::ModuleMetadata;
@@ -2051,14 +2052,19 @@ impl<'analysis> Types<'analysis> {
         }
     }
 
-    /// The name and type of each property `==` compares on the struct `class`, in the order the struct declares them.
+    /// The name and type of each property `==` compares on the struct `class`, in the order the struct declares them: a
+    /// backed struct's `value` alone, spec section 10.
     pub(crate) fn struct_properties(&self, class: Word) -> Vec<(&'analysis [u8], &'analysis TUnion)> {
         let metadata = self.codebase.get_class_like(class).unwrap_or_else(|| {
             unreachable!("the codex registers the struct `{}`", String::from_utf8_lossy(class.as_bytes()))
         });
+        let compared = if metadata.struct_backing_type.is_some() {
+            metadata.properties.get(&word("$value")).into_iter().collect()
+        } else {
+            metadata.struct_properties()
+        };
 
-        metadata
-            .struct_properties()
+        compared
             .into_iter()
             .map(|property| {
                 let name = property.name.0.as_bytes();
@@ -2082,10 +2088,26 @@ impl<'analysis> Types<'analysis> {
         self.codebase.parses(class)
     }
 
-    /// Whether the class `class` is a value as text, which a field `parse` reads through the class's `parse(string)`
-    /// and `Json.encode` writes as its `toString()`, as the codex gives it.
-    pub(crate) fn is_text_value(&self, class: Word) -> bool {
-        self.codebase.is_text_value(class)
+    /// Whether the class `class` is a backed struct, which a field `parse` reads through the struct's `parse(T)` and
+    /// `Json.encode` writes as its `value`, spec section 10.
+    pub(crate) fn is_backed_struct(&self, class: Word) -> bool {
+        self.codebase.is_backed_struct(class)
+    }
+
+    /// The PHP type of the `value` a backed struct with no fields holds, spec section 10, as `string`: the backing
+    /// type, which its constructor takes and its `parse` reads. None for any other class, a backed struct with fields
+    /// included, which computes its `value`.
+    pub(crate) fn held_value(&self, class: Word) -> Option<&'static [u8]> {
+        let metadata = self.codebase.get_class_like(class)?;
+        metadata.properties.get(&word("$value")).filter(|value| value.flags.contains(MetadataFlags::GENERATED))?;
+
+        Some(match metadata.struct_backing_type.as_ref()? {
+            TAtomic::Scalar(TScalar::String(_)) => b"string",
+            TAtomic::Scalar(TScalar::Integer(_)) => b"int",
+            TAtomic::Scalar(TScalar::Float(_)) => b"float",
+            TAtomic::Scalar(TScalar::Bool(_)) => b"bool",
+            backing => unreachable!("the codex backs a struct only by a built-in scalar, not {backing:?}"),
+        })
     }
 
     /// Whether a value of `type` may hold a `Secret` at any depth, as a `List<Secret<string>>` does, so the field that

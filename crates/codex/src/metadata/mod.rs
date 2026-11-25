@@ -1198,16 +1198,17 @@ impl CodebaseMetadata {
         }
     }
 
-    /// Whether `class` has the `parse` spec section 10 gives a struct or a PHP# class, rather than one it declares,
-    /// inherits from a parent that declares one, or none. The codex's spans the whole type, which no declared member
-    /// does.
+    /// Whether `class` has the `parse` spec section 10 gives a struct or a PHP# class, which reads a `Map<string, Any?>`
+    /// or an object, rather than one it declares, inherits from a parent that declares one, or none. The codex's spans
+    /// the whole type, which no declared member does. A backed struct's reads its value instead.
     #[must_use]
     pub fn parses(&self, class: Word) -> bool {
         let Some(metadata) = self.get_class_like(class) else {
             return false;
         };
 
-        self.get_declaring_method_class(class, word("parse")) == Some(metadata.name)
+        metadata.struct_backing_type.is_none()
+            && self.get_declaring_method_class(class, word("parse")) == Some(metadata.name)
             && self.get_method(class, word("parse")).is_some_and(|parse| parse.span == metadata.span)
     }
 
@@ -1286,11 +1287,19 @@ impl CodebaseMetadata {
         variants
     }
 
-    /// Whether the class `class` is a value as text, spec section 10: it declares a static `parse` of one `string` and
-    /// a `toString()` that takes no argument, as `Decimal` and `Instant` do, so `Json.encode` writes its `toString()`
-    /// and a field `parse` reads gives a `string` to its `parse`.
+    /// Whether the class `class` is a struct stored as the built-in value its header names, spec section 10, as
+    /// `struct Email : string`: `Json.encode` writes its `value`, and a field `parse` reads gives that value to its
+    /// `parse`.
     #[must_use]
-    pub fn is_text_value(&self, class: Word) -> bool {
+    pub fn is_backed_struct(&self, class: Word) -> bool {
+        self.get_class_like(class).is_some_and(|metadata| metadata.struct_backing_type.is_some())
+    }
+
+    /// Whether the class `class` declares a static `parse` of one `string` and a `toString()` that takes no argument
+    /// without being a backed struct, spec section 10. That pair stores nothing: `toString()` is display only, so the
+    /// checker refuses a stored field of it and names `: string`.
+    #[must_use]
+    pub fn declares_text_pair(&self, class: Word) -> bool {
         let Some(parse) = self.get_method(class, word("parse")) else {
             return false;
         };
@@ -1298,7 +1307,8 @@ impl CodebaseMetadata {
             return false;
         };
 
-        is_static_method(parse)
+        !self.is_backed_struct(class)
+            && is_static_method(parse)
             && matches!(parse.parameters.as_slice(), [text] if text.type_metadata.as_ref().is_some_and(|written| written.type_union.is_string()))
             && !is_static_method(to_string)
             && to_string.parameters.iter().all(|parameter| parameter.flags.has_default())

@@ -6,6 +6,7 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
@@ -409,14 +410,18 @@ where
                     let class = display_class_like_name(context, class);
                     (
                         IssueCode::InvalidJsonKey,
-                        format!("`{encoder}` writes each `Map` key as JSON text, and `{class}` has no `toString()`."),
-                        format!("Declare `public string toString()` on `{class}`, or encode a `Map` keyed by text."),
+                        format!(
+                            "`{encoder}` writes each `Map` key as JSON text, and `{class}` is stored as no `int` or `string`."
+                        ),
+                        format!(
+                            "Back `{class}` by `string` or `int`, as `: string` after its name, or encode a `Map` keyed by text."
+                        ),
                     )
                 }
                 UnwritableJson::KeyScalar(scalar) => (
                     IssueCode::InvalidJsonKey,
                     format!("`{encoder}` writes each `Map` key as JSON text, and a `{scalar}` key has none."),
-                    "Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`."
+                    "Encode a `Map` keyed by an `int`, a `string`, a backed enum or a struct backed by `int` or `string`."
                         .to_owned(),
                 ),
                 UnwritableJson::UnheldParameter(class, parameter) => {
@@ -476,7 +481,7 @@ where
 
 /// A part of a value a JSON encoder can't write.
 enum UnwritableJson {
-    /// A `Map` key of a class, a struct or a pure enum that declares no `toString()`.
+    /// A `Map` key of a class, a pure enum, or a struct not backed by an `int` or a `string`.
     KeyClass(Word),
     /// A `Map` key of a `float` or a `bool`.
     KeyScalar(&'static str),
@@ -487,7 +492,7 @@ enum UnwritableJson {
 /// The first part of `value` a JSON encoder can't write, spec section 10, wherever `value` holds it: in a collection's
 /// elements, keys and values, in the stored fields of a PHP# struct or class and of each variant of a family, and in
 /// the public properties of a PHP# class with no such `parse`, `visiting` the classes it is inside. A `Map` key has text exactly where the engine's `sharp_table_json_key` gives it:
-/// an `int`, a `string`, a backed enum case, or an object with `toString()`. A struct or class writes the fields its
+/// an `int`, a `string`, a backed enum case, or a struct backed by an `int` or a `string`. A struct or class writes the fields its
 /// `parse` reads from its properties, so a main constructor parameter that holds no property can't be written. An
 /// `Any` is decided where it runs.
 fn unwritable_json<A>(context: &Context<'_, '_, A>, value: &TUnion, visiting: &mut Vec<Word>) -> Option<UnwritableJson>
@@ -508,8 +513,9 @@ where
                 SharpType::Enum(name) | SharpType::Class(name, _) => {
                     let class = codebase.get_class_like(name)?;
                     let has_text = class.enum_type.is_some()
-                        || codebase.get_method(name, word("toString")).is_some()
-                        || codebase.get_method(name, word("__toString")).is_some();
+                        || class.struct_backing_type.as_ref().is_some_and(|backing| {
+                            matches!(backing, TAtomic::Scalar(TScalar::Integer(_) | TScalar::String(_)))
+                        });
 
                     (!has_text).then_some(UnwritableJson::KeyClass(class.name))
                 }

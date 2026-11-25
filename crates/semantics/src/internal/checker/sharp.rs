@@ -790,6 +790,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::AttributeList(list), Place::Struct) => check_attribute_target(list, context),
         (Node::ClassLikeMember(_), Place::Struct) => enter(node, Class, context),
+        // Spec section 10: the analyzer's struct check holds a backing type to `string`, `int`, `float` or `bool`.
+        (Node::EnumBackingTypeHint(_), Place::Struct) => None,
         // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
         (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(r#enum), File) => {
