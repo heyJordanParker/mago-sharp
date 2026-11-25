@@ -79,7 +79,7 @@ The attestation is bound to the archive, not to the extracted binary. If you onl
 For PHP projects:
 
 ```sh
-composer require --dev "heyjordanparker/mago-sharp:^0.6"
+composer require --dev "heyjordanparker/mago-sharp:^0.8"
 ```
 
 A project with `.sharp` files runs `mago compile` when it deploys, and `composer install --no-dev` installs no `require-dev` package. So such a project requires the package without `--dev`, or its release has no `vendor/bin/mago`.
