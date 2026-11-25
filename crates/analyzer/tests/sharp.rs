@@ -5577,8 +5577,8 @@ fn a_value_refused_for_more_than_an_int_keeps_the_message_of_its_place() {
         reported(("src/Demo/Report.sharp", sharp), &[("src/Lib/Boxes.php", BOXES)]),
         [
             "8:46 invalid-return-statement Invalid return type for method `Report.either`: expected `float`, but found `int|string`.",
-            "9:38 invalid-return-statement Invalid return type for method `Report.intFirst`: expected `List<float>`, but found `List<int|string>`.",
-            "10:41 invalid-return-statement Invalid return type for method `Report.stringFirst`: expected `List<float>`, but found `List<int|string>`.",
+            "9:38 invalid-return-statement List<int|string> cannot be used as List<float>.",
+            "10:41 invalid-return-statement List<int|string> cannot be used as List<float>.",
             "11:41 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Boxes.unbox`: expected `Box<float>`, but possibly received `Box<int>`.",
             "12:55 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Boxes.total`: expected `Iterable<float>`, but possibly received `List<int>`.",
             "13:65 invalid-return-statement Invalid return type for method `Report.collection`: expected `float|List<float>`, but found `int|List<int>`.",
@@ -11722,8 +11722,8 @@ fn flat_map_over_maps_and_a_maps_to_list_give_its_entries() {
         ("src/Demo/Entity.sharp", sharp),
         &[WORDS],
         &[
-            "13:32 invalid-local-assignment-value: Invalid assignment to `notEntries`: it is declared as `List<int>`.",
-            "14:32 invalid-local-assignment-value: Invalid assignment to `notKeys`: it is declared as `List<string>`.",
+            "13:32 invalid-local-assignment-value: List<[string, int]> cannot be used as List<int>.",
+            "14:32 invalid-local-assignment-value: List<[string, int]> cannot be used as List<string>.",
             "15:48 invalid-argument: Invalid argument type for argument #1 of `List<int>.flatMap`: expected `Function<Iterable<Any?>(int)>`, but found `Function<int(int)>`.",
         ],
     );
@@ -12177,15 +12177,15 @@ fn an_extension_block_infers_its_type_parameters_from_the_receiver() {
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &others),
         [
-            "Invalid return type for method `Report.twice`: expected `List<int>`, but found `List<string>`.",
-            "Invalid return type for method `Report.converted`: expected `List<int>`, but found `List<string>`.",
+            "List<string> cannot be used as List<int>.",
+            "List<string> cannot be used as List<int>.",
             "Method `Report.firstOf` is declared to return `int` but possibly returns a nullable value (inferred as `Order?`).",
             "Invalid return type for method `Report.firstOf`: expected `int`, but found `Order?`.",
             "Invalid return type for method `Report.swapped`: expected `int`, but found `Pair<Order, int>`.",
             "Method `Report.newest` is declared to return `int` but possibly returns a nullable value (inferred as `RushOrder?`).",
             "Invalid return type for method `Report.newest`: expected `int`, but found `RushOrder?`.",
             "`int` is outside `T`'s bound `Order`, so `List<int>` has no `newest`.",
-            "Invalid return type for method `Report.blank`: expected `List<int>`, but found `List<string>`.",
+            "List<string> cannot be used as List<int>.",
             "Too many type arguments for `List.blank`: expected 1, but found 2.",
             "Nothing fixes the type argument `TOut` of the call to `List.blank`.",
             "`string` is outside `T`'s bound `Order`, so `List<string>` has no `saved`.",
@@ -13573,9 +13573,7 @@ fn two_types_of_one_short_name_in_a_message_are_named_in_full() {
 
     assert_eq!(
         compile_errors(("src/App/Schema/Schema.sharp", sharp), &[type_class, ("src/Lib/Builder.php", library)]),
-        [
-            "Invalid argument type for argument #1 of `Builder.build`: expected `List<Lib.Type>`, but found `List<App.Schema.Type>`."
-        ]
+        ["List<App.Schema.Type> cannot be used as List<Lib.Type>."]
     );
 
     let forms = "<?php\n\nnamespace Lib;\n\nfinal class Forms\n{\n    /** @param \\App\\Schema\\Type[] $types */\n    public static function bracketed(array $types): void\n    {\n    }\n\n    /** @param array<\\App\\Schema\\Type> $types */\n    public static function keyed(array $types): void\n    {\n    }\n\n    /** @param non-empty-list<\\App\\Schema\\Type> $types */\n    public static function filled(array $types): void\n    {\n    }\n\n    /** @param iterable<\\App\\Schema\\Type> $types */\n    public static function iterated(iterable $types): void\n    {\n    }\n}\n";
@@ -18918,8 +18916,8 @@ fn a_value_that_may_be_one_of_two_lists_reaches_an_extension_of_a_list_with_ever
             .collect::<Vec<_>>(),
         [
             "8:27 invalid-local-assignment-value This value has type `List<int>|List<string>`.",
-            "10:27 invalid-local-assignment-value This value has type `List<int|string>`.",
-            "12:27 invalid-local-assignment-value This value has type `List<int|string>`.",
+            "10:27 invalid-local-assignment-value This has type `List<int|string>`.",
+            "12:27 invalid-local-assignment-value This has type `List<int|string>`.",
         ]
     );
 }
@@ -21569,18 +21567,14 @@ fn an_inherited_constructor_and_method_take_the_type_arguments_of_the_header() {
     let order_tray = ("src/Demo/OrderTray.sharp", "namespace Demo;\n\npublic class OrderTray : Tray<Order>\n{\n}\n");
     let invoice = ("src/Demo/Invoice.sharp", "namespace Demo;\n\npublic class Invoice : DatabaseEntity\n{\n}\n");
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static OrderPage paged(List<Order> orders) => new OrderPage(orders);\n\n    public static OrderList<Order> listed(List<Order> orders) => new OrderList<Order>(orders);\n\n    public static OrderPage invoicePaged(List<Invoice> invoices) => new OrderPage(invoices);\n\n    public static OrderList<Order> invoiceListed(List<Invoice> invoices) => new OrderList<Order>(invoices);\n\n    public static void ordered(OrderTray tray, List<Order> orders)\n    {\n        tray.replace(orders);\n    }\n\n    public static void invoiced(OrderTray tray, List<Invoice> invoices)\n    {\n        tray.replace(invoices);\n    }\n}\n";
-    let constructed = "Invalid argument type for argument #1 of `PaginatedList.__construct`: expected `List<Order>`, but found `List<Invoice>`.";
+    let constructed = "List<Invoice> cannot be used as List<Order>.";
 
     assert_eq!(
         messages(
             ("src/Demo/Report.sharp", sharp),
             &PAGING.iter().copied().chain([tray, order_tray, invoice]).collect::<Vec<_>>()
         ),
-        [
-            constructed,
-            constructed,
-            "Invalid argument type for argument #1 of `Tray.replace`: expected `List<Order>`, but found `List<Invoice>`.",
-        ]
+        [constructed, constructed, "List<Invoice> cannot be used as List<Order>.",]
     );
 
     let php = "<?php\n\nnamespace Demo;\n\nclass Invoice extends DatabaseEntity\n{\n}\n\nclass Report\n{\n    /** @param list<Order> $orders */\n    public static function paged(array $orders): OrderPage\n    {\n        return new OrderPage($orders);\n    }\n\n    /** @param list<Invoice> $invoices */\n    public static function invoicePaged(array $invoices): OrderPage\n    {\n        return new OrderPage($invoices);\n    }\n\n    /** @param list<Order> $orders */\n    public static function ordered(OrderPage $page, array $orders): void\n    {\n        $page->replace($orders);\n    }\n\n    /** @param list<Invoice> $invoices */\n    public static function invoiced(OrderPage $page, array $invoices): void\n    {\n        $page->replace($invoices);\n    }\n}\n";
@@ -23360,6 +23354,62 @@ fn every_invariant_mismatch_is_worded_as_a_blocked_substitution() {
     );
 }
 
+/// Spec section 11.1: a class that implements an invariant generic interface with one type argument is that interface
+/// with that argument only, so `CheckoutHandler : BehaviorHandler<CheckoutBehavior>` is no `BehaviorHandler<Behavior>`
+/// where a return, a `List`'s element or a module's binding expects one, as an explicit
+/// `BehaviorHandler<CheckoutBehavior>` is not. `List`'s own parameter is invariant too, so each is refused with section
+/// 11.1's message and its invariance note, and no marker is named, since `in T` lets only the opposite substitution
+/// through.
+#[test]
+fn a_class_is_an_invariant_interface_only_with_the_type_argument_it_implements() {
+    let declared = [
+        ("src/Demo/Behavior.sharp", "namespace Demo;\n\ninternal interface Behavior\n{\n}\n"),
+        (
+            "src/Demo/CheckoutBehavior.sharp",
+            "namespace Demo;\n\ninternal final class CheckoutBehavior : Behavior\n{\n}\n",
+        ),
+        (
+            "src/Demo/BehaviorHandler.sharp",
+            "namespace Demo;\n\ninternal interface BehaviorHandler<T : Behavior>\n{\n    void submit(T behavior);\n}\n",
+        ),
+        (
+            "src/Demo/CheckoutHandler.sharp",
+            "namespace Demo;\n\ninternal final class CheckoutHandler : BehaviorHandler<CheckoutBehavior>\n{\n    public void submit(CheckoutBehavior behavior)\n    {\n    }\n}\n",
+        ),
+    ];
+    let handlers = (
+        "src/Demo/Handlers.sharp",
+        "namespace Demo;\n\ninternal static class Handlers\n{\n    public static BehaviorHandler<Behavior> one() => new CheckoutHandler();\n\n    public static List<BehaviorHandler<Behavior>> many() => [new CheckoutHandler()];\n}\n",
+    );
+    let module = (
+        "src/Demo/Module.sharp",
+        "namespace Demo;\n\nmodule\n{\n    singleton List<BehaviorHandler<Behavior>> = [CheckoutHandler];\n}\n",
+    );
+
+    let with_module = [declared.as_slice(), &[module]].concat();
+    let with_handlers = [declared.as_slice(), &[handlers]].concat();
+
+    assert_eq!(
+        refusals(handlers, &with_module),
+        [
+            "5:54 invalid-return-statement CheckoutHandler cannot be used as BehaviorHandler<Behavior>. | ",
+            "7:61 invalid-return-statement List<CheckoutHandler> cannot be used as List<BehaviorHandler<Behavior>>. | ",
+        ]
+    );
+    assert_eq!(
+        refusals(module, &with_handlers),
+        ["5:50 invalid-binding CheckoutHandler cannot be used as BehaviorHandler<Behavior>. | "]
+    );
+    for (analyzed, others) in [(handlers, &with_module), (module, &with_handlers)] {
+        for issue in analyze(&PLUGIN_REGISTRY, settings(), analyzed, others) {
+            assert_eq!(
+                issue.notes,
+                ["A type parameter without `out` or `in` is invariant, so neither substitution is allowed."]
+            );
+        }
+    }
+}
+
 /// A typed local's generic type is checked where it is written, as a parameter's is.
 #[test]
 fn a_typed_local_of_a_generic_type_outside_its_bound_is_reported() {
@@ -24089,11 +24139,7 @@ fn a_written_any_type_argument_is_checked_against_the_bound() {
     assert_eq!(issues(("src/Demo/Page.php", php), &[]), Vec::<String>::new());
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &declared),
-        [
-            "5:58 template-constraint-violation",
-            "5:65 less-specific-nested-argument-type",
-            "7:28 template-constraint-violation",
-        ]
+        ["5:58 template-constraint-violation", "5:65 invalid-argument", "7:28 template-constraint-violation",]
     );
     assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 2]);
 }
@@ -26740,7 +26786,7 @@ fn a_refused_argument_names_its_types_as_sharp_writes_them() {
             "13:21 invalid-argument Invalid argument type for argument #1 of `Report.keep`: expected `int`, but found `TItem`. | This has type `TItem` | Arguments to this method are incorrect | The provided type `TItem` is not compatible with the expected type `int`. | Change the argument value to match `int`, or update the parameter's type declaration.",
             "14:21 mixed-argument Invalid argument type for argument #1 of `Report.keep`: expected `int`, but found `Any?`. | Argument has type `Any?` | Arguments to this method are incorrect | The type `Any?` is too general and does not match the expected type `int`. | Add specific type hints or assertions to the argument value.",
             "15:20 less-specific-argument Argument type mismatch for argument #1 of `Report.pet`: expected `Dog`, but provided type `Animal` is less specific. | Provided type `Animal` is too general. | Arguments to this method are incorrect | The provided type `Animal` can be assigned to `Dog`, but is wider (less specific). | Provide a value that more precisely matches `Dog` or adjust the parameter type.",
-            "16:23 less-specific-nested-argument-type Argument type mismatch for argument #1 of `Report.counts`: expected `List<int>`, but provided type `List<Any?>` is less specific. | Provided type `List<Any?>` is too general due to nested `Any?`. | Arguments to this method are incorrect | The structure contains `Any?`, making it incompatible. | Provide a value that more precisely matches `List<int>` or adjust the parameter type.",
+            "16:23 invalid-argument List<Any?> cannot be used as List<int>. | This has type `List<Any?>`. | Arguments to this method are incorrect | A type parameter without `out` or `in` is invariant, so neither substitution is allowed.",
             "17:21 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Report.keep`: expected `int`, but possibly received `int|string`. | This might not be type `int` | Arguments to this method are incorrect | The provided type `int|string` overlaps with `int` but is not fully contained. | Ensure the argument always has the expected type using checks or assertions.",
             "18:21 null-argument Argument #1 of method `Report.keep` is `null`, but parameter type `int` does not accept it. | This argument is `null` | Arguments to this method are incorrect | Provide a non-null value, or declare the parameter as nullable (e.g., `int?`).",
             "19:21 possibly-null-argument Argument #1 of method `Report.keep` is possibly `null`, but parameter type `int` does not accept it. | This argument of type `int?` might be `null` | Arguments to this method are incorrect | Add a `null` check before this call to ensure the value is not `null`.",
@@ -26784,7 +26830,7 @@ fn a_refused_value_names_its_types_as_sharp_writes_them() {
             "23:25 invalid-return-statement Property hook `Box.total.get` returns `string` but property is typed as `int`. | Expression has type `string`. | The get hook must return a value compatible with the property type `int`. | Change the returned expression to match the property type.",
             "27:22 invalid-property-assignment-value Invalid type for property `Box.count`: expected `int`, but got `string`. | This expression has type `string` | This property `Box.count` is declared with type `int` | The type `string` is not compatible with and cannot be assigned to `int`. | Change the assigned value to match the property's type, or update the property's type declaration.",
             "28:21 invalid-local-assignment-value Invalid assignment to `local`: it is declared as `int`. | This value has type `string`. | `local` is declared as `int` here. | Assign a `int` value, or change the type `local` is declared with.",
-            "32:51 less-specific-nested-return-statement Returned type `List<Any?>` is less specific than the declared return type `List<int>` for method `Box.counts` due to nested 'Any?'. | Returned value's type is too general here due to nested Any? | The analysis detected 'Any?' within the structure of the returned value, making the overall type less specific than what the method declared. | Ensure the structure returned by `Box.counts` strictly adheres to the types specified in the `List<int>` return type declaration.",
+            "32:51 invalid-return-statement List<Any?> cannot be used as List<int>. | This has type `List<Any?>`. | A type parameter without `out` or `in` is invariant, so neither substitution is allowed.",
         ]
     );
 
@@ -37000,9 +37046,7 @@ fn try_gives_the_ok_value_and_returns_the_failure() {
     assert_eq!(issues(("src/App/Checkout.sharp", code), &payments()), ["19:52 invalid-return-statement"]);
     assert_eq!(
         messages(("src/App/Checkout.sharp", code), &payments()),
-        [
-            "Invalid return type for method `Checkout.wrong`: expected `Result<string, PaymentError>`, but found `Result<Order, PaymentError>.Ok`."
-        ]
+        ["Result<Order, PaymentError>.Ok cannot be used as Result<string, PaymentError>."]
     );
 }
 
@@ -37121,7 +37165,7 @@ fn a_plain_case_of_a_generic_enum_takes_its_type_arguments_from_the_declared_typ
     assert_eq!(
         messages(("src/App/Reads.sharp", code), &[lookup]),
         [
-            "Invalid return type for method `Reads.mismatched`: expected `Lookup<string>`, but found `Lookup<int>.Missing`.",
+            "Lookup<int>.Missing cannot be used as Lookup<string>.",
             "Nothing fixes the type argument `T` of `Lookup<T>.Missing`.",
         ]
     );
