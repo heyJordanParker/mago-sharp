@@ -152,21 +152,27 @@ the case of a value an `if` chose. The goal's binders become facts before the sp
 computes, as the case a move's `? :` gives, splits too. A case hypothesis keeps its `¬ x ≤ y` and its `¬ x < y`, so it
 still decides the `if` the definition tests. `simp_all` reads a value of a type with one constructor, as a machine of
 one case translates, as it reads any other, and never as that constructor of its kernel projections, which `grind`
-can't relate to the case that built the value. -/
+can't relate to the case that built the value. The `simp_all` runs once: `decide` reads the goal as it was before it,
+and the split starts from the goal it left, so a goal `omega` and `grind` leave open pays for one `simp_all`, not two. -/
 private def auto (definitions : Array Name) : TacticM Unit := do
   let kept : Array SimpItem := #[⟨(← `(Lean.Parser.Tactic.simpErase| -Int64.not_le)).raw⟩,
     ⟨(← `(Lean.Parser.Tactic.simpErase| -Int.not_le)).raw⟩,
     ⟨(← `(Lean.Parser.Tactic.simpErase| -Int64.not_lt)).raw⟩,
     ⟨(← `(Lean.Parser.Tactic.simpErase| -Int.not_lt)).raw⟩]
   let items := (← definitions.mapM lemma) ++ kept
-  evalTactic (← `(tactic| first
-    | ((try simp_all (config := { etaStruct := .none }) [$items,*])
-       first | done | omega | grind)
-    | decide
-    | ((try simp_all (config := { etaStruct := .none }) [$items,*])
-       intros
-       (repeat' split) <;> (try simp_all (config := { etaStruct := .none }) [$items,*]) <;>
-         first | done | omega | grind)))
+  let unsimplified ← saveState
+  evalTactic (← `(tactic| try simp_all (config := { etaStruct := .none }) [$items,*]))
+  let simplified ← saveState
+  try
+    evalTactic (← `(tactic| first | done | omega | grind))
+    return
+  catch _ => unsimplified.restore
+  try
+    evalTactic (← `(tactic| decide))
+    return
+  catch _ => simplified.restore
+  evalTactic (← `(tactic| (intros; (repeat' split) <;> (try simp_all (config := { etaStruct := .none }) [$items,*]) <;>
+    (first | done | omega | grind))))
 
 /-- Runs `steps`, the steps of one case, within half of its theorem's time budget, counted from where the case starts, so
 a case whose steps run out of it leaves the cases after it the rest of the theorem's. -/
