@@ -434,3 +434,9 @@ opt-level = 3
 
 [profile.dev.package.serde_core]
 opt-level = 3
+
+# zstd's C encoder builds optimized in every profile, since the release's Mac job runs the dev build's law checker
+# example, whose archive compresses at level 19. At opt-level 0 that checker wrote 7.4 of the archive's 32.9 MB in
+# 180 CPU-seconds, and at 3 it wrote all of it in 155.6, with zstd-sys compiling in 27.0 CPU-seconds where it took 10.0.
+[profile.dev.package.zstd-sys]
+opt-level = 3
