@@ -1,3 +1,89 @@
 #!/bin/sh
-echo "mago's binary is not installed: require heyjordanparker/php-sharp-composer and allow its plugin, then run \`composer install\`." >&2
-exit 1
+# Runs this platform's mago release binary, composer/bin/<target triple>/mago, with every argument, so one vendor/ serves
+# every platform it is mounted on and no start runs PHP. php-sharp-composer's plugin installs the installing platform's
+# binary and writes the release's version to composer/bin/version. A platform whose binary is missing downloads it once
+# here, checked against the SHA-256 the package pins in composer/sha256sums.txt, as the plugin checks it.
+set -eu
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=${self%/*}/$link ;;
+  esac
+done
+bin=${self%/*}
+package=${bin%/composer/bin}
+compile='Compile mago from source: https://github.com/heyJordanParker/php-sharp/tree/master/sharp/mago'
+refuse() {
+  echo "No mago release has a binary for $1. $compile" >&2
+  exit 1
+}
+platform=$(uname -sm)
+case ${platform#* } in
+  x86_64 | amd64) architecture=x86_64 ;;
+  arm64 | aarch64) architecture=aarch64 ;;
+  *) refuse "${platform#* }: it builds for arm64 and x86_64" ;;
+esac
+case ${platform%% *}-$architecture in
+  Darwin-aarch64) triple=aarch64-apple-darwin ;;
+  Darwin-*) refuse "macOS on $architecture: it builds for macOS on Apple silicon" ;;
+  Linux-*) triple=$architecture-unknown-linux-gnu ;;
+  *) refuse "${platform%% *}: it builds for macOS and Linux" ;;
+esac
+binary=$bin/$triple/mago
+if [ -x "$binary" ]; then
+  exec "$binary" "$@"
+fi
+
+if [ ! -f "$bin/version" ]; then
+  echo "mago's binary is not installed: require heyjordanparker/php-sharp-composer and allow its plugin, then run \`composer install\`." >&2
+  exit 1
+fi
+if [ "$triple" != aarch64-apple-darwin ] && command -v ldd > /dev/null 2>&1 && ldd --version 2>&1 | grep -q musl; then
+  refuse 'musl Linux, such as Alpine: it builds for glibc Linux'
+fi
+version=$(cat "$bin/version")
+name=mago-$version-$triple
+sums=$package/composer/sha256sums.txt
+expected=$(awk -v name="$name.tar.gz" '$2 == name { print $1 }' "$sums" 2> /dev/null || true)
+if [ -z "$expected" ]; then
+  echo "$sums pins no SHA-256 for $name.tar.gz, so its download cannot be verified." >&2
+  exit 1
+fi
+url=https://github.com/heyJordanParker/php-sharp/releases/download/v$version/$name.tar.gz
+work=$bin/.download-$$
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work"
+echo "Downloading mago $version for $triple..." >&2
+token=${GITHUB_TOKEN:-${GH_TOKEN:-}}
+if command -v curl > /dev/null 2>&1; then
+  # curl sends the Authorization header only to the release's host, not to the host its download redirects to.
+  if [ -n "$token" ]; then
+    curl -fsSL -H "Authorization: Bearer $token" -o "$work/$name.tar.gz" "$url"
+  else
+    curl -fsSL -o "$work/$name.tar.gz" "$url"
+  fi
+elif command -v wget > /dev/null 2>&1; then
+  wget -q -O "$work/$name.tar.gz" "$url"
+else
+  echo "Downloading mago's binary for $triple needs curl or wget." >&2
+  exit 1
+fi
+if command -v sha256sum > /dev/null 2>&1; then
+  actual=$(sha256sum < "$work/$name.tar.gz")
+else
+  actual=$(shasum -a 256 < "$work/$name.tar.gz")
+fi
+actual=${actual%% *}
+if [ "$actual" != "$expected" ]; then
+  echo "The downloaded $name.tar.gz has SHA-256 $actual, and heyjordanparker/mago-sharp pins $expected for it, so it is not the archive the release built. Nothing was installed." >&2
+  exit 1
+fi
+tar -xzf "$work/$name.tar.gz" -C "$work"
+mkdir -p "$bin/$triple"
+chmod 755 "$work/$name/mago"
+mv "$work/$name/mago" "$binary"
+rm -rf "$work"
+trap - EXIT
+exec "$binary" "$@"
