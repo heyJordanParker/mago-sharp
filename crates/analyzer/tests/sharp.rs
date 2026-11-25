@@ -420,7 +420,12 @@ fn unused_classes(files: &[(&'static str, &'static str)]) -> Vec<String> {
 
 /// The files of `files` under `tests/`, which the test projects hold in an `autoload-dev` folder.
 fn test_files(files: &[(&'static str, &'static str)]) -> Vec<FileId> {
-    files.iter().filter(|(name, _)| name.starts_with("tests/")).map(|(name, _)| FileId::new(name.as_bytes())).collect()
+    files
+        .iter()
+        .map(|file| file.0)
+        .filter(|name| name.starts_with("tests/"))
+        .map(|name| FileId::new(name.as_bytes()))
+        .collect()
 }
 
 /// The errors `pass` gives for a project of `files` once `mago analyze` has analyzed every file, as spec section 5's
