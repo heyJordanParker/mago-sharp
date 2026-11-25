@@ -1472,16 +1472,24 @@ impl IncrementalAnalysisService {
             return self.analyze();
         }
 
-        let modules_changed = new_file_scans.iter().any(|(file_id, metadata)| {
-            self.file_states.get(file_id).map_or(&[][..], |state| &state.entry_keys.modules) != metadata.modules
-        }) || self
-            .file_states
+        // A module serves the files of its namespace and of each namespace below it, and the analyzer reads every module
+        // beside each module, spec section 32, so a module that changed, before or after, re-analyzes those files.
+        let changed_module_namespaces: WordSet = new_file_scans
             .iter()
-            .any(|(file_id, state)| !current_file_ids.contains(file_id) && !state.entry_keys.modules.is_empty());
+            .flat_map(|(file_id, metadata)| {
+                let before = self.file_states.get(file_id).map_or(&[][..], |state| &state.entry_keys.modules);
+                let changed = before != metadata.modules;
 
-        if modules_changed {
-            return self.analyze();
-        }
+                before.iter().chain(&metadata.modules).filter(move |_| changed)
+            })
+            .chain(
+                self.file_states
+                    .iter()
+                    .filter(|(file_id, _)| !current_file_ids.contains(file_id))
+                    .flat_map(|(_, state)| &state.entry_keys.modules),
+            )
+            .map(|module| mago_word::ascii_lowercase_word(module.namespace.as_bytes()))
+            .collect();
 
         let extensions_changed = new_file_scans
             .iter()
@@ -1553,7 +1561,7 @@ impl IncrementalAnalysisService {
             return self.analyze();
         }
 
-        let body_only = diff.get_changed().is_empty() && deleted_count == 0;
+        let body_only = diff.get_changed().is_empty() && deleted_count == 0 && changed_module_namespaces.is_empty();
 
         if !body_only {
             for &file_id in &unchanged_file_ids {
@@ -1807,13 +1815,8 @@ impl IncrementalAnalysisService {
         merged_codebase.safe_symbols.clear();
         merged_codebase.safe_symbol_members.clear();
 
-        let Some((mut invalid_files, extension_symbol_changed)) =
-            merged_codebase.mark_safe_symbols(&diff, &self.native_symbol_references, &extension_reads.symbols)
-        else {
-            tracing::warn!("Invalidation cascade too expensive (>5000 steps), falling back to full analysis");
-
-            return self.analyze();
-        };
+        let (mut invalid_files, extension_symbol_changed) =
+            merged_codebase.mark_safe_symbols(&diff, &self.native_symbol_references, &extension_reads.symbols);
 
         let safe_symbols = std::mem::take(&mut merged_codebase.safe_symbols);
         let safe_symbol_members = std::mem::take(&mut merged_codebase.safe_symbol_members);
@@ -1840,10 +1843,29 @@ impl IncrementalAnalysisService {
         // Every file counts the extension callbacks' reads as its own, so a change to one runs every file again.
         let extension_read_changed = extension_symbol_changed
             || extension_reads.listings.iter().any(|listing| changed_listings.contains(listing));
+        let in_changed_module_namespace = |name: &mago_word::Word| {
+            changed_module_namespaces.contains(&mago_word::empty_word())
+                || namespaces_of(name).iter().any(|namespace| changed_module_namespaces.contains(namespace))
+        };
         for file_id in &unchanged_file_ids {
             if self.file_states.get(file_id).is_some_and(|state| {
                 extension_read_changed
                     || state.reads.listings.iter().any(|listing| changed_listings.contains(listing))
+                    || !changed_module_namespaces.is_empty()
+                        && (!state.entry_keys.modules.is_empty()
+                            || state
+                                .entry_keys
+                                .class_like_names
+                                .iter()
+                                .chain(&state.entry_keys.constant_names)
+                                .chain(
+                                    state
+                                        .entry_keys
+                                        .function_like_keys
+                                        .iter()
+                                        .map(|(class, function)| if class.is_empty() { function } else { class }),
+                                )
+                                .any(in_changed_module_namespace))
                     || state.entry_keys.class_like_names.iter().any(|name| {
                         scanned_namespaces.contains(&mago_word::ascii_lowercase_word(name.as_bytes()))
                             || namespaces_of(name)
@@ -4637,6 +4659,83 @@ mod tests {
         service.analyze_incremental(Some(&[shop_id])).expect("Incremental analysis failed.");
         assert_eq!(service.analyzed_files, HashSet::from_iter([shop_id]));
         assert_matches_full(&service, &db, "a newline is appended to the Shop module");
+    }
+
+    /// An imports line added to a module re-analyzes the files of the module's namespace and every module file, and
+    /// leaves the other namespaces' files as they were.
+    #[test]
+    fn test_watch_an_imports_line_added_to_a_module_rechecks_its_namespace_and_the_module_files() {
+        let mailer = "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n";
+        let smtp = "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n";
+        let panel = "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic class Panel\n{\n    public Panel(private Mailer mailer) { }\n}\n";
+        let shop = |imports: &str| {
+            format!(
+                "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule\n{{\n{imports}    scoped Mailer = SmtpMailer;\n}}\n"
+            )
+        };
+        let mail = "namespace App.Mail;\n\nmodule\n{\n}\n";
+        let shop_id = FileId::new(b"app/Shop/Module.sharp");
+        let mut db = make_database(vec![
+            ("app/Mail/Mailer.sharp", mailer),
+            ("app/Mail/SmtpMailer.sharp", smtp),
+            ("app/Mail/Module.sharp", mail),
+            ("app/Shop/Panel.sharp", panel),
+            ("app/Shop/Module.sharp", shop("").as_str()),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        let before = service.collect_all_issues();
+
+        db.update(shop_id, Cow::Owned(shop("    imports App.Billing;\n").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[shop_id])).expect("Incremental analysis failed.");
+
+        assert_ne!(
+            diff_issues(&service.collect_all_issues(), &before),
+            (Vec::new(), Vec::new()),
+            "the edit changes what Panel reports"
+        );
+        assert_eq!(
+            service.analyzed_files,
+            HashSet::from_iter([shop_id, FileId::new(b"app/Shop/Panel.sharp"), FileId::new(b"app/Mail/Module.sharp")])
+        );
+        assert_matches_full(&service, &db, "the Shop module gains an imports line");
+    }
+
+    /// A binding whose lifetime changes re-analyzes the files of its module's namespace and every module file.
+    #[test]
+    fn test_watch_a_binding_s_new_lifetime_rechecks_its_module_s_namespace_and_the_module_files() {
+        let mailer = "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n";
+        let smtp = "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n";
+        let panel = "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic class Panel\n{\n    public Panel(private Mailer mailer) { }\n}\n";
+        let shop = |lifetime: &str| {
+            format!(
+                "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule\n{{\n    {lifetime} Mailer = SmtpMailer;\n}}\n"
+            )
+        };
+        let mail = "namespace App.Mail;\n\nmodule\n{\n}\n";
+        let shop_id = FileId::new(b"app/Shop/Module.sharp");
+        let mut db = make_database(vec![
+            ("app/Mail/Mailer.sharp", mailer),
+            ("app/Mail/SmtpMailer.sharp", smtp),
+            ("app/Mail/Module.sharp", mail),
+            ("app/Shop/Panel.sharp", panel),
+            ("app/Shop/Module.sharp", shop("scoped").as_str()),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(shop_id, Cow::Owned(shop("transient").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[shop_id])).expect("Incremental analysis failed.");
+
+        assert_eq!(
+            service.analyzed_files,
+            HashSet::from_iter([shop_id, FileId::new(b"app/Shop/Panel.sharp"), FileId::new(b"app/Mail/Module.sharp")])
+        );
+        assert_matches_full(&service, &db, "the Shop module's binding becomes transient");
     }
 
     /// A signature edit re-analyzes its file in watch mode, and the methods it did not touch keep what they do.

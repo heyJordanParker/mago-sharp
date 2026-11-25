@@ -1890,15 +1890,15 @@ impl CodebaseMetadata {
     ///
     /// # Returns
     /// Returns the logical names of files whose top-level code references an invalidated symbol,
-    /// and whether `read` names one. Returns `None` if the cascade was too large to compute.
+    /// and whether `read` names one.
     pub fn mark_safe_symbols(
         &mut self,
         diff: &CodebaseDiff,
         references: &SymbolReferences,
         read: &HashSet<SymbolIdentifier>,
-    ) -> Option<(WordSet, bool)> {
+    ) -> (WordSet, bool) {
         let (invalid_symbols, partially_invalid, invalid_files, read_invalid) =
-            references.get_invalid_symbols(self, diff, read)?;
+            references.get_invalid_symbols(self, diff, read);
 
         // Mark all symbols in 'keep' set as safe (unless invalidated by cascade)
         for keep_symbol in diff.get_keep() {
@@ -1915,7 +1915,7 @@ impl CodebaseMetadata {
             }
         }
 
-        Some((invalid_files, read_invalid))
+        (invalid_files, read_invalid)
     }
 
     /// Drops each PHP# module whose name a plain PHP class holds in any case, with its members, as [`Self::extend`]

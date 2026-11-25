@@ -256,8 +256,7 @@ fn populate_codebase_inner(
 
     refuse_missing_bounds(codebase);
 
-    // A module's services are no symbol of their own, and a change to any module re-analyzes the whole project, so
-    // every binding's service is populated each time.
+    // A module's services are no symbol of their own, so every binding's service is populated each time.
     for module in &mut codebase.modules {
         for binding in &mut module.bindings {
             populate_union_type(&mut binding.service.type_union, &codebase.symbols, None, symbol_references, true);

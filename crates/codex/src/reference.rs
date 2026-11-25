@@ -58,6 +58,209 @@ pub enum CascadeEdge {
     Inherits { class: Word, parent: Word },
 }
 
+/// What a recorded reference starts from: a symbol or member, which belongs to a class-like or to none, or a file.
+pub trait Referrer: Copy + Eq + std::hash::Hash {
+    /// The class-like a member belongs to, or the symbol itself, for a symbol or member, and none for a file.
+    fn class(self) -> Option<Word>;
+}
+
+impl Referrer for SymbolIdentifier {
+    fn class(self) -> Option<Word> {
+        Some(self.0)
+    }
+}
+
+impl Referrer for Word {
+    fn class(self) -> Option<Word> {
+        None
+    }
+}
+
+/// The references each symbol, member or file makes, with the sources of each target and of each class-like beside them.
+///
+/// The invalidation cascade walks back from a change through the edges that reach it alone, in time that grows with
+/// what it invalidates, never with the whole graph. Every change goes through these methods, which keep the three in
+/// step. Only the references themselves are serialized: the indexes are made again from them on load.
+#[derive(Debug, Clone)]
+pub struct References<K: Referrer> {
+    /// Each source's targets.
+    to: HashMap<K, HashSet<SymbolIdentifier>>,
+    /// Each target's sources.
+    referrers: HashMap<SymbolIdentifier, HashSet<K>>,
+    /// The sources that are a class-like or one of its members, by the class-like.
+    by_class: HashMap<Word, HashSet<K>>,
+}
+
+impl<K: Referrer> Default for References<K> {
+    fn default() -> Self {
+        Self { to: HashMap::default(), referrers: HashMap::default(), by_class: HashMap::default() }
+    }
+}
+
+impl<K: Referrer> PartialEq for References<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.to == other.to
+    }
+}
+
+impl<K: Referrer> Eq for References<K> {}
+
+#[cfg(feature = "serde")]
+impl<K> serde::Serialize for References<K>
+where
+    K: Referrer + serde::Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.to.serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, K> serde::Deserialize<'de> for References<K>
+where
+    K: Referrer + serde::Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut references = Self::default();
+        for (source, targets) in HashMap::<K, HashSet<SymbolIdentifier>>::deserialize(deserializer)? {
+            references.extend_from(source, targets);
+        }
+
+        Ok(references)
+    }
+}
+
+impl<K: Referrer> References<K> {
+    /// Records that `source` references `target`, and whether it was new.
+    pub fn insert(&mut self, source: K, target: SymbolIdentifier) -> bool {
+        if !self.to.entry(source).or_default().insert(target) {
+            return false;
+        }
+        self.referrers.entry(target).or_default().insert(source);
+        if let Some(class) = source.class() {
+            self.by_class.entry(class).or_default().insert(source);
+        }
+
+        true
+    }
+
+    /// Records that `source` references each of `targets`.
+    pub fn extend_from(&mut self, source: K, targets: impl IntoIterator<Item = SymbolIdentifier>) {
+        for target in targets {
+            self.insert(source, target);
+        }
+    }
+
+    /// Records that `source` references each of `targets`, as a set of them was recorded.
+    pub fn insert_set(&mut self, source: K, targets: HashSet<SymbolIdentifier>) {
+        self.remove(&source);
+        self.extend_from(source, targets);
+    }
+
+    /// What `source` references.
+    #[must_use]
+    pub fn get(&self, source: &K) -> Option<&HashSet<SymbolIdentifier>> {
+        self.to.get(source)
+    }
+
+    #[must_use]
+    pub fn contains_key(&self, source: &K) -> bool {
+        self.to.contains_key(source)
+    }
+
+    /// Forgets every reference `source` makes, and gives them.
+    pub fn remove(&mut self, source: &K) -> Option<HashSet<SymbolIdentifier>> {
+        let targets = self.to.remove(source)?;
+        for target in &targets {
+            if let Some(sources) = self.referrers.get_mut(target) {
+                sources.remove(source);
+                if sources.is_empty() {
+                    self.referrers.remove(target);
+                }
+            }
+        }
+        if let Some(class) = source.class()
+            && let Some(sources) = self.by_class.get_mut(&class)
+        {
+            sources.remove(source);
+            if sources.is_empty() {
+                self.by_class.remove(&class);
+            }
+        }
+
+        Some(targets)
+    }
+
+    /// Keeps only the sources `keep` accepts, with their references.
+    pub fn retain(&mut self, mut keep: impl FnMut(&K, &HashSet<SymbolIdentifier>) -> bool) {
+        let dropped: Vec<K> =
+            self.to.iter().filter(|(source, targets)| !keep(source, targets)).map(|(source, _)| *source).collect();
+        for source in dropped {
+            self.remove(&source);
+        }
+    }
+
+    /// The sources that reference `target`.
+    pub fn referrers(&self, target: &SymbolIdentifier) -> impl Iterator<Item = &K> {
+        self.referrers.get(target).into_iter().flatten()
+    }
+
+    /// The sources that are the class-like `class` or one of its members.
+    pub fn sources_of_class(&self, class: &Word) -> impl Iterator<Item = &K> {
+        self.by_class.get(class).into_iter().flatten()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &HashSet<SymbolIdentifier>)> {
+        self.to.iter()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &HashSet<SymbolIdentifier>> {
+        self.to.values()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.to.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.to.is_empty()
+    }
+}
+
+impl<K: Referrer> std::ops::Index<&K> for References<K> {
+    type Output = HashSet<SymbolIdentifier>;
+
+    fn index(&self, source: &K) -> &Self::Output {
+        &self.to[source]
+    }
+}
+
+impl<'references, K: Referrer> IntoIterator for &'references References<K> {
+    type Item = (&'references K, &'references HashSet<SymbolIdentifier>);
+    type IntoIter = std::collections::hash_map::Iter<'references, K, HashSet<SymbolIdentifier>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.to.iter()
+    }
+}
+
+impl<K: Referrer> IntoIterator for References<K> {
+    type Item = (K, HashSet<SymbolIdentifier>);
+    type IntoIter = std::collections::hash_map::IntoIter<K, HashSet<SymbolIdentifier>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.to.into_iter()
+    }
+}
+
 /// Describes the semantic role of a recorded symbol reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SymbolReferenceKind {
@@ -87,19 +290,19 @@ pub struct SymbolReferences {
     /// Maps a referencing symbol/member `(RefSymbol, RefMember)` to a set of referenced symbols/members `(Symbol, Member)`
     /// found within the *body* of the referencing context.
     /// `RefMember` or `Member` being empty usually signifies the symbol itself.
-    symbol_references_to_symbols: HashMap<SymbolIdentifier, HashSet<SymbolIdentifier>>,
+    symbol_references_to_symbols: References<SymbolIdentifier>,
 
     /// Maps a referencing symbol/member `(RefSymbol, RefMember)` to a set of referenced symbols/members `(Symbol, Member)`
     /// found within the *signature* (e.g., type hints) of the referencing context.
-    symbol_references_to_symbols_in_signature: HashMap<SymbolIdentifier, HashSet<SymbolIdentifier>>,
+    symbol_references_to_symbols_in_signature: References<SymbolIdentifier>,
 
     /// The references an attribute a symbol/member carries makes in its *body*: to the attribute's constructor, and to
     /// its class. Every reader but [`Self::cascade_edges`] reads them as body references.
-    attribute_references: HashMap<SymbolIdentifier, HashSet<SymbolIdentifier>>,
+    attribute_references: References<SymbolIdentifier>,
 
     /// The references an attribute a symbol/member carries makes in its *signature*: to the attribute's class. Every
     /// reader but [`Self::cascade_edges`] reads them as signature references.
-    attribute_references_in_signature: HashMap<SymbolIdentifier, HashSet<SymbolIdentifier>>,
+    attribute_references_in_signature: References<SymbolIdentifier>,
 
     /// Maps a referencing symbol/member `(RefSymbol, RefMember)` to a set of *overridden* members `(ParentSymbol, Member)`
     /// that it directly references (e.g., via `parent::method()`).
@@ -112,11 +315,11 @@ pub struct SymbolReferences {
     /// Maps a logical file name to a set of referenced symbols/members `(Symbol, Member)`
     /// found within the file's global scope (outside any symbol). This tracks references from top-level code.
     /// Used for incremental analysis to determine which files need re-analysis when a symbol changes.
-    file_references_to_symbols: HashMap<Word, HashSet<SymbolIdentifier>>,
+    file_references_to_symbols: References<Word>,
 
     /// Maps a logical file name to a set of referenced symbols/members `(Symbol, Member)`
     /// found within the file's global scope signatures (e.g., top-level type declarations).
-    file_references_to_symbols_in_signature: HashMap<Word, HashSet<SymbolIdentifier>>,
+    file_references_to_symbols_in_signature: References<Word>,
 
     /// Maps a referencing symbol/member to a set of properties that are *written* (assigned to).
     /// This is separate from read references to enable detection of write-only properties.
@@ -281,9 +484,9 @@ impl SymbolReferences {
         // Use empty member for the referencing symbol key
         let key = (referencing_symbol, empty_word());
         if in_signature {
-            self.symbol_references_to_symbols_in_signature.entry(key).or_default().insert(class_member);
+            self.symbol_references_to_symbols_in_signature.insert(key, class_member);
         } else {
-            self.symbol_references_to_symbols.entry(key).or_default().insert(class_member);
+            self.symbol_references_to_symbols.insert(key, class_member);
         }
     }
 
@@ -306,7 +509,7 @@ impl SymbolReferences {
         let referenced_key = (symbol, empty_word());
 
         if in_signature {
-            self.symbol_references_to_symbols_in_signature.entry(referencing_key).or_default().insert(referenced_key);
+            self.symbol_references_to_symbols_in_signature.insert(referencing_key, referenced_key);
         } else {
             // If it's already referenced in the signature, don't add as a body reference
             if let Some(sig_refs) = self.symbol_references_to_symbols_in_signature.get(&referencing_key)
@@ -314,7 +517,7 @@ impl SymbolReferences {
             {
                 return;
             }
-            self.symbol_references_to_symbols.entry(referencing_key).or_default().insert(referenced_key);
+            self.symbol_references_to_symbols.insert(referencing_key, referenced_key);
         }
     }
 
@@ -365,13 +568,13 @@ impl SymbolReferences {
         let mut made = SymbolReferences::new();
         made.add_reference(referencing, referenced, in_signature);
         for (from, references) in made.symbol_references_to_symbols_in_signature {
-            self.attribute_references_in_signature.entry(from).or_default().extend(references);
+            self.attribute_references_in_signature.extend_from(from, references);
         }
         for (from, references) in made.symbol_references_to_symbols {
             let in_signature = self.attribute_references_in_signature.get(&from);
             for to in references {
                 if in_signature.is_none_or(|known| !known.contains(&to)) {
-                    self.attribute_references.entry(from).or_default().insert(to);
+                    self.attribute_references.insert(from, to);
                 }
             }
         }
@@ -454,14 +657,11 @@ impl SymbolReferences {
 
         // Add the direct member-to-member reference
         if in_signature {
-            self.symbol_references_to_symbols_in_signature
-                .entry(referencing_class_member)
-                .or_default()
-                .insert(class_member);
+            self.symbol_references_to_symbols_in_signature.insert(referencing_class_member, class_member);
         } else {
             // Check signature refs first? (Consistency with add_symbol_reference_to_symbol might be needed)
             // Current logic adds to body refs regardless of signature refs for member->member.
-            self.symbol_references_to_symbols.entry(referencing_class_member).or_default().insert(class_member);
+            self.symbol_references_to_symbols.insert(referencing_class_member, class_member);
         }
     }
 
@@ -492,10 +692,7 @@ impl SymbolReferences {
         let referenced_key = (symbol, empty_word());
 
         if in_signature {
-            self.symbol_references_to_symbols_in_signature
-                .entry(referencing_class_member)
-                .or_default()
-                .insert(referenced_key);
+            self.symbol_references_to_symbols_in_signature.insert(referencing_class_member, referenced_key);
         } else {
             // If already referenced in signature, don't add as body reference
             if let Some(sig_refs) = self.symbol_references_to_symbols_in_signature.get(&referencing_class_member)
@@ -503,7 +700,7 @@ impl SymbolReferences {
             {
                 return;
             }
-            self.symbol_references_to_symbols.entry(referencing_class_member).or_default().insert(referenced_key);
+            self.symbol_references_to_symbols.insert(referencing_class_member, referenced_key);
         }
     }
 
@@ -522,7 +719,7 @@ impl SymbolReferences {
         }
 
         if in_signature {
-            self.file_references_to_symbols_in_signature.entry(file_name).or_default().insert(class_member);
+            self.file_references_to_symbols_in_signature.insert(file_name, class_member);
         } else {
             // Check if already in signature to avoid duplicate tracking
             if let Some(sig_refs) = self.file_references_to_symbols_in_signature.get(&file_name)
@@ -530,7 +727,7 @@ impl SymbolReferences {
             {
                 return;
             }
-            self.file_references_to_symbols.entry(file_name).or_default().insert(class_member);
+            self.file_references_to_symbols.insert(file_name, class_member);
         }
     }
 
@@ -630,16 +827,16 @@ impl SymbolReferences {
     #[inline]
     pub fn extend(&mut self, other: Self) {
         for (k, v) in other.symbol_references_to_symbols {
-            self.symbol_references_to_symbols.entry(k).or_default().extend(v);
+            self.symbol_references_to_symbols.extend_from(k, v);
         }
         for (k, v) in other.symbol_references_to_symbols_in_signature {
-            self.symbol_references_to_symbols_in_signature.entry(k).or_default().extend(v);
+            self.symbol_references_to_symbols_in_signature.extend_from(k, v);
         }
         for (k, v) in other.attribute_references {
-            self.attribute_references.entry(k).or_default().extend(v);
+            self.attribute_references.extend_from(k, v);
         }
         for (k, v) in other.attribute_references_in_signature {
-            self.attribute_references_in_signature.entry(k).or_default().extend(v);
+            self.attribute_references_in_signature.extend_from(k, v);
         }
         for (k, v) in other.symbol_references_to_overridden_members {
             self.symbol_references_to_overridden_members.entry(k).or_default().extend(v);
@@ -649,11 +846,11 @@ impl SymbolReferences {
         }
 
         for (k, v) in other.file_references_to_symbols {
-            self.file_references_to_symbols.entry(k).or_default().extend(v);
+            self.file_references_to_symbols.extend_from(k, v);
         }
 
         for (k, v) in other.file_references_to_symbols_in_signature {
-            self.file_references_to_symbols_in_signature.entry(k).or_default().extend(v);
+            self.file_references_to_symbols_in_signature.extend_from(k, v);
         }
 
         for (k, v) in other.property_write_references {
@@ -838,10 +1035,9 @@ impl SymbolReferences {
     }
 
     /// Calculates sets of invalid symbols and members based on detected code changes (`CodebaseDiff`).
-    /// Propagates invalidation through the [`Self::cascade_edges`] of these references and `codebase`. A method of
-    /// `codebase` that takes its return from its body has a signature its body decides, so its body's references
-    /// propagate as its signature's do.
-    /// Limits propagation expense to avoid excessive computation on large changes.
+    /// Propagates invalidation back through the [`Self::cascade_edges`] of these references and `codebase`, from each
+    /// change, through the edges that reach it alone, each once. A method of `codebase` that takes its return from its
+    /// body has a signature its body decides, so its body's references propagate as its signature's do.
     ///
     /// # Arguments
     ///
@@ -851,12 +1047,11 @@ impl SymbolReferences {
     ///
     /// # Returns
     ///
-    /// `Some((invalid_signatures, partially_invalid, invalid_files, read_invalid))` on success, where
-    /// `invalid_signatures` contains all symbol/member pairs whose signature is invalid (including propagated ones),
-    /// and `partially_invalid` contains symbols with at least one invalid member, and classes whose direct parent,
-    /// interface or trait changed. `invalid_files` contains logical file names whose top-level code references a
-    /// symbol with an invalid signature, and `read_invalid` whether `read` names one.
-    /// Returns `None` if the propagation exceeds an expense limit (currently 5000 steps).
+    /// `(invalid_signatures, partially_invalid, invalid_files, read_invalid)`, where `invalid_signatures` contains all
+    /// symbol/member pairs whose signature or body is invalid (including propagated ones), and `partially_invalid`
+    /// contains symbols with at least one invalid member, and classes whose direct parent, interface or trait changed.
+    /// `invalid_files` contains logical file names whose top-level code references a symbol with an invalid
+    /// signature, and `read_invalid` whether `read` names one.
     #[inline]
     #[must_use]
     pub fn get_invalid_symbols(
@@ -864,105 +1059,107 @@ impl SymbolReferences {
         codebase: &CodebaseMetadata,
         codebase_diff: &CodebaseDiff,
         read: &HashSet<SymbolIdentifier>,
-    ) -> Option<(HashSet<SymbolIdentifier>, WordSet, WordSet, bool)> {
-        let mut invalid_signatures = HashSet::default();
+    ) -> (HashSet<SymbolIdentifier>, WordSet, WordSet, bool) {
+        let mut invalid_signatures: HashSet<SymbolIdentifier> = HashSet::default();
         let mut partially_invalid_symbols = WordSet::default();
-
-        let mut sig_reverse_index: HashMap<SymbolIdentifier, Vec<SymbolIdentifier>> = HashMap::default();
-        let mut references: Vec<(SymbolIdentifier, SymbolIdentifier)> = Vec::new();
-        let mut file_references: Vec<(Word, SymbolIdentifier)> = Vec::new();
-        for edge in self.cascade_edges(codebase) {
-            match edge {
-                CascadeEdge::Signature { from, to } | CascadeEdge::Attribute { from, to, signature: true } => {
-                    if codebase_diff.contains_changed_entry(&(from.0, empty_word())) {
-                        invalid_signatures.insert(from);
-                        partially_invalid_symbols.insert(from.0);
-                    }
-
-                    sig_reverse_index.entry(to).or_default().push(from);
-                    references.push((from, to));
-                }
-                CascadeEdge::Body { from, to } | CascadeEdge::Attribute { from, to, signature: false } => {
-                    if codebase.function_likes.get(&from).is_some_and(|method| method.return_from_body.is_some()) {
-                        sig_reverse_index.entry(to).or_default().push(from);
-                    }
-
-                    references.push((from, to));
-                }
-                CascadeEdge::File { file, to } => file_references.push((file, to)),
-                // A class whose parent, interface or trait changed is never safe, since its edge to that parent can
-                // be lost while the parent is deleted and re-added.
-                CascadeEdge::Inherits { class, parent } => {
-                    if codebase_diff.get_changed().contains(&(parent, empty_word()))
-                        && codebase.class_likes.contains_key(&parent)
-                    {
-                        partially_invalid_symbols.insert(class);
-                    }
-                }
+        let invalidate = |item: SymbolIdentifier, invalid: &mut HashSet<SymbolIdentifier>, partially: &mut WordSet| {
+            if !item.1.is_empty() {
+                partially.insert(item.0);
             }
-        }
 
-        // Start with symbols directly added/deleted in the diff.
-        let mut symbols_to_process = codebase_diff.get_changed().iter().copied().collect::<Vec<_>>();
-        let mut processed_symbols = HashSet::default();
-        let mut expense_counter = 0;
+            invalid.insert(item)
+        };
 
-        const EXPENSE_LIMIT: usize = 5000;
-        while let Some(invalidated_item) = symbols_to_process.pop() {
-            if processed_symbols.contains(&invalidated_item) {
+        // A changed class-like invalidates the signature of each of its members whose signature references anything.
+        for (class, member) in codebase_diff.get_changed() {
+            if !member.is_empty() {
                 continue;
             }
-
-            expense_counter += 1;
-            if expense_counter > EXPENSE_LIMIT {
-                return None;
+            for from in self
+                .symbol_references_to_symbols_in_signature
+                .sources_of_class(class)
+                .chain(self.attribute_references_in_signature.sources_of_class(class))
+            {
+                invalidate(*from, &mut invalid_signatures, &mut partially_invalid_symbols);
+                partially_invalid_symbols.insert(*class);
             }
+        }
 
-            // Mark this item as invalid (signature) and processed
-            invalid_signatures.insert(invalidated_item);
-            processed_symbols.insert(invalidated_item);
-            if !invalidated_item.1.is_empty() {
-                // If it's a member, also mark its containing symbol for processing.
-                partially_invalid_symbols.insert(invalidated_item.0);
-                let containing_symbol = (invalidated_item.0, empty_word());
-                if !processed_symbols.contains(&containing_symbol) {
-                    symbols_to_process.push(containing_symbol);
-                }
-            }
-
-            // Find all items that reference this now-invalid item *in their signature*
-            if let Some(referencing_items) = sig_reverse_index.get(&invalidated_item) {
-                for referencing_item in referencing_items {
-                    if !processed_symbols.contains(referencing_item) {
-                        symbols_to_process.push(*referencing_item);
-                    }
-
-                    invalid_signatures.insert(*referencing_item);
-                    if !referencing_item.1.is_empty() {
-                        partially_invalid_symbols.insert(referencing_item.0);
-                    }
+        // A class whose parent, interface or trait changed is never safe, since its edge to that parent can be lost
+        // while the parent is deleted and re-added.
+        let changed_parents: WordSet = codebase_diff
+            .get_changed()
+            .iter()
+            .filter(|(class, member)| member.is_empty() && codebase.class_likes.contains_key(class))
+            .map(|(class, _)| *class)
+            .collect();
+        if !changed_parents.is_empty() {
+            for (class, metadata) in &codebase.class_likes {
+                let mut parents = metadata
+                    .direct_parent_class
+                    .iter()
+                    .chain(&metadata.direct_parent_interfaces)
+                    .chain(&metadata.used_traits);
+                if parents.any(|parent| changed_parents.contains(parent)) {
+                    partially_invalid_symbols.insert(*class);
                 }
             }
         }
 
-        // An item's body is invalid if it references (anywhere, body or sig) an item with an invalid signature.
-        // Check both body and signature reference maps in a single pass where possible.
-        let mut invalid_bodies = HashSet::default();
-        for (referencing_item, referenced) in references {
-            if invalid_signatures.contains(&referenced) {
-                invalid_bodies.insert(referencing_item);
-                if !referencing_item.1.is_empty() {
-                    partially_invalid_symbols.insert(referencing_item.0);
+        // What a signature references invalidates that signature, and so does what the body of a method that takes
+        // its return from its body references.
+        let mut walk: Vec<SymbolIdentifier> = codebase_diff.get_changed().iter().copied().collect();
+        let mut walked: HashSet<SymbolIdentifier> = HashSet::default();
+        while let Some(item) = walk.pop() {
+            if !walked.insert(item) {
+                continue;
+            }
+            invalidate(item, &mut invalid_signatures, &mut partially_invalid_symbols);
+            if !item.1.is_empty() {
+                walk.push((item.0, empty_word()));
+            }
+
+            let by_signature = self
+                .symbol_references_to_symbols_in_signature
+                .referrers(&item)
+                .chain(self.attribute_references_in_signature.referrers(&item));
+            let by_returned_body = self
+                .symbol_references_to_symbols
+                .referrers(&item)
+                .chain(self.attribute_references.referrers(&item))
+                .filter(|from| {
+                    codebase.function_likes.get(from).is_some_and(|method| method.return_from_body.is_some())
+                });
+            for from in by_signature.chain(by_returned_body) {
+                invalidate(*from, &mut invalid_signatures, &mut partially_invalid_symbols);
+                if !walked.contains(from) {
+                    walk.push(*from);
                 }
             }
         }
 
+        // A body is invalid when it references, in its body or its signature, an item whose signature is invalid, and
+        // so is the top-level code of a file.
+        let mut invalid_bodies: HashSet<SymbolIdentifier> = HashSet::default();
         let mut invalid_files = WordSet::default();
-        for (file, referenced) in file_references {
-            if invalid_signatures.contains(&referenced) {
-                invalid_files.insert(file);
+        for item in &invalid_signatures {
+            for from in self
+                .symbol_references_to_symbols
+                .referrers(item)
+                .chain(self.symbol_references_to_symbols_in_signature.referrers(item))
+                .chain(self.attribute_references.referrers(item))
+                .chain(self.attribute_references_in_signature.referrers(item))
+            {
+                invalidate(*from, &mut invalid_bodies, &mut partially_invalid_symbols);
             }
+            invalid_files.extend(
+                self.file_references_to_symbols
+                    .referrers(item)
+                    .chain(self.file_references_to_symbols_in_signature.referrers(item))
+                    .copied(),
+            );
         }
+
         // A read names a class-like as the extension wrote it: exactly, as a PHP# one's key is, or by its key, spec
         // section 24, which a deleted PHP# class-like no longer has.
         let read_invalid = read.iter().any(|&(class, member)| {
@@ -972,7 +1169,8 @@ impl SymbolReferences {
 
         let mut all_invalid_symbols = invalid_signatures;
         all_invalid_symbols.extend(invalid_bodies);
-        Some((all_invalid_symbols, partially_invalid_symbols, invalid_files, read_invalid))
+
+        (all_invalid_symbols, partially_invalid_symbols, invalid_files, read_invalid)
     }
 
     /// Extracts references originating from safe (skipped) symbols and merges them into this instance.
@@ -1003,14 +1201,14 @@ impl SymbolReferences {
         // Restore body references for safe symbols
         for (key, refs) in &previous.symbol_references_to_symbols {
             if is_safe(key) && !self.symbol_references_to_symbols.contains_key(key) {
-                self.symbol_references_to_symbols.insert(*key, refs.clone());
+                self.symbol_references_to_symbols.insert_set(*key, refs.clone());
             }
         }
 
         // Restore the body references of the attributes of safe symbols
         for (key, refs) in &previous.attribute_references {
             if is_safe(key) && !self.attribute_references.contains_key(key) {
-                self.attribute_references.insert(*key, refs.clone());
+                self.attribute_references.insert_set(*key, refs.clone());
             }
         }
 
@@ -1221,7 +1419,7 @@ mod tests {
         let mut refs = SymbolReferences::new();
         for (key, values) in entries {
             let set: HashSet<SymbolIdentifier> = values.into_iter().collect();
-            refs.symbol_references_to_symbols.insert(key, set);
+            refs.symbol_references_to_symbols.insert_set(key, set);
         }
         refs
     }
@@ -1379,7 +1577,7 @@ mod tests {
         let method_foo = word("foo");
 
         let mut refs = SymbolReferences::new();
-        refs.symbol_references_to_symbols_in_signature.insert((class_b, method_foo), {
+        refs.symbol_references_to_symbols_in_signature.insert_set((class_b, method_foo), {
             let mut set = HashSet::default();
             set.insert((class_a, empty_word()));
             set
@@ -1390,9 +1588,8 @@ mod tests {
         changed.insert((class_a, empty_word()));
         diff = diff.with_changed(changed);
 
-        let result = refs.get_invalid_symbols(&CodebaseMetadata::default(), &diff, &HashSet::default());
-        assert!(result.is_some());
-        let (invalid, partially_invalid, invalid_files, _) = result.unwrap();
+        let (invalid, partially_invalid, invalid_files, _) =
+            refs.get_invalid_symbols(&CodebaseMetadata::default(), &diff, &HashSet::default());
 
         assert!(invalid.contains(&(class_a, empty_word())));
         assert!(invalid.contains(&(class_b, method_foo)));
@@ -1412,9 +1609,8 @@ mod tests {
         changed.insert((changed_class, empty_word()));
         diff = diff.with_changed(changed);
 
-        let (_, _, invalid_files, _) = references
-            .get_invalid_symbols(&CodebaseMetadata::default(), &diff, &HashSet::default())
-            .expect("invalidation should complete");
+        let (_, _, invalid_files, _) =
+            references.get_invalid_symbols(&CodebaseMetadata::default(), &diff, &HashSet::default());
         assert_eq!(invalid_files.len(), 1);
         assert!(invalid_files.contains(&file));
     }
@@ -1432,10 +1628,7 @@ mod tests {
         diff = diff.with_changed(changed);
 
         let read_invalid = |read: HashSet<SymbolIdentifier>| {
-            references
-                .get_invalid_symbols(&CodebaseMetadata::default(), &diff, &read)
-                .expect("invalidation should complete")
-                .3
+            references.get_invalid_symbols(&CodebaseMetadata::default(), &diff, &read).3
         };
         assert!(read_invalid(HashSet::from_iter([(child, empty_word())])));
         assert!(!read_invalid(HashSet::from_iter([(word("other"), empty_word())])));
@@ -1479,9 +1672,24 @@ mod tests {
             );
         }
         let diff = crate::diff::CodebaseDiff::new().with_changed(HashSet::from_iter([attribute]));
-        let invalid = |references: &SymbolReferences| {
-            references.get_invalid_symbols(&codebase, &diff, &HashSet::default()).expect("invalidation completes")
-        };
+        let invalid =
+            |references: &SymbolReferences| references.get_invalid_symbols(&codebase, &diff, &HashSet::default());
         assert_eq!(invalid(&attributes), invalid(&code));
+    }
+    /// A change whose cascade reaches more than 5,000 symbols invalidates every one of them: a chain of 6,000 classes,
+    /// each of whose signatures references the next, is invalid from its end to its start.
+    #[test]
+    fn a_cascade_through_6000_signatures_invalidates_each_one() {
+        let class = |index: usize| word(format!("class_{index}"));
+        let mut references = SymbolReferences::new();
+        for index in 1..6000 {
+            references.add_symbol_reference_to_symbol(class(index), class(index - 1), true);
+        }
+        let diff = crate::diff::CodebaseDiff::new().with_changed(HashSet::from_iter([(class(0), empty_word())]));
+
+        let (invalid, _, _, _) =
+            references.get_invalid_symbols(&CodebaseMetadata::default(), &diff, &HashSet::default());
+
+        assert!((0..6000).all(|index| invalid.contains(&(class(index), empty_word()))));
     }
 }
