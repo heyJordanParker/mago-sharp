@@ -224,7 +224,12 @@ impl CodebaseMetadata {
     pub(crate) fn add_class_like_alias(&mut self, alias: Word, target: Word, span: Span, flags: MetadataFlags) {
         let replace =
             self.class_like_alias_declarations.get(&alias).is_none_or(|(_, existing_span, existing_flags)| {
-                should_replace_metadata(&self.file_names, (*existing_flags, *existing_span), (flags, span))
+                should_replace_metadata(
+                    &self.file_names,
+                    &self.standard_library_files,
+                    (*existing_flags, *existing_span),
+                    (flags, span),
+                )
             });
 
         if replace {
@@ -969,6 +974,12 @@ impl CodebaseMetadata {
         if file.folder_namespace == Some(FolderNamespace::Test) {
             self.test_files.insert(file.id);
         }
+    }
+
+    /// Names the file `file_id` `name`, its path from the workspace, as a codebase another workspace scanned names it by
+    /// its path there: the standard library's codex names each library file by its path in the library's package.
+    pub fn name_file(&mut self, file_id: FileId, name: &[u8]) {
+        self.file_names.insert(file_id, word(name));
     }
 
     /// The name of the host or vendored file `file_id`, its path from the workspace, as `app/Shop/Cart.sharp`.
@@ -1946,12 +1957,14 @@ impl CodebaseMetadata {
     /// [`should_replace_metadata`] decides, for the same result whatever order the files are scanned in.
     pub fn extend(&mut self, other: CodebaseMetadata) {
         self.file_names.extend(other.file_names);
+        self.standard_library_files.extend(other.standard_library_files);
         let class_likes_changed = !other.class_likes.is_empty();
         for (k, mut v) in other.class_likes {
             match self.class_likes.entry(k) {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -1978,6 +1991,7 @@ impl CodebaseMetadata {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -1998,6 +2012,7 @@ impl CodebaseMetadata {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -2029,7 +2044,6 @@ impl CodebaseMetadata {
         }
 
         self.file_signatures.extend(other.file_signatures);
-        self.standard_library_files.extend(other.standard_library_files);
         self.test_files.extend(other.test_files);
         self.dev_packages.extend(other.dev_packages);
         self.safe_symbols.extend(other.safe_symbols);
@@ -2053,6 +2067,7 @@ impl CodebaseMetadata {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -2082,6 +2097,7 @@ impl CodebaseMetadata {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -2103,6 +2119,7 @@ impl CodebaseMetadata {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -2784,9 +2801,17 @@ where
 /// Returns `true` if the new value should replace the existing one.
 fn should_replace_metadata(
     file_names: &HashMap<FileId, Word>,
+    standard_library_files: &HashSet<FileId>,
     (existing_flags, existing_span): (MetadataFlags, Span),
     (new_flags, new_span): (MetadataFlags, Span),
 ) -> bool {
+    // Spec section 23 reserves the standard library's names: a declaration of the library keeps its name over any other
+    // file's, which the analysis refuses, so every file resolves the name to the library's code.
+    let new_is_library = standard_library_files.contains(&new_span.file_id);
+    if new_is_library != standard_library_files.contains(&existing_span.file_id) {
+        return new_is_library;
+    }
+
     if new_flags.is_module() && !existing_flags.is_sharp() {
         return false;
     }
@@ -2867,7 +2892,12 @@ mod should_replace_metadata_tests {
 
     /// [`should_replace_metadata`] on two declarations of files that no name is known for.
     fn replaces(existing_flags: MetadataFlags, existing_span: Span, new_flags: MetadataFlags, new_span: Span) -> bool {
-        should_replace_metadata(&HashMap::default(), (existing_flags, existing_span), (new_flags, new_span))
+        should_replace_metadata(
+            &HashMap::default(),
+            &HashSet::default(),
+            (existing_flags, existing_span),
+            (new_flags, new_span),
+        )
     }
 
     /// Of two declarations with the same priority, the one whose file's name sorts first is kept, whichever file id
@@ -2881,11 +2911,29 @@ mod should_replace_metadata_tests {
         let (in_app, in_src) = (Span::new(app, 40.into(), 60.into()), Span::new(src, 0.into(), 20.into()));
 
         assert!(src < app, "the file ids sort the other way from the names");
-        assert!(should_replace_metadata(&file_names, (flags, in_src), (flags, in_app)));
-        assert!(!should_replace_metadata(&file_names, (flags, in_app), (flags, in_src)));
+        assert!(should_replace_metadata(&file_names, &HashSet::default(), (flags, in_src), (flags, in_app)));
+        assert!(!should_replace_metadata(&file_names, &HashSet::default(), (flags, in_app), (flags, in_src)));
 
         let earlier = Span::new(app, 0.into(), 20.into());
-        assert!(should_replace_metadata(&file_names, (flags, in_app), (flags, earlier)));
+        assert!(should_replace_metadata(&file_names, &HashSet::default(), (flags, in_app), (flags, earlier)));
+    }
+
+    /// A declaration of the standard library keeps its name over a project's, whichever is merged first.
+    #[test]
+    fn the_standard_library_keeps_its_name_over_a_project_file() {
+        let flags = MetadataFlags::USER_DEFINED;
+        let (library, project) = (FileId::new(b"library/Sharp/Bool.sharp"), FileId::new(b"src/App/Bool.sharp"));
+        let library_files: HashSet<FileId> = std::iter::once(library).collect();
+        let (in_library, in_project) =
+            (Span::new(library, 0.into(), 20.into()), Span::new(project, 0.into(), 20.into()));
+
+        assert!(!should_replace_metadata(
+            &HashMap::default(),
+            &library_files,
+            (flags, in_library),
+            (flags, in_project)
+        ));
+        assert!(should_replace_metadata(&HashMap::default(), &library_files, (flags, in_project), (flags, in_library)));
     }
 
     #[test]

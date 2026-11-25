@@ -26,9 +26,9 @@ mago-syntax = { workspace = true }
 mago-syntax-core = { workspace = true }
 mago-bytes = { workspace = true }
 mago-casing = { workspace = true }
-mago-word = { workspace = true }
-mago-span = { workspace = true }
-mago-names = { workspace = true }
+mago-word = { workspace = true, features = ["serde"] }
+mago-span = { workspace = true, features = ["serde"] }
+mago-names = { workspace = true, features = ["serde"] }
 mago-database = { workspace = true }
 mago-algebra = { workspace = true }
 mago-php-version = { workspace = true }
@@ -45,6 +45,7 @@ diffy = { workspace = true }
 itoa = { workspace = true }
 ryu = { workspace = true }
 memchr = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
 
 [build-dependencies]
 mago-prelude = { workspace = true, features = ["build"] }

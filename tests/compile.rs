@@ -10,6 +10,7 @@ use mago_database::process;
 use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::header;
 use mago_sharp_bridge::unit::inputs_changed;
+use mago_sharp_bridge::unit::release_checker;
 use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_bridge::unit::stamp;
 
@@ -40,6 +41,7 @@ use crate::common::compiling::money_and_wallet;
 use crate::common::compiling::printed;
 use crate::common::compiling::project;
 use crate::common::compiling::read;
+use crate::common::compiling::release_library;
 use crate::common::compiling::source_lean_files;
 use crate::common::compiling::unwritable_cache;
 use crate::common::compiling::write;
@@ -176,6 +178,7 @@ fn compile_names_the_installed_standard_library_in_each_compiled_file() {
         &format!("{library}/library/Sharp/Math.sharp"),
         "namespace Sharp;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
     );
+    release_library(&root.join(library));
     let version = format!("v{}", env!("CARGO_PKG_VERSION"));
     write(
         root,
@@ -231,6 +234,7 @@ fn compile_refuses_a_standard_library_of_another_release() {
         &format!("{library}/library/Sharp/Math.sharp"),
         "namespace Sharp;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
     );
+    release_library(&root.join(library));
     let install = |version: &str| {
         write(
             root,
@@ -3703,6 +3707,7 @@ fn compile_names_the_app_module_that_binds_the_dispatcher() {
     let directory =
         lawful_project(&[composer, dispatcher, ("app/Recorder.sharp", recorder), ("app/Shop/Module.sharp", &shop)]);
     let root = directory.path();
+    release_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
 
     compile_succeeds(root);
     assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => 'app\\\\shop',\n"));
@@ -4883,5 +4888,63 @@ fn a_transaction_s_body_emits_and_reaches_the_database_and_sending_mail_in_it_is
         ],
         "{}",
         printed(&refused)
+    );
+}
+
+/// The compiled file the engine reads for the source `name` of the project at `root`: the one under the `.sharp` folder
+/// of the nearest folder above the source that holds one.
+fn compiled_as_the_engine_finds_it(root: &Path, name: &str) -> PathBuf {
+    let source = root.join(name);
+    let folder = source.ancestors().skip(1).find(|folder| folder.join(".sharp").is_dir()).unwrap();
+
+    folder.join(".sharp").join(source.strip_prefix(folder).unwrap()).with_extension("sharpc")
+}
+
+/// The standard library resolves its names when PHP# releases it, so a plain PHP class a package declares in `Sharp`
+/// never changes what the library's code names: `Sharp.Int` throws PHP's `ValueError`, not the package's.
+#[test]
+fn a_plain_php_sharp_value_error_leaves_the_standard_library_throwing_php_s_value_error() {
+    let directory = library_project(&[("app/Order.sharp", ORDER)]);
+    let root = directory.path();
+    write(
+        root,
+        "vendor/acme/shadow/ValueError.php",
+        "<?php\n\nnamespace Sharp;\n\nclass ValueError extends \\ValueError\n{\n}\n",
+    );
+
+    compile_succeeds(root);
+
+    let int = std::fs::read(compiled_as_the_engine_finds_it(
+        root,
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Int.sharp",
+    ))
+    .unwrap();
+    let names = |name: &[u8]| int.windows(name.len()).any(|window| window == name);
+    assert!(names(b"ValueError"), "Sharp.Int names no ValueError");
+    assert!(!names(b"Sharp\\ValueError"), "Sharp.Int throws the package's Sharp\\ValueError");
+}
+
+/// A compiled file of the standard library names the release that compiled it, and every `mago` of another release
+/// refuses it, since the library's code is that release's code.
+#[test]
+fn a_standard_library_compiled_file_of_another_release_is_refused() {
+    let directory = library_project(&[("app/Order.sharp", ORDER)]);
+    let root = directory.path();
+    let int = root.join("vendor/heyjordanparker/php-sharp-composer/.sharp/library/Sharp/Int.sharpc");
+    let mut bytes = std::fs::read(&int).unwrap();
+    bytes[24..40].copy_from_slice(&release_checker("0.0.1"));
+    std::fs::write(&int, bytes).unwrap();
+
+    let output = compile(root);
+
+    assert!(!output.status.success(), "{}", printed(&output));
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        printed(&output).contains(&format!(
+            "{} was compiled by another release of PHP#, and mago is {version}. Reinstall heyjordanparker/php-sharp-composer {version}.",
+            int.canonicalize().unwrap().display()
+        )),
+        "{}",
+        printed(&output)
     );
 }

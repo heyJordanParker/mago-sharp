@@ -74,13 +74,15 @@ use mago_word::empty_word;
 use mago_word::word;
 
 use super::IncrementalAnalysisService;
+use super::codex::LibraryCodex;
 use crate::error::OrchestratorError;
 use crate::service::phase::Phase;
 
 /// The folder Composer installs packages into. `composer.lock` stands for every file in it.
 const VENDOR: &[u8] = b"vendor/";
 
-/// The input that changes whenever Composer changes `vendor/`.
+/// The input that changes whenever Composer changes `vendor/`, of every compiled file but the standard library's, which
+/// stamps its own sources alone, as PHP# releases it.
 const COMPOSER_LOCK: &[u8] = b"composer.lock";
 
 /// The file of a folder's module, spec section 32.
@@ -692,9 +694,9 @@ impl IncrementalAnalysisService {
             let lowered = Some(&first);
             self.lower_into(hosts, &library, lowered, &no_forms, &reach, &effects, session.as_ref(), &mut lowerings)?;
         }
-        let forms = first.library_forms(&library, &lowerings);
+        let forms = self.and_codex_forms(first.library_forms(&library, &lowerings));
         let fingerprints = fingerprints_of(&forms);
-        let hosts_forms = hosts.as_ref().map(|hosts| hosts.library_forms(&library, &lowerings));
+        let hosts_forms = hosts.as_ref().map(|hosts| self.and_codex_forms(hosts.library_forms(&library, &lowerings)));
         let hosts_fingerprints = hosts_forms.as_deref().map(fingerprints_of);
         let forms: InlineForms = forms.into_iter().collect();
         self.keep(&mut first, checker, &rest, &reads, &fingerprints, &effects)?;
@@ -1024,7 +1026,7 @@ impl IncrementalAnalysisService {
                 .map(|source| source.name.to_vec())
                 .chain(namespace_class_files)
                 .chain(namespace_files)
-                .chain(std::iter::once(COMPOSER_LOCK.to_vec()))
+                .chain((!file.is_standard_library).then(|| COMPOSER_LOCK.to_vec()))
                 .map(|path| (path, [0; 16]))
                 .chain(module_files)
                 .chain(imports)
@@ -1527,8 +1529,9 @@ impl IncrementalAnalysisService {
         let mut summaries: Vec<(&FileId, &[EffectSummary])> =
             self.file_states.iter().map(|(file_id, state)| (file_id, state.effect_summaries.as_slice())).collect();
         summaries.sort_unstable_by_key(|(file_id, _)| **file_id);
+        let library = self.library.iter().flat_map(|library| library.effect_summaries.iter());
         let summaries: Vec<EffectSummary> =
-            summaries.into_iter().flat_map(|(_, summaries)| summaries.iter().cloned()).collect();
+            library.chain(summaries.into_iter().flat_map(|(_, summaries)| summaries.iter())).cloned().collect();
 
         Effects::solve(&self.codebase, &summaries)
     }
@@ -1545,6 +1548,57 @@ impl IncrementalAnalysisService {
         &mut self,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<InlineForms, OrchestratorError> {
+        let lowered = self.lowered_library_forms(refusing)?;
+
+        Ok(self.and_codex_forms(lowered).into_iter().collect())
+    }
+
+    /// The standard library's codex, which `mago compile` writes when it compiles the library's own package.
+    ///
+    /// It holds the scan of the library's files, each method's return as the analysis of its body gave it, what each of
+    /// the library's bodies does by itself, and the inline forms of the library files `compile` lowers and doesn't
+    /// refuse, by `refusing` as `compile` takes it, in name order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when no analysis ran yet, or when re-analyzing a library file fails.
+    pub fn library_codex(
+        &mut self,
+        refusing: impl FnOnce(IssueCollection) -> IssueCollection,
+    ) -> Result<LibraryCodex, OrchestratorError> {
+        let mut forms = self.lowered_library_forms(refusing)?;
+        forms.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        let mut metadata = self.library_scan.clone();
+        for (key, method) in &mut metadata.function_likes {
+            if method.return_from_body.is_some()
+                && let Some(analyzed) = self.codebase.function_likes.get(key)
+            {
+                method.return_type_metadata.clone_from(&analyzed.return_type_metadata);
+            }
+        }
+        let mut library: Vec<(&FileId, &[EffectSummary])> = self
+            .file_states
+            .iter()
+            .filter(|(file_id, _)| self.database.get_ref(file_id).is_ok_and(|file| file.is_standard_library))
+            .map(|(file_id, state)| (file_id, state.effect_summaries.as_slice()))
+            .collect();
+        library.sort_unstable_by_key(|(file_id, _)| **file_id);
+        let effect_summaries = library.into_iter().flat_map(|(_, summaries)| summaries.iter().cloned()).collect();
+
+        Ok(LibraryCodex { metadata, effect_summaries, forms })
+    }
+
+    /// `forms`, with the inline forms of the standard library's codex after them.
+    fn and_codex_forms(&self, mut forms: Vec<(Vec<u8>, InlineForm)>) -> Vec<(Vec<u8>, InlineForm)> {
+        forms.extend(self.library.iter().flat_map(|library| library.forms.iter().cloned()));
+        forms
+    }
+
+    /// The inline forms of the standard library files [`Self::compile`] lowers and doesn't refuse, by `refusing`.
+    fn lowered_library_forms(
+        &self,
+        refusing: impl FnOnce(IssueCollection) -> IssueCollection,
+    ) -> Result<Vec<(Vec<u8>, InlineForm)>, OrchestratorError> {
         if !self.initialized {
             return Err(OrchestratorError::General(
                 "analyze() must be called before standard_library_forms()".to_string(),
@@ -2708,12 +2762,13 @@ mod tests {
     }
 
     #[test]
-    fn a_package_file_names_its_own_source_and_leaves_the_rest_of_its_package_to_composer_lock() {
+    fn a_standard_library_file_names_its_own_source_alone_and_a_project_file_composer_lock() {
         let database = project(&[(TEXT_PATH, TEXT), ("app/Title.sharp", TITLE)]);
 
         let compiled = compile(&mut analyzed(&database), empty_stamp);
 
-        assert_eq!(input_paths(accepted(&compiled, TEXT_PATH)), ["composer.lock", TEXT_PATH]);
+        // PHP# compiles the library at its release, so its file is stale only when its own source changes.
+        assert_eq!(input_paths(accepted(&compiled, TEXT_PATH)), [TEXT_PATH]);
         assert_eq!(
             input_paths(accepted(&compiled, "app/Title.sharp")),
             ["app/Module.sharp", "app/Title.sharp", "composer.lock"]

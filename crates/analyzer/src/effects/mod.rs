@@ -34,7 +34,7 @@ pub(crate) mod check;
 pub(crate) mod summary;
 
 /// A reason a body is impure other than a change of state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Effect {
     /// An effect named by its class, such as `Sharp\Http`: one an `extern` line lists for the plain PHP called, or the
     /// effect class of an object code reaches.
@@ -59,7 +59,7 @@ impl Effect {
 }
 
 /// The state a body changes, named by the root of the place it writes. The same roots name the values a call passes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Changed {
     /// The object the body runs on.
     This,
@@ -98,7 +98,7 @@ pub(crate) type Roots = BTreeSet<Changed>;
 /// runs each time a call leaves the argument out, by its method's lowercase class and method names and its PHP name, a
 /// module binding's expression, by the name of the lambda it is scanned as, or a class constant's value, by its
 /// lowercase class and its name. No call reaches a binding or a constant: the container runs one, and a read the other.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Body {
     Method(Word, Word),
     Accessor(Word, Word, Word),
@@ -110,7 +110,7 @@ pub(crate) enum Body {
 }
 
 /// What a function value runs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Runs {
     /// A PHP# lambda or method, whose effects only the solve knows.
     Body(Body),
@@ -125,7 +125,7 @@ pub(crate) enum Runs {
 
 /// A lambda or a method value a body gives a place whose PHP# function type lists its effects. Spec section 29 holds
 /// it to that list.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FunctionValue {
     pub(crate) runs: Runs,
     /// The effects the place's function type lists, by full class name.
@@ -139,7 +139,7 @@ pub(crate) struct FunctionValue {
 
 /// A call of a PHP# method without `readonly` through a readonly value, spec section 13. Only the solve knows whether
 /// the method changes `this`, which its message says. Each text is as the calling file writes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReadonlyCall {
     pub(crate) callee: Body,
     pub(crate) span: Span,
@@ -156,7 +156,7 @@ pub(crate) struct ReadonlyCall {
 }
 
 /// A call from one PHP# body to another, with the roots of what it passes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Call {
     pub(crate) callee: Body,
     pub(crate) span: Span,
@@ -167,7 +167,7 @@ pub(crate) struct Call {
 
 /// What one PHP# body does by itself: the effects of the plain PHP it calls, the PHP# bodies it calls, and the state
 /// it changes. A lambda is part of the body that calls it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EffectSummary {
     pub(crate) body: Body,
     /// The body's member as messages name it: `price`, `total` for an accessor of `total`, or `operator +`.

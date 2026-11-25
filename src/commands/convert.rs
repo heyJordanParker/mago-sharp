@@ -29,6 +29,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Instant;
 
 use clap::ColorChoice;
@@ -61,6 +62,7 @@ use mago_database::matcher::ExclusionMatcher;
 use mago_database::matcher::contains_glob_metacharacters;
 use mago_names::resolver::NameResolver;
 use mago_orchestrator::Orchestrator;
+use mago_orchestrator::service::incremental_analysis::codex::LibraryCodex;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
 use mago_orchestrator::service::incremental_analysis::compile::Folder;
@@ -82,6 +84,7 @@ use crate::commands::analyze::decode_prelude;
 use crate::commands::analyze::server_settings;
 use crate::commands::compile::HostsChange;
 use crate::commands::compile::compile_for_hosts;
+use crate::commands::compile::library_codex;
 use crate::commands::compile::project_database;
 use crate::commands::compile::standard_library;
 use crate::commands::compile::whole_workspace;
@@ -212,13 +215,14 @@ struct Found {
 }
 
 /// What every proof of one command shares: the project's configuration, what it hides of a host rule's issues, and
-/// the standard library its compile lowers against.
+/// the standard library its compile lowers against, with the library's codex.
 struct Prover<'configuration> {
     configuration: &'configuration Configuration,
     color_choice: ColorChoice,
     root: PathBuf,
     hidden: Hidden,
     standard_library: unit::Library,
+    codex: Option<Arc<LibraryCodex>>,
     externs: Externs,
 }
 
@@ -467,15 +471,17 @@ impl<'configuration> Prover<'configuration> {
     ) -> Result<Option<(Self, Session<'configuration>)>, Error> {
         let hidden = Hidden::new(configuration)?;
         let (orchestrator, database) = load(configuration, color_choice)?;
-        let standard_library = match standard_library(&root, &database) {
+        let (standard_library, codex) = match standard_library(&root, &database)
+            .and_then(|library| Ok((library, library_codex(&root, &database)?)))
+        {
             Ok(library) => library,
             Err(reason) => {
                 tracing::error!("{reason}");
                 return Ok(None);
             }
         };
-        let prover = Self { configuration, color_choice, root, hidden, standard_library, externs };
-        let session = Session::new(orchestrator, database);
+        let session = Session::new(orchestrator, database, codex.clone());
+        let prover = Self { configuration, color_choice, root, hidden, standard_library, codex, externs };
 
         Ok(Some((prover, session)))
     }
@@ -507,7 +513,7 @@ impl<'configuration> Prover<'configuration> {
             database.add(converted);
         }
 
-        Ok(Session::new(orchestrator, database))
+        Ok(Session::new(orchestrator, database, self.codex.clone()))
     }
 
     /// Proves `set`, indexes of `candidates`, with the ones `accepted` already holds, and adds each that keeps the
@@ -671,8 +677,13 @@ impl<'configuration> Prover<'configuration> {
 }
 
 impl<'configuration> Session<'configuration> {
-    fn new(orchestrator: Orchestrator<'configuration>, database: Database<'_>) -> Self {
-        let server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
+    fn new(
+        orchestrator: Orchestrator<'configuration>,
+        database: Database<'_>,
+        codex: Option<Arc<LibraryCodex>>,
+    ) -> Self {
+        let server =
+            Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator)).with_library(codex);
 
         Self { _orchestrator: orchestrator, server }
     }

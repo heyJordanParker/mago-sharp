@@ -527,7 +527,7 @@ fn effects_workspace(report: &str) -> tempfile::TempDir {
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
     write(root, "composer.json", LIBRARY);
-    write_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
+    install_library(root);
     write(
         root,
         "app/Stubs/Libraries.sharp",
@@ -602,6 +602,21 @@ const BUILTINS: &str = include_str!("../../composer/library/Sharp/Internal/Built
 
 /// The standard library's package under `root`: its `composer.json`, its members of `string` and the enum they take,
 /// its `Float` and `Bool`, its effect classes, and the `extern` lines of the built-ins they call.
+/// Installs the standard library [`write_library`] writes in `vendor/` of the project at `root`, compiled in its package
+/// as PHP# compiles the library at its release, so the project's compile reads its compiled files and codex.
+fn install_library(root: &Path) {
+    let package = root.join("vendor/heyjordanparker/php-sharp-composer");
+    write_library(&package);
+    write(&package, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"library\"]\n");
+    let output = run(&package, "compile", &[]);
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn write_library(root: &Path) {
     write(root, "composer.json", LIBRARY_PACKAGE);
     write(root, "library/Sharp/Text/StringMembers.sharp", STRING_MEMBERS);
@@ -649,7 +664,7 @@ fn library_workspace(page: &str) -> tempfile::TempDir {
         "php-version = \"8.4\"\n\n[source]\npaths = [\"src\"]\nincludes = [\"vendor\"]\n",
     );
     write(directory.path(), "composer.json", "{\n    \"name\": \"acme/app\",\n    \"type\": \"library\"\n}\n");
-    write_library(&directory.path().join("vendor/heyjordanparker/php-sharp-composer"));
+    install_library(directory.path());
     write(directory.path(), "src/App/Page.sharp", page);
     directory
 }
@@ -679,26 +694,26 @@ fn analyze_finds_no_issues_in_a_call_of_an_extern_method_of_the_standard_library
     assert!(stderr.contains("No issues found."), "{stdout}{stderr}");
 }
 
-/// `mago compile` checks the vendored library as a project file, and it stays the standard library, so its `extern`
-/// method compiles.
+/// The vendored standard library's package compiles its `extern` method, as PHP# compiles the library at its release,
+/// and a project's code calls it: the project's compile writes the project's file alone.
 #[test]
-fn compile_accepts_extern_methods_in_the_vendored_standard_library() {
+fn compile_accepts_a_project_call_of_an_extern_method_its_library_package_compiled() {
     let directory =
         library_workspace("namespace App;\n\npublic class Page\n{\n    public string slug() => \"Hello\".slug();\n}\n");
+    let root = directory.path();
 
-    let output = run(directory.path(), "compile", &[]);
+    let output = run(root, "compile", &[]);
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert!(output.status.success(), "{printed}");
-    for compiled in
-        ["src/App/Page.sharpc", "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharpc"]
-    {
-        assert!(directory.path().join(".sharp").join(compiled).is_file(), "{compiled}: {printed}");
-    }
+    assert!(root.join(".sharp/src/App/Page.sharpc").is_file(), "{printed}");
+    let package = root.join("vendor/heyjordanparker/php-sharp-composer");
+    assert!(package.join(".sharp/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
+    assert!(!root.join(".sharp/vendor").exists(), "{printed}");
 }
 
-/// `mago compile` lowers the vendored library first, and a project file runs the library's one-call method as its
-/// body: `name.capitalized()` compiles to `mb_ucfirst($name, "UTF-8")`.
+/// A project file runs the vendored library's one-call method as its body, from the inline form the library's codex
+/// holds: `name.capitalized()` compiles to `mb_ucfirst($name, "UTF-8")`.
 #[test]
 fn compile_inlines_a_vendored_library_form_into_a_project_caller() {
     let directory = library_workspace(
@@ -970,23 +985,29 @@ fn a_member_read_through_data_is_no_string_fixed_at_compile_time() {
 }
 
 /// The semantic checks let a file under the namespace `Sharp` declare the standard library's reserved type names,
-/// and the analyzer refuses the namespace in a project file.
+/// and the analyzer refuses the namespace in a project file, once. The library's `Bool` keeps the name, so another file
+/// calls the member only it declares.
 #[test]
 fn analyze_reports_a_type_class_of_the_standard_library_in_a_project_file() {
-    let directory = library_workspace("namespace App;\n\npublic class Page\n{\n}\n");
+    let directory = library_workspace(
+        "namespace App;\n\npublic class Page\n{\n    public bool? yes() => Bool.tryParse(\"yes\");\n}\n",
+    );
     write(
         directory.path(),
         "src/App/Bool.sharp",
-        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => null;\n}\n",
+        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool truthy() => true;\n}\n",
     );
     let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
-    let errors: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| line.starts_with("src/App/Bool.sharp:"))
-        .map(str::to_owned)
-        .collect();
+    let errors = |file: &str| -> Vec<String> {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.starts_with(file))
+            .map(str::to_owned)
+            .collect()
+    };
 
-    assert_eq!(errors, [library_namespace_error("Sharp").replace("Page.sharp", "Bool.sharp")]);
+    assert_eq!(errors("src/App/Bool.sharp:"), [library_namespace_error("Sharp").replace("Page.sharp", "Bool.sharp")]);
+    assert_eq!(errors("src/App/Page.sharp:"), Vec::<String>::new());
 }
 
 /// The standard library's module serves the root namespace, so it is never the app's top module that binds
@@ -1653,7 +1674,7 @@ fn extern_workspace(stripe: &str) -> tempfile::TempDir {
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
     write(root, "composer.json", "{\n    \"name\": \"acme/app\"\n}\n");
-    write_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
+    install_library(root);
     write(root, "app/Stubs/Stripe.sharp", stripe);
     write(
         root,
@@ -1708,7 +1729,7 @@ fn compile_takes_a_function_value_for_an_extern_callable_parameter_and_refuses_c
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
     write(root, "composer.json", "{\n    \"name\": \"acme/hooks\",\n    \"type\": \"library\"\n}\n");
-    write_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
+    install_library(root);
     write(
         root,
         "app/Lib/Hooks/functions.php",
@@ -1992,7 +2013,7 @@ fn compile_writes_a_list_property_whose_set_empties_and_refills_it() {
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
     write(root, "composer.json", LIBRARY);
-    write_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
+    install_library(root);
     write(
         root,
         "app/Store/Product.sharp",

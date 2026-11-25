@@ -73,6 +73,9 @@ use mago_orchestrator::Autoloader;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::Scans;
+use mago_orchestrator::service::incremental_analysis::codex::CodexError;
+use mago_orchestrator::service::incremental_analysis::codex::LIBRARY_CODEX;
+use mago_orchestrator::service::incremental_analysis::codex::LibraryCodex;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::Compiled;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
@@ -682,7 +685,9 @@ impl LastCompile {
         let (database, _) =
             with_packages(orchestrator.load_listed(&configuration.source.workspace, listing)?.into_static());
         let library = standard_library(root, &database).map_err(OrchestratorError::General)?;
+        let codex = library_codex(root, &database).map_err(OrchestratorError::General)?;
         let mut server = Server::new(database.into_static(), decode_prelude, server_settings(orchestrator))
+            .with_library(codex)
             .keeping_lowering_inputs();
         server.analyze()?;
 
@@ -881,11 +886,11 @@ fn write_hosts(
     if !inputs.is_empty() {
         let listeners = server.listeners();
         let externs = server.extern_attributes();
-        let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| accepted.contains(&line.file_id)).collect();
+        let tabled = |file_id: &FileId| in_listener_table(&accepted, server.database(), file_id);
+        let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| tabled(&line.file_id)).collect();
         let families = server.families();
-        let families: Vec<&Family> = families.iter().filter(|family| accepted.contains(&family.file_id)).collect();
-        let accepted: Vec<&Listener> =
-            listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
+        let families: Vec<&Family> = families.iter().filter(|family| tabled(&family.file_id)).collect();
+        let accepted: Vec<&Listener> = listeners.iter().filter(|listener| tabled(&listener.file_id)).collect();
         let effects = server.extern_effects();
         let table = folder.join(LISTENERS);
         let dispatcher = server.dispatcher_namespace();
@@ -1043,12 +1048,12 @@ impl HostsReach {
 }
 
 /// What the extension hosts of `hosts` load as their workers start among the files of the project's `database` at
-/// `root`: the standard library's files, each enabled host's file and every PHP# file under the folder that holds it, as
-/// a package is its folder, every file of the project those files name, and every file those name in turn. A file's
-/// names are those its scan names, every name its code resolves and each class-like a `@var` tag of its bodies names,
-/// as an analysis's scan finds the class-likes a file reaches. A name reaches the file its namespace's folder holds
-/// under its last part, as a type of PHP# and a class Composer loads by PSR-4 each live in one, so the walk parses only
-/// the files it reaches, and the standard library, which names only itself, not at all.
+/// `root`: each enabled host's file and every PHP# file under the folder that holds it, as a package is its folder, every
+/// file of the project those files name, and every file those name in turn. A file's names are those its scan names,
+/// every name its code resolves and each class-like a `@var` tag of its bodies names, as an analysis's scan finds the
+/// class-likes a file reaches. A name reaches the file its namespace's folder holds under its last part, as a type of
+/// PHP# and a class Composer loads by PSR-4 each live in one, so the walk parses only the files it reaches. The
+/// standard library is none of them: the hosts load it from the `.sharp` folder of its package, where PHP# compiled it.
 fn hosts_reach(
     configuration: &Configuration,
     root: &Path,
@@ -1094,10 +1099,6 @@ fn hosts_reach(
 
     let mut taken = vec![false; files.len()];
     let mut reach = HashSet::default();
-    for (index, file) in files.iter().enumerate().filter(|(_, file)| file.is_standard_library) {
-        taken[index] = true;
-        reach.insert(file.id);
-    }
     let mut folders = BTreeMap::new();
     let mut wave: Vec<usize> = Vec::new();
     let mut names: Vec<Word> = Vec::new();
@@ -1171,10 +1172,10 @@ fn holds_compiled(
 }
 
 /// Lowers what the extension hosts of `hosts` load as their workers start, [`hosts_reach`], alone into their folder of
-/// the project at `root`, whose source files are `sources`, against `library`, unless the folder holds a current
-/// compiled file of each of those files already: the compiled file of each of those files of `database`, the project's
-/// database as [`with_packages`] gives it, written only when its bytes changed, and no other file, so the compile of the
-/// whole project that follows writes the rest of the folder and its record. Those files name no file outside them, so
+/// the project at `root`, whose source files are `sources`, against `library` and its codex `codex`, unless the folder
+/// holds a current compiled file of each of those files already: the compiled file of each of those files of
+/// `database`, the project's database as [`with_packages`] gives it, written only when its bytes changed, and no other
+/// file, so the compile of the whole project that follows writes the rest of the folder and its record. Those files name no file outside them, so
 /// their analysis holds them and Composer's packages alone, and runs as the hosts' compile does, without the hosts, on
 /// an orchestrator of its own, since the compile's orchestrator records what the hosts are asked. Returns that reach.
 ///
@@ -1188,6 +1189,7 @@ fn write_hosts_reach(
     sources: &BTreeMap<String, Found>,
     database: &Database<'static>,
     library: &unit::Library,
+    codex: Option<Arc<LibraryCodex>>,
 ) -> Result<HostsReach, Error> {
     let reach = hosts_reach(configuration, root, hosts, database);
     if holds_compiled(root, &hosts.folder, sources, database, &reach.files) {
@@ -1203,7 +1205,9 @@ fn write_hosts_reach(
         alone.delete(id);
     }
     let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
-    let mut server = Server::new(alone, decode_prelude, server_settings(&orchestrator)).keeping_lowering_inputs();
+    let mut server = Server::new(alone, decode_prelude, server_settings(&orchestrator))
+        .with_library(codex)
+        .keeping_lowering_inputs();
     server.analyze()?;
     let held = server.database().read_only();
     let folder = &hosts.folder;
@@ -1232,8 +1236,10 @@ fn write_hosts_reach(
     Ok(reach)
 }
 
-/// The project's database: every file the analyzer loads with the prelude, and each `.sharp` file of a package as a
-/// file of the project, which the compile checks too. Also gives the IDs of those packaged files.
+/// The project's database: every file the analyzer loads with the prelude, each `.sharp` file of a package as a file of
+/// the project, which the compile checks too, and each of the standard library as a built-in file, which no analysis
+/// scans, since the library's codex stands for it, [`library_codex`]. Also gives the IDs of the packaged files the
+/// compile checks.
 pub(crate) fn project_database(
     orchestrator: &Orchestrator<'_>,
     workspace: &Path,
@@ -1247,9 +1253,14 @@ fn with_packages(mut database: Database<'static>) -> (Database<'static>, HashSet
     let packaged: Vec<File> = database
         .files()
         .filter(|file| file.file_type == FileType::Vendored && Dialect::of(file).is_sharp())
-        .map(|file| File { modified_ns: file.modified_ns, ..copy_of(&file, FileType::Host, file.contents.clone()) })
+        .map(|file| {
+            let file_type = if file.is_standard_library { FileType::Builtin } else { FileType::Host };
+
+            File { modified_ns: file.modified_ns, ..copy_of(&file, file_type, file.contents.clone()) }
+        })
         .collect();
-    let included: HashSet<FileId> = packaged.iter().map(|file| file.id).collect();
+    let included: HashSet<FileId> =
+        packaged.iter().filter(|file| file.file_type == FileType::Host).map(|file| file.id).collect();
     for file in packaged {
         database.add(file);
     }
@@ -1271,6 +1282,7 @@ fn package_files(database: &Database<'_>, included: &HashSet<FileId>) -> Vec<Fil
 /// of the project, which the compile checks too.
 fn copy_of(file: &File, file_type: FileType, contents: Cow<'static, [u8]>) -> File {
     let mut copy = File::new(file.name.clone(), file_type, file.path.clone(), contents);
+    copy.id = file.id;
     copy.is_standard_library = file.is_standard_library;
     copy.folder_namespace = file.folder_namespace.clone();
     copy.is_project = file.is_project;
@@ -1449,7 +1461,10 @@ fn hosted(
         Loaded::Nothing | Loaded::Files(..) | Loaded::Hosted { .. } => {
             let (database, included) = project_database(&orchestrator, &configuration.source.workspace)?;
             let package_files = package_files(&database, &included);
+            let codex =
+                library_codex(&configuration.source.workspace, &database).map_err(OrchestratorError::General)?;
             let mut server = Server::new(database, decode_prelude, server_settings(&orchestrator))
+                .with_library(codex)
                 .with_package_files(package_files)
                 .scoped_to(is_lowered);
             let issues = server.analyze()?.issues;
@@ -1712,29 +1727,41 @@ fn compiled(
     load.end();
 
     let mut errors = Vec::new();
-    let library = match standard_library(&root, &database) {
-        Ok(library) => library,
-        Err(refusal) => {
-            let outcome = Outcome { errors, summary: refusal, failed: true, ..Outcome::default() };
-            let record = record.filter(|_| logger::warnings() == warnings);
-            let (outcome, database) = finish(record, &record_path, outcome, &database, Vec::new())?;
-            drop(writing);
-            if let Some((hosts, lock, held, exclusive)) = held {
-                hosts.hold(lock, held, exclusive, None)?;
-            }
+    let library =
+        match standard_library(&root, &database).and_then(|library| Ok((library, library_codex(&root, &database)?))) {
+            Ok(library) => library,
+            Err(refusal) => {
+                let outcome = Outcome { errors, summary: refusal, failed: true, ..Outcome::default() };
+                let record = record.filter(|_| logger::warnings() == warnings);
+                let (outcome, database) = finish(record, &record_path, outcome, &database, Vec::new())?;
+                drop(writing);
+                if let Some((hosts, lock, held, exclusive)) = held {
+                    hosts.hold(lock, held, exclusive, None)?;
+                }
 
-            return Ok((
-                outcome,
-                database,
-                loaded_files.map_or(Loaded::Nothing, |files| Loaded::Files(Box::new(files), Scans::default())),
-                started.or_else(start),
-            ));
-        }
-    };
+                return Ok((
+                    outcome,
+                    database,
+                    loaded_files.map_or(Loaded::Nothing, |files| Loaded::Files(Box::new(files), Scans::default())),
+                    started.or_else(start),
+                ));
+            }
+        };
+    let (library, codex) = library;
+    // The library's own package, whose root is the project's, compiles the library once for every platform, as PHP#
+    // releases it, so each of its compiled files names the release in place of this checker build.
+    let releases_library = database.files().any(|file| {
+        file.is_standard_library
+            && file.file_type == FileType::Host
+            && library_package(&root, &file).is_ok_and(|package| package == root)
+    });
+    let checker = if releases_library { unit::release_checker(VERSION) } else { BUILD_ID };
     let mut reach = None;
     if let Some((hosts, ..)) = &hosts {
         let phase = Phase::start("hosts");
-        reach = Some(silenced(|| write_hosts_reach(configuration, &root, hosts, &sources, &database, &library))?);
+        reach = Some(silenced(|| {
+            write_hosts_reach(configuration, &root, hosts, &sources, &database, &library, codex.clone())
+        })?);
         phase.end();
         started = start();
     }
@@ -1760,6 +1787,7 @@ fn compiled(
     let reports = matches!(keeping, Keeping::Analysis | Keeping::Hosted)
         && database.files().any(|file| file.file_type == FileType::Host && !included.contains(&file.id));
     let server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator))
+        .with_library(codex)
         .keeping_lowering_inputs()
         .with_package_files(package_files);
     // The analysis with the hosts that reads the files this compile loaded, or analyzes them all again, takes this
@@ -1828,7 +1856,7 @@ fn compiled(
                 checked.issues
             })
         },
-        BUILD_ID,
+        checker,
         &library,
         |issues| hidden.shown(issues, &read_database),
     );
@@ -1837,6 +1865,11 @@ fn compiled(
     }
     drop(hosts_files);
     let ((compilations, compiled_files), hosts_compiled) = compilations?;
+    let codex_bytes = if releases_library {
+        Some(server.library_codex(|issues| hidden.shown(issues, &read_database))?.encode(VERSION)?)
+    } else {
+        None
+    };
     let write_phase = Phase::start("write");
     let database = server.database();
     let mut stamped = in_path_order(stamped);
@@ -1902,11 +1935,11 @@ fn compiled(
     let inputs = listener_inputs(database, |path| stamp_of(&root, database, path))?;
     if !inputs.is_empty() {
         let externs = server.extern_attributes();
-        let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| accepted.contains(&line.file_id)).collect();
+        let tabled = |file_id: &FileId| in_listener_table(&accepted, server.database(), file_id);
+        let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| tabled(&line.file_id)).collect();
         let families = server.families();
-        let families: Vec<&Family> = families.iter().filter(|family| accepted.contains(&family.file_id)).collect();
-        let accepted: Vec<&Listener> =
-            listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
+        let families: Vec<&Family> = families.iter().filter(|family| tabled(&family.file_id)).collect();
+        let accepted: Vec<&Listener> = listeners.iter().filter(|listener| tabled(&listener.file_id)).collect();
         let effects = server.extern_effects();
         let table = compiled_folder.join(LISTENERS);
         let dispatcher = server.dispatcher_namespace();
@@ -1927,6 +1960,14 @@ fn compiled(
         }
         written.insert(compiled_files_path);
         written.insert(compiled_folder.join(PROOFS));
+        if let Some(bytes) = &codex_bytes {
+            let codex = compiled_folder.join(LIBRARY_CODEX);
+            write_if_changed(&codex, bytes)?;
+            if let Some(record) = record.as_mut() {
+                record.output(&codex, unit::source_hash(bytes));
+            }
+            written.insert(codex);
+        }
         let codebase = server.codebase();
         let mut types = BTreeSet::new();
         let mut loaded = up_front_files(&root)?;
@@ -2660,13 +2701,8 @@ pub(crate) fn standard_library(root: &Path, database: &impl DatabaseReader) -> R
     let Some(file) = database.files().find(|file| file.is_standard_library) else {
         return Ok(unit::Library::default());
     };
-    let source = source_path(root, &file);
-    let Some(package) = source.ancestors().skip(1).find(|folder| folder.join("composer.json").is_file()) else {
-        return Err(format!(
-            "{} belongs to no Composer package. Reinstall {STANDARD_LIBRARY_PACKAGE}.",
-            source.display()
-        ));
-    };
+    let package = library_package(root, &file)?;
+    let package = package.as_path();
 
     let installed = package.parent().and_then(Path::parent).map(|vendor| vendor.join("composer/installed.json"));
     let version = installed
@@ -2710,6 +2746,66 @@ pub(crate) fn standard_library(root: &Path, database: &impl DatabaseReader) -> R
     Ok(unit::Library { native_fingerprint, version: version.into_bytes() })
 }
 
+/// The folder of the Composer package that holds `file`, a file of the standard library of the project at `root`.
+///
+/// Fails when no `composer.json` is above the file.
+fn library_package(root: &Path, file: &File) -> Result<PathBuf, String> {
+    let source = source_path(root, file);
+    match source.ancestors().skip(1).find(|folder| folder.join("composer.json").is_file()) {
+        Some(package) => Ok(package.to_path_buf()),
+        None => {
+            Err(format!("{} belongs to no Composer package. Reinstall {STANDARD_LIBRARY_PACKAGE}.", source.display()))
+        }
+    }
+}
+
+/// The standard library's codex, which the project's analysis takes the library from: the one PHP# wrote at its release
+/// into the `.sharp` folder of the library's package, beside a compiled file of each of the library's files, which the
+/// engine runs. None when the project installs no standard library, or holds the library's own sources, as the
+/// library's package does.
+///
+/// Fails when the folder lacks the codex or a compiled file of a library file, or when another release wrote one, since
+/// the library's code is the code of the release that compiled it.
+pub(crate) fn library_codex(root: &Path, database: &impl DatabaseReader) -> Result<Option<Arc<LibraryCodex>>, String> {
+    let library: Vec<Arc<File>> =
+        database.files().filter(|file| file.is_standard_library && file.file_type == FileType::Builtin).collect();
+    let Some(first) = library.first() else {
+        return Ok(None);
+    };
+    let package = library_package(root, first)?;
+    let folder = package.join(unit::COMPILED_FOLDER);
+    let reinstall = format!("Reinstall {STANDARD_LIBRARY_PACKAGE} {VERSION}.");
+    let path = folder.join(LIBRARY_CODEX);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Err(format!("{} is missing, so the PHP# standard library can't be read. {reinstall}", path.display()));
+    };
+    let codex = LibraryCodex::decode(&bytes, VERSION).map_err(|error| match error {
+        CodexError::OtherRelease(release) => format!(
+            "This project's PHP# standard library was compiled by PHP# {release}, and mago is {VERSION}. {reinstall}"
+        ),
+        CodexError::Unreadable => format!("{} is damaged. {reinstall}", path.display()),
+    })?;
+    let release = unit::release_checker(VERSION);
+    for file in &library {
+        let source = source_path(root, file);
+        let Ok(relative) = source.strip_prefix(&package) else {
+            continue;
+        };
+        let compiled = folder.join(relative).with_extension("sharpc");
+        let Ok(bytes) = std::fs::read(&compiled) else {
+            return Err(format!("{} is missing, so {} can't run. {reinstall}", compiled.display(), source.display()));
+        };
+        if !unit::header(&bytes).is_ok_and(|header| header.checker == release) {
+            return Err(format!(
+                "{} was compiled by another release of PHP#, and mago is {VERSION}. {reinstall}",
+                compiled.display()
+            ));
+        }
+    }
+
+    Ok(Some(Arc::new(codex)))
+}
+
 /// The inputs of the listener table, stamped as the engine reads them, which it checks only while it compiles on
 /// demand: every PHP# file, which an `on` clause or a module binding the dispatcher may join, and the listing of the
 /// folder of each and of each folder above it, which a PHP# file or a namespace folder joining or leaving changes, each
@@ -2735,6 +2831,12 @@ fn listener_inputs(
     let stamped: Vec<Option<unit::Input>> = stamped.into_iter().collect::<Result<_, _>>()?;
 
     Ok(stamped.into_iter().flatten().collect())
+}
+
+/// Whether the listener table names the lines, families and listeners of `file_id`, a file of `database`: one the compile
+/// `accepted`, or one of the standard library, which PHP# compiled at its release.
+fn in_listener_table(accepted: &HashSet<FileId>, database: &Database<'_>, file_id: &FileId) -> bool {
+    accepted.contains(file_id) || database.get_ref(file_id).is_ok_and(|file| file.is_standard_library)
 }
 
 /// The PHP source of the listener table. Its `inputs` are the files whose change makes the table out of date, each as
@@ -3045,7 +3147,7 @@ fn package_of(name: &[u8]) -> Option<String> {
 fn package_compiled_folders(root: &Path, database: &impl DatabaseReader) -> BTreeSet<String> {
     database
         .files()
-        .filter(|file| file.name.starts_with(VENDOR) && Dialect::of(file).is_sharp())
+        .filter(|file| file.name.starts_with(VENDOR) && Dialect::of(file).is_sharp() && !file.is_standard_library)
         .flat_map(|file| package_compiled_folders_of(&String::from_utf8_lossy(&file.name)).collect::<Vec<_>>())
         .filter(|compiled| root.join(compiled).is_dir())
         .collect()
