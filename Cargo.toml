@@ -420,6 +420,13 @@ lto = 'off'
 panic = 'unwind'
 incremental = false
 
+# A dependency only build scripts use builds as the crates do, so sharp/bin/build-mago --bin shares it with the
+# workspace's build, where the tests use it too: all 381 units of --bin are among the 542 of the workspace's build.
+# With build-override's default debug of 0, fnv and anyhow, which --bin uses only in build scripts, built apart, and
+# 49 of its units with them.
+[profile.dev.build-override]
+debug = 'line-tables-only'
+
 # The crates the prelude's decode runs in build optimized in every profile. A test process decodes the 7.6 MB prelude
 # build.rs writes, which at opt-level 0 took 96% of one fast analyzer test process's 0.43 CPU-seconds, and 0.089 with
 # these four. Serde's generic decoding of the prelude's types compiles into mago-prelude, which instantiates it.
