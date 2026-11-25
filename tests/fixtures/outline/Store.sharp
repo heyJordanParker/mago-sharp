@@ -1,0 +1,39 @@
+namespace Paging;
+
+import Lib.Probe;
+
+public class Store
+{
+
+    private Map<string, DatabaseEntity> saved = [:];
+
+    private Map<string, Class<DatabaseEntity>> kinds = ["order": typeof(Order)];
+
+
+
+
+    public static TItem? pick<TItem : DatabaseEntity>(List<TItem> items, int id)
+    {
+        for (const item of items) {
+            if (item.id == id) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+
+
+
+    public T first<T>(List<T> items) => items[0];
+
+
+
+    public string share<TItem : DatabaseEntity & Shareable>(TItem item) => item.link();
+
+    public void save(Class<DatabaseEntity> type, DatabaseEntity entity) => this.saved[Probe.named(type) + "#" + (string) entity.id] = entity;
+
+    public DatabaseEntity? load(Class<DatabaseEntity> type, int id) => this.saved[Probe.named(type) + "#" + (string) id] ?? null;
+
+    public Class<DatabaseEntity> kind(string name) => this.kinds[name] ?? typeof(Order);
+}

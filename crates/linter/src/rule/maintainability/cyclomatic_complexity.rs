@@ -307,7 +307,14 @@ fn get_cyclomatic_complexity_of_method(method: &Method<'_>) -> Option<usize> {
         return None;
     }
 
-    Some(if method.is_abstract() { 1 } else { get_cyclomatic_complexity_of_node(Node::Method(method)) + 1 })
+    Some(if method.is_abstract() { 1 } else { cyclomatic_complexity(Node::Method(method)) })
+}
+
+/// The cyclomatic complexity of `node`, a method, a function or any other code: its decision points plus one, the
+/// count this rule checks each method by, which `mago outline` prints for each function.
+#[must_use]
+pub fn cyclomatic_complexity(node: Node<'_, '_>) -> usize {
+    get_cyclomatic_complexity_of_node(node) + 1
 }
 
 #[inline]
@@ -322,6 +329,7 @@ fn get_cyclomatic_complexity_of_node(node: Node<'_, '_>) -> usize {
         | Node::IfColonDelimitedBodyElseIfClause(_)
         | Node::For(_)
         | Node::Foreach(_)
+        | Node::ForOf(_)
         | Node::While(_)
         | Node::DoWhile(_)
         | Node::TryCatchClause(_)
@@ -420,6 +428,28 @@ mod tests {
                     if ($a) { echo "1"; }
                     if ($b) { echo "2"; }
                     if ($c) { echo "3"; }
+                }
+            }
+        "#}
+    }
+
+    test_lint_failure! {
+        name = a_sharp_for_of_loop_is_a_decision,
+        rule = CyclomaticComplexityRule,
+        filename = "Cart.sharp",
+        settings = |s: &mut crate::settings::Settings| {
+            s.rules.cyclomatic_complexity.config.threshold = 100;
+            s.rules.cyclomatic_complexity.config.method_threshold = Some(1);
+        },
+        code = indoc! {r#"
+            namespace Shop;
+
+            public class Cart
+            {
+                public void tally(List<int> items)
+                {
+                    for (const item of items) {
+                    }
                 }
             }
         "#}

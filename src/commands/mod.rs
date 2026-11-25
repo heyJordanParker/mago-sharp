@@ -37,6 +37,7 @@
 //! - **`guard`** ([`GuardCommand`]): Enforce architectural rules
 //! - **`inspect-baseline`** ([`InspectBaselineCommand`]): Visualize a baseline file
 //! - **`cst`** ([`CstCommand`]): Display the concrete syntax tree
+//! - **`outline`** ([`OutlineCommand`]): Print each file's symbols, imports and references
 //! - **`self-update`** ([`SelfUpdateCommand`]): Update Mago to the latest version
 //! - **`generate-completions`** ([`GenerateCompletionsCommand`]): Generate shell completions
 //! - **`generate-key`** ([`GenerateKeyCommand`]): Print a new key for `SHARP_KEYS`
@@ -80,6 +81,7 @@ use crate::commands::lint::LintCommand;
 use crate::commands::list_files::ListFilesCommand;
 use crate::commands::machine::MachineCommand;
 use crate::commands::r#move::MoveCommand;
+use crate::commands::outline::OutlineCommand;
 use crate::commands::self_update::SelfUpdateCommand;
 use crate::error::Error;
 
@@ -104,6 +106,7 @@ pub mod list_files;
 pub mod machine;
 pub mod r#move;
 mod outcome;
+pub mod outline;
 pub mod self_update;
 pub mod stdin_input;
 
@@ -201,6 +204,15 @@ pub enum MagoCommand {
     /// **Usage**: `mago cst [FILES...]`
     #[command(name = "cst")]
     Cst(CstCommand),
+
+    /// Print each file's symbols, imports and references.
+    ///
+    /// Reads each file's text alone, with no project configuration, so a tool that indexes files can run it on each
+    /// file as it changes. `--json` prints them in the Language Server Protocol's document-symbol shape.
+    ///
+    /// **Usage**: `mago outline [--json] [--stdin-input] <PATHS>...`
+    #[command(name = "outline")]
+    Outline(OutlineCommand),
 
     /// Run linting rules on PHP code.
     ///
@@ -422,7 +434,7 @@ pub struct CliArguments {
     ///
     /// If not specified, Mago will use all available logical CPUs.
     /// This value overrides the `threads` setting in the configuration file and the `MAGO_THREADS` environment variable.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub threads: Option<usize>,
 
     /// Allow using an unsupported PHP version.
