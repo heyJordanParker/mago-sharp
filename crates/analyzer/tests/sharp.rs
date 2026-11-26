@@ -11403,6 +11403,24 @@ fn an_application_selects_by_a_backed_enum_never_by_a_string_fixed_at_compile_ti
     );
 }
 
+/// Spec section 25: the static of a class known only while the code runs is reached through `methods()`, as
+/// `type.methods().first(method => method.name == "defaultTag")`. A reflection value's `name` is a member's name from
+/// the code, which no enum can declare, so comparing it with a string fixed at compile time selects no value from data.
+/// A `string` from data compared with one still does.
+#[test]
+fn a_reflection_name_compared_with_a_literal_is_no_selection() {
+    let tags = "namespace App;\n\npublic class Tags\n{\n    public string plan = \"free\";\n\n    public static string defaultTag() => \"div\";\n\n    public bool run(string plan)\n    {\n        const type = typeof(Tags);\n        const method = type.methods().first(method => method.name == \"defaultTag\");\n        const field = type.fields().first(field => field.name == \"plan\");\n        const property = type.properties().first(property => property.name != \"plan\");\n        return method != null && field != null && property != null && plan == \"plan\";\n    }\n}\n";
+    let mut files = vec![("src/App/Tags.sharp", tags)];
+    files.extend(REFLECTION);
+
+    assert_eq!(
+        package_errors(&files),
+        [
+            "`==` compares `plan` with `\"plan\"`, a string fixed at compile time, so it selects one of a closed set of values."
+        ]
+    );
+}
+
 /// Spec section 24: a pattern that compares with a string fixed at compile time names the value its `match` tests in
 /// every arm, a local each arm reads again, and a call whose value the first arm holds for the arms after it.
 #[test]
