@@ -18001,6 +18001,30 @@ fn every_struct_parses() {
     );
 }
 
+/// Spec section 10: a main constructor runs its parent's through `: super(…)`, so a property the parent's constructor
+/// sets is set by the main constructor, and is read once, by the parameter of its name. `Url` passes its parameter
+/// `value` to `BaseText`, whose main constructor declares `value`, so `Url` stores one field, `value`, and a struct
+/// that holds a `Url` parses.
+#[test]
+fn a_property_the_parents_constructor_sets_through_super_is_read_by_the_parameter_of_its_name() {
+    let sharp = [
+        (
+            "src/Demo/BaseText.sharp",
+            "namespace Demo;\n\npublic abstract class BaseText\n{\n    public BaseText(public string value { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Url.sharp",
+            "namespace Demo;\n\npublic final class Url : BaseText\n{\n    public Url(string value) : super(value) { }\n}\n",
+        ),
+        (
+            "src/Demo/UploadTarget.sharp",
+            "namespace Demo;\n\npublic struct UploadTarget\n{\n    public UploadTarget(public Url url { get; }) { }\n\n    public static UploadTarget read(Map<string, Any?> input) => UploadTarget.parse(input);\n}\n",
+        ),
+    ];
+
+    assert_eq!(each_file(reported, &sharp, &[]).concat(), Vec::<String>::new());
+}
+
 /// Spec section 10: a PHP# class that can be created parses the same way a struct does, as C#'s `System.Text.Json`
 /// reads a class. It reads the main constructor's parameters, a parameter that declares its property once, then each
 /// other stored property, a private one included, with the same `[Key]`, the same refusal of a key read twice and the same
