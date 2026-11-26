@@ -79,7 +79,7 @@ sudo mv "mago-${VERSION}-${TARGET}/mago" /usr/local/bin/
 适用于 PHP 项目:
 
 ```sh
-composer require --dev "heyjordanparker/mago-sharp:^0.6"
+composer require --dev "heyjordanparker/mago-sharp:^0.8"
 ```
 
 Composer 包是一个轻量封装。第一次调用 `vendor/bin/mago` 会从 GitHub 发布下载对应的预构建二进制并缓存。后续调用复用缓存,不再发起任何网络请求。每个包版本都带有其发布构建的每个归档的 SHA-256,封装会拒绝解压 SHA-256 不一致的下载,因此你要求的版本锁定了确切的二进制。

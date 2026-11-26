@@ -12,6 +12,7 @@ use mago_codex::metadata::class_like::TemplateTypes;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::misc::GenericParent;
+use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_optional_union_type;
@@ -36,6 +37,8 @@ use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_int_or_string;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_sharp_type;
+use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::variance::Variance;
@@ -582,8 +585,9 @@ fn find_atomic_template_positions(
 }
 
 /// Rewrites `issue`, reported with `code` for `input` where `expected` is required, when invariance blocks the
-/// substitution in a PHP# file: `C<A>` given where `C<B>` is expected, `C` a PHP# class, and every type argument that
-/// differs belongs to an invariant type parameter, however many differ and whether or not one holds the other. The
+/// substitution in a PHP# file: `C<A>`, or a class whose header names `C<A>`, given where `C<B>` is expected, `C` a PHP#
+/// class, and every type argument that differs belongs to an invariant type parameter, however many differ and whether
+/// or not one holds the other. `List<A>` given where `List<B>` is expected is blocked the same way. The
 /// value is then of another type, not a wider one, so the issue becomes `invalid`, with spec section 11.1's message and
 /// note. When one type argument differs and its `out` (`A` within `B`) or `in` (`B` within `A`) would accept it, the
 /// help names the marker by where `C` uses the type parameter, unless that marker allows only the opposite
@@ -606,23 +610,6 @@ where
     }
 
     let codebase = context.codebase;
-    let [TAtomic::Object(TObject::Named(given_object))] = input.types.as_ref() else {
-        return unchanged(issue);
-    };
-    // A class-like is named by its key, spec section 24, so the PHP# `Box` is not `BOX`.
-    let given = codebase.class_key(given_object.name);
-    let Some((wanted, wanted_object)) = expected.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Object(TObject::Named(object)) if codebase.class_key(object.name) == given => Some((atomic, object)),
-        _ => None,
-    }) else {
-        return unchanged(issue);
-    };
-    let Some(class) = codebase.get_class_like(given_object.name) else {
-        return unchanged(issue);
-    };
-    let given_arguments = given_object.get_type_parameters().unwrap_or_default();
-    let wanted_arguments = wanted_object.get_type_parameters().unwrap_or_default();
-
     let contains = |input: &TUnion, container: &TUnion| {
         union_comparator::is_contained_by(
             codebase,
@@ -634,6 +621,77 @@ where
             &mut ComparisonResult::for_dialect(context.dialect),
         )
     };
+
+    // A `List`'s element type is invariant too, so a `List` of another element type is blocked one level down.
+    if let [given_list] = input.types.as_ref()
+        && let Some(SharpType::List(given_element)) = get_sharp_type(given_list)
+        && let Some((wanted, wanted_element)) = expected.types.iter().find_map(|atomic| match get_sharp_type(atomic)? {
+            SharpType::List(element) => Some((atomic, element)),
+            _ => None,
+        })
+        && !(contains(given_element, wanted_element) && contains(wanted_element, given_element))
+    {
+        let mut written = input.clone();
+        written.widen_literals();
+        let given = display_sharp_type(context, &written);
+        issue.message =
+            format!("{given} cannot be used as {}.", display_sharp_type(context, &wrap_atomic(wanted.clone())));
+        for annotation in &mut issue.annotations {
+            if matches!(annotation.kind, AnnotationKind::Primary) {
+                annotation.message = Some(format!("This has type `{given}`."));
+            }
+        }
+        issue.notes =
+            vec!["A type parameter without `out` or `in` is invariant, so neither substitution is allowed.".to_owned()];
+        issue.help = None;
+
+        return (invalid, issue);
+    }
+
+    let [TAtomic::Object(TObject::Named(given_object))] = input.types.as_ref() else {
+        return unchanged(issue);
+    };
+    // A class-like is named by its key, spec section 24, so the PHP# `Box` is not `BOX`. A class given where a class it
+    // implements or extends is wanted gives that one the type arguments its own header names, as the comparator reads
+    // them, so `CheckoutHandler : BehaviorHandler<CheckoutBehavior>` gives `BehaviorHandler` its `CheckoutBehavior`.
+    let given = codebase.class_key(given_object.name);
+    let Some((wanted, wanted_object)) = expected.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Object(TObject::Named(object))
+            if codebase.class_key(object.name) == given || codebase.is_instance_of(given_object.name, object.name) =>
+        {
+            Some((atomic, object))
+        }
+        _ => None,
+    }) else {
+        return unchanged(issue);
+    };
+    let Some(class) = codebase.get_class_like(wanted_object.name) else {
+        return unchanged(issue);
+    };
+    let given_arguments: Vec<TUnion> = if codebase.class_key(wanted_object.name) == given {
+        given_object.get_type_parameters().unwrap_or_default().to_vec()
+    } else {
+        let Some(arguments) = codebase.get_class_like(given_object.name).and_then(|given_class| {
+            class
+                .template_types
+                .iter()
+                .map(|(template, _)| {
+                    get_specialized_template_type(
+                        codebase,
+                        *template,
+                        class.name,
+                        given_class,
+                        given_object.get_type_parameters(),
+                    )
+                })
+                .collect::<Option<Vec<_>>>()
+        }) else {
+            return unchanged(issue);
+        };
+
+        arguments
+    };
+    let wanted_arguments = wanted_object.get_type_parameters().unwrap_or_default();
 
     // A refused type argument past the class's count stays out of the comparison, so `Holder<Order, int>` compares its
     // `Order` alone. Each entry is a differing type argument's index, and whether it widens and narrows the wanted one.
@@ -676,10 +734,9 @@ where
 
     // A type argument PHP# writes holds no literal, so `wrap(5)`'s `Box<5>` reads as the `Box<int>` code writes.
     let mut written = given_object.clone();
-    let Some(arguments) = written.type_parameters.as_mut() else {
-        unreachable!("a blocked substitution differs in a type argument");
-    };
-    arguments.iter_mut().for_each(TUnion::widen_literals);
+    if let Some(arguments) = written.type_parameters.as_mut() {
+        arguments.iter_mut().for_each(TUnion::widen_literals);
+    }
     let given = display_sharp_type(context, &wrap_atomic(TAtomic::Object(TObject::Named(written))));
     issue.message = format!("{given} cannot be used as {}.", display_sharp_type(context, &wrap_atomic(wanted.clone())));
     for annotation in &mut issue.annotations {

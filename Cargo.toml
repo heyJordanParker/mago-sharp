@@ -322,8 +322,9 @@ notify = { workspace = true }
 dhat = { workspace = true, optional = true }
 schemars = { workspace = true }
 
+# Each crate's integration test takes the crate's name, so `cargo test --workspace --test mago` builds this one alone.
 [[test]]
-name = "main"
+name = "mago"
 path = "tests/main.rs"
 
 [[test]]
