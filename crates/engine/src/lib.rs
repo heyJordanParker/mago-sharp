@@ -583,15 +583,19 @@ struct ThreadClock(#[cfg(target_os = "macos")] libc::mach_port_t, #[cfg(not(targ
 impl ThreadClock {
     #[cfg(target_os = "macos")]
     fn of_this_thread() -> Self {
-        // SAFETY: the calling thread's own handle names a running thread, and its port takes no port right.
-        Self(unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) })
+        // SAFETY: `pthread_self` reads the calling thread's own handle and has no precondition.
+        let thread = unsafe { libc::pthread_self() };
+        // SAFETY: `thread` names the calling thread, which runs, and its port takes no port right.
+        Self(unsafe { libc::pthread_mach_thread_np(thread) })
     }
 
     #[cfg(not(target_os = "macos"))]
     fn of_this_thread() -> Self {
         let mut clock: libc::clockid_t = 0;
-        // SAFETY: the calling thread's own handle names a running thread, and `clock` is writable.
-        let result = unsafe { libc::pthread_getcpuclockid(libc::pthread_self(), &raw mut clock) };
+        // SAFETY: `pthread_self` reads the calling thread's own handle and has no precondition.
+        let thread = unsafe { libc::pthread_self() };
+        // SAFETY: `thread` names the calling thread, which runs, and `clock` is writable.
+        let result = unsafe { libc::pthread_getcpuclockid(thread, &raw mut clock) };
         assert_eq!(result, 0, "the thread's CPU clock could not be read: error {result}");
 
         Self(clock)
