@@ -905,7 +905,7 @@ fn a_class_a_before_analysis_hook_looked_up_rechecks_the_file_that_declares_it()
     }
 
     let temporary = tempfile::tempdir().expect("temporary host directory should be created");
-    let registry = deadline_registry(HOST_LOOKING_UP_A_CLASS_BEFORE_ANALYSIS, temporary.path());
+    let registry = deadline_registry(HOST_LOOKING_UP_A_CLASS_BEFORE_ANALYSIS, temporary.path(), UNREACHED_BACKSTOP);
     let database = deadline_database();
     let mut service = IncrementalAnalysisService::new(
         database.read_only(),
