@@ -83,6 +83,7 @@ fn selected_declarations_refresh_every_worker_incrementally() {
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-scan-worker.php"),
         common::NO_DEADLINE,
+        common::NO_DEADLINE,
         &[("MAGO_SCAN_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
     );
     let analyzer =
@@ -190,6 +191,7 @@ fn attribute_scan(database: &Database<'static>, audit_log: &Path) -> Option<Incr
     std::fs::write(audit_log, []).expect("scan audit should be initialized");
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-attribute-scan-worker.php"),
+        common::NO_DEADLINE,
         common::NO_DEADLINE,
         &[("MAGO_SCAN_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
     );

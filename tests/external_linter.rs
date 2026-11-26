@@ -22,7 +22,8 @@ fn external_linter_issue_preserves_suggested_edits() -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    let host = common::host(&repository.join("composer/tests/Sdk/worker.php"), common::NO_DEADLINE, &[]);
+    let host =
+        common::host(&repository.join("composer/tests/Sdk/worker.php"), common::NO_DEADLINE, common::NO_DEADLINE, &[]);
     let external = ExternalLinter::initialize([host], PHPVersion::PHP85)?;
 
     let source = b"<?php\n\nPsl\\Iter\\any([1], static fn(int $value): bool => $value > 0);\n";

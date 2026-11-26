@@ -15,6 +15,10 @@ use mago_engine::Value;
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
+/// The backstop of wall time of a call whose test checks no backstop: long past any test, so only its deadline of CPU
+/// time can stop it, however starved of CPU a loaded machine leaves its thread.
+const BACKSTOP: Duration = Duration::from_secs(120);
+
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
 }
@@ -28,7 +32,7 @@ fn no_questions(arguments: Vec<Value>) -> Answer {
 }
 
 fn call(engine: &Engine, function: &str) -> Result<Value, EngineError> {
-    engine.call(&format!("Mago\\Tests\\Engine\\{function}"), &[], DEADLINE, &mut no_questions)
+    engine.call(&format!("Mago\\Tests\\Engine\\{function}"), &[], DEADLINE, BACKSTOP, &mut no_questions)
 }
 
 #[test]
@@ -44,7 +48,7 @@ fn a_value_goes_to_php_and_comes_back_as_it_went() {
         Value::Map(vec![(b"name".to_vec(), Value::String(b"Order".to_vec())), (b"7".to_vec(), Value::Bool(false))]),
     ];
 
-    let echoed = engine.call("Mago\\Tests\\Engine\\echo_back", &values, DEADLINE, &mut no_questions);
+    let echoed = engine.call("Mago\\Tests\\Engine\\echo_back", &values, DEADLINE, BACKSTOP, &mut no_questions);
 
     assert_eq!(echoed, Ok(Value::List(values)));
 }
@@ -85,6 +89,7 @@ fn php_asks_mago_and_the_call_answers() {
         "Mago\\Tests\\Engine\\ask_mago",
         &[Value::String(b"the type of Order::total".to_vec())],
         DEADLINE,
+        BACKSTOP,
         &mut |arguments| {
             asked.push(arguments);
             Ok(Value::String(b"int".to_vec()))
@@ -103,6 +108,7 @@ fn an_answer_that_fails_throws_in_the_php_that_asked() {
         "Mago\\Tests\\Engine\\ask_mago_and_catch",
         &[Value::String(b"a class Mago doesn't know".to_vec())],
         DEADLINE,
+        BACKSTOP,
         &mut |_| Err("no class `Missing`".to_owned()),
     );
 
@@ -178,7 +184,7 @@ fn a_call_past_its_deadline_stops_and_resets_the_interpreter() {
     let deadline = Duration::from_millis(200);
     let start = Instant::now();
 
-    let stopped = engine.call("Mago\\Tests\\Engine\\spin", &[], deadline, &mut no_questions);
+    let stopped = engine.call("Mago\\Tests\\Engine\\spin", &[], deadline, BACKSTOP, &mut no_questions);
 
     let Err(EngineError::Deadline { duration, clock, frames }) = stopped else {
         panic!("the call ran on: {stopped:?}")
@@ -213,10 +219,13 @@ fn a_call_past_its_deadline_stops_while_another_threads_calls_end_in_time() {
         called.recv().unwrap();
         let start = Instant::now();
 
-        let spun = engine.call("Mago\\Tests\\Engine\\spin", &[], deadline, &mut no_questions);
+        let spun = engine.call("Mago\\Tests\\Engine\\spin", &[], deadline, BACKSTOP, &mut no_questions);
         stopped.store(true, Ordering::SeqCst);
 
-        assert!(matches!(spun, Err(EngineError::Deadline { .. })), "{spun:?}");
+        assert!(
+            matches!(spun, Err(EngineError::Deadline { duration, clock: Clock::Cpu, .. }) if duration == deadline),
+            "{spun:?}"
+        );
         assert!(start.elapsed() < Duration::from_secs(5), "the call stopped {:?} after it started", start.elapsed());
         assert!(other.join().unwrap() > 1, "the other thread's calls kept ending in time");
     });
@@ -226,7 +235,8 @@ fn a_call_past_its_deadline_stops_while_another_threads_calls_end_in_time() {
 fn a_calls_deadline_times_the_function_it_calls_and_never_the_interpreters_start() {
     let engine = Engine::new(vec![fixture("slow_start.php")], Vec::new(), Vec::new()).expect("the engine starts");
 
-    let changed = engine.call("chdir", &[Value::String(b"/".to_vec())], Duration::from_secs(1), &mut no_questions);
+    let changed =
+        engine.call("chdir", &[Value::String(b"/".to_vec())], Duration::from_secs(1), BACKSTOP, &mut no_questions);
 
     assert_eq!(changed, Ok(Value::Bool(true)));
 }
@@ -235,7 +245,8 @@ fn a_calls_deadline_times_the_function_it_calls_and_never_the_interpreters_start
 fn a_call_that_ends_before_its_deadline_leaves_the_next_call_alone() {
     let engine = engine();
     for _ in 0..50 {
-        let short = engine.call("Mago\\Tests\\Engine\\count_call", &[], Duration::from_millis(1), &mut no_questions);
+        let short =
+            engine.call("Mago\\Tests\\Engine\\count_call", &[], Duration::from_millis(1), BACKSTOP, &mut no_questions);
         assert!(matches!(short, Ok(Value::Int(_)) | Err(EngineError::Deadline { .. })), "{short:?}");
     }
 
@@ -247,7 +258,7 @@ fn a_script_that_throws_at_the_start_fails_the_call_and_names_the_script() {
     let script = fixture("throws.php");
     let engine = Engine::new(vec![script.clone()], Vec::new(), Vec::new()).expect("the engine starts");
 
-    let failed = engine.call("count", &[], DEADLINE, &mut no_questions);
+    let failed = engine.call("count", &[], DEADLINE, BACKSTOP, &mut no_questions);
 
     let Err(EngineError::Script { script: failing, message }) = failed else { panic!("returned {failed:?}") };
     assert_eq!(failing, script);
@@ -293,12 +304,14 @@ fn an_interpreter_runs_with_the_engine_settings() {
         "Mago\\Tests\\Engine\\setting",
         &[Value::String(b"memory_limit".to_vec())],
         DEADLINE,
+        BACKSTOP,
         &mut no_questions,
     );
     let system = engine.call(
         "Mago\\Tests\\Engine\\setting",
         &[Value::String(b"max_input_time".to_vec())],
         DEADLINE,
+        BACKSTOP,
         &mut no_questions,
     );
 
@@ -335,7 +348,7 @@ fn post() -> Value {
 }
 
 fn open_parcel(engine: &Engine, parcel: Value) -> Result<Value, EngineError> {
-    engine.call("Mago\\Tests\\Engine\\open_parcel", &[parcel], DEADLINE, &mut no_questions)
+    engine.call("Mago\\Tests\\Engine\\open_parcel", &[parcel], DEADLINE, BACKSTOP, &mut no_questions)
 }
 
 #[test]
@@ -389,11 +402,16 @@ fn an_answer_that_calls_the_engine_again_is_refused() {
     let engine = engine();
     let mut nested = None;
 
-    let answered =
-        engine.call("Mago\\Tests\\Engine\\ask_mago", &[Value::String(b"again".to_vec())], DEADLINE, &mut |_| {
+    let answered = engine.call(
+        "Mago\\Tests\\Engine\\ask_mago",
+        &[Value::String(b"again".to_vec())],
+        DEADLINE,
+        BACKSTOP,
+        &mut |_| {
             nested = Some(call(&engine, "count_call"));
             Ok(Value::Null)
-        });
+        },
+    );
 
     assert_eq!(answered, Ok(Value::Null));
     assert_eq!(nested, Some(Err(EngineError::Nested)));
@@ -407,26 +425,30 @@ fn an_answer_that_restarts_the_deadline_keeps_a_call_that_progresses_running() {
 
     let round = Duration::from_millis(40);
 
-    let progressed = engine.call("Mago\\Tests\\Engine\\ask_rounds", &rounds, deadline, &mut |_| {
+    let progressed = engine.call("Mago\\Tests\\Engine\\ask_rounds", &rounds, deadline, BACKSTOP, &mut |_| {
         spend(round);
         engine.restart_deadline();
         Ok(Value::Null)
     });
-    let stalled = engine.call("Mago\\Tests\\Engine\\ask_rounds", &rounds, deadline, &mut |_| {
+    let stalled = engine.call("Mago\\Tests\\Engine\\ask_rounds", &rounds, deadline, BACKSTOP, &mut |_| {
         spend(round);
         Ok(Value::Null)
     });
 
     assert_eq!(progressed, Ok(Value::Int(5)));
-    assert!(matches!(stalled, Err(EngineError::Deadline { .. })), "{stalled:?}");
+    assert!(
+        matches!(stalled, Err(EngineError::Deadline { duration, clock: Clock::Cpu, .. }) if duration == deadline),
+        "{stalled:?}"
+    );
 }
 
 #[test]
 fn a_call_whose_thread_sleeps_past_its_deadline_runs_on() {
     let engine = engine();
 
-    let napped =
-        engine.call("Mago\\Tests\\Engine\\nap", &[Value::Int(400_000)], Duration::from_millis(100), &mut no_questions);
+    let (deadline, backstop) = (Duration::from_millis(100), Duration::from_secs(1));
+
+    let napped = engine.call("Mago\\Tests\\Engine\\nap", &[Value::Int(400_000)], deadline, backstop, &mut no_questions);
 
     assert_eq!(napped, Ok(Value::Int(400_000)));
 }
@@ -438,8 +460,13 @@ fn a_call_stops_once_its_thread_has_used_its_deadline_of_cpu_time() {
     let nap = Duration::from_millis(300);
     let (start, cpu) = (Instant::now(), cpu_time());
 
-    let stopped =
-        engine.call("Mago\\Tests\\Engine\\nap_then_spin", &[Value::Int(300_000)], deadline, &mut no_questions);
+    let stopped = engine.call(
+        "Mago\\Tests\\Engine\\nap_then_spin",
+        &[Value::Int(300_000)],
+        deadline,
+        BACKSTOP,
+        &mut no_questions,
+    );
 
     assert!(
         matches!(stopped, Err(EngineError::Deadline { duration, clock: Clock::Cpu, .. }) if duration == deadline),
@@ -450,14 +477,14 @@ fn a_call_stops_once_its_thread_has_used_its_deadline_of_cpu_time() {
 }
 
 #[test]
-fn a_call_that_sleeps_past_ten_times_its_deadline_stops_on_wall_time() {
+fn a_call_that_sleeps_past_its_backstop_stops_on_wall_time() {
     let engine = engine();
-    let deadline = Duration::from_millis(20);
+    let (deadline, backstop) = (Duration::from_millis(20), Duration::from_millis(200));
     let start = Instant::now();
 
-    let stopped = engine.call("Mago\\Tests\\Engine\\nap", &[Value::Int(400_000)], deadline, &mut no_questions);
+    let stopped =
+        engine.call("Mago\\Tests\\Engine\\nap", &[Value::Int(400_000)], deadline, backstop, &mut no_questions);
 
-    let backstop = Duration::from_millis(200);
     assert!(
         matches!(stopped, Err(EngineError::Deadline { duration, clock: Clock::Wall, .. }) if duration == backstop),
         "{stopped:?}"
@@ -497,6 +524,7 @@ fn an_interpreter_reads_the_engine_variables_through_getenv_env_and_server() {
         "Mago\\Tests\\Engine\\variable",
         &[Value::String(b"MAGO_ENGINE_STAGE".to_vec())],
         DEADLINE,
+        BACKSTOP,
         &mut no_questions,
     );
 
@@ -518,7 +546,13 @@ fn a_shutdown_function_reads_the_engine_variables_as_its_thread_ends() {
     let registered = std::thread::scope(|scope| {
         scope
             .spawn(|| {
-                engine.call("Mago\\Tests\\Engine\\write_variable_at_shutdown", &arguments, DEADLINE, &mut no_questions)
+                engine.call(
+                    "Mago\\Tests\\Engine\\write_variable_at_shutdown",
+                    &arguments,
+                    DEADLINE,
+                    BACKSTOP,
+                    &mut no_questions,
+                )
             })
             .join()
             .unwrap()

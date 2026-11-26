@@ -118,13 +118,6 @@ impl fmt::Display for Clock {
     }
 }
 
-/// A call's backstop for its deadline `after` of CPU time: ten times as much wall time, which stops a call that makes
-/// no progress however it spends its time, as one that sleeps or waits on a lock uses no CPU time. A thread the machine
-/// starves of CPU still runs ten times as long as its deadline before it is stopped.
-fn backstop(after: Duration) -> Duration {
-    after.saturating_mul(10)
-}
-
 /// An exception a call or a script threw: its class, its message, and the file and line it was thrown at.
 ///
 /// A `CompileError` the engine throws for a PHP# file it refuses to load names that file. It displays as
@@ -338,9 +331,9 @@ impl Engine {
 
     /// Calls the PHP function `function`, such as `name` or `Class::method`, with `arguments` in the calling thread's
     /// interpreter, and returns what it returns. While it runs, `answer` answers each `\Mago\Engine\ask()` it makes. A
-    /// thread that runs no interpreter starts one before the call, outside `deadline`. A call whose thread uses
-    /// `deadline` of CPU time with no progress is interrupted, and so is one that makes no progress for ten times
-    /// `deadline` of wall time, however it spends it, as when it sleeps.
+    /// thread that runs no interpreter starts one before the call, outside both its limits. A call whose thread uses
+    /// `deadline` of CPU time with no progress is interrupted, so a thread the machine starves of CPU runs on, and so is
+    /// one that makes no progress for `backstop` of wall time, however it spends it, as when it sleeps.
     ///
     /// # Errors
     ///
@@ -351,6 +344,7 @@ impl Engine {
         function: &str,
         arguments: &[Value],
         deadline: Duration,
+        backstop: Duration,
         answer: &mut dyn FnMut(Vec<Value>) -> Answer,
     ) -> Result<Value, EngineError> {
         if ANSWERING.get().is_some() {
@@ -374,7 +368,7 @@ impl Engine {
             };
 
             let deadlines = Deadlines::get();
-            deadlines.watch(deadline, globals);
+            deadlines.watch(deadline, backstop, globals);
             let mut frames = Vec::new();
             let result = self.run(function, arguments, answer, &mut frames);
             let fired = deadlines.finish(globals);
@@ -383,7 +377,7 @@ impl Engine {
                     drop(thread.interpreter.take());
                     let duration = match clock {
                         Clock::Cpu => deadline,
-                        Clock::Wall => backstop(deadline),
+                        Clock::Wall => backstop,
                     };
                     Err(EngineError::Deadline { duration, clock, frames })
                 }
@@ -671,14 +665,14 @@ struct Slot {
 }
 
 /// One call's deadline: `after` of the thread's CPU time from `since`, its CPU time when the call started or last
-/// reported its progress, and its [`backstop`] of wall time from `since_wall`. The deadlines thread enforces
-/// it by setting the interpreter's timeout flag and VM interrupt, so the engine stops the PHP at its next instruction
-/// boundary.
+/// reported its progress, and `backstop` of wall time from `since_wall`. The deadlines thread enforces it by setting
+/// the interpreter's timeout flag and VM interrupt, so the engine stops the PHP at its next instruction boundary.
 struct Deadline {
     since: Duration,
     /// The wall time when the call started or last reported its progress, from which its backstop counts.
     since_wall: Instant,
     after: Duration,
+    backstop: Duration,
     globals: usize,
     fired: Option<Clock>,
 }
@@ -723,13 +717,14 @@ impl Deadlines {
         slot
     }
 
-    /// Starts the deadline of the call the calling thread starts, `after` of its CPU time and its backstop of wall time
+    /// Starts the deadline of the call the calling thread starts, `after` of its CPU time and `backstop` of wall time
     /// from now, which interrupts `globals`, the thread's interpreter.
-    fn watch(&self, after: Duration, globals: *mut c_void) {
+    fn watch(&self, after: Duration, backstop: Duration, globals: *mut c_void) {
         let since_wall = Instant::now();
         SLOT.with(|slot| {
             let since = slot.clock.time();
-            *lock(&slot.call) = Some(Deadline { since, since_wall, after, globals: globals as usize, fired: None });
+            let globals = globals as usize;
+            *lock(&slot.call) = Some(Deadline { since, since_wall, after, backstop, globals, fired: None });
         });
         self.wake_by(since_wall + after);
     }
@@ -782,7 +777,7 @@ impl Deadlines {
                 };
                 if let Some(deadline) = lock(&slot.call).as_mut().filter(|deadline| deadline.fired.is_none()) {
                     let used = slot.clock.time().saturating_sub(deadline.since);
-                    let backstop_at = deadline.since_wall + backstop(deadline.after);
+                    let backstop_at = deadline.since_wall + deadline.backstop;
                     deadline.fired = if used >= deadline.after {
                         Some(Clock::Cpu)
                     } else if backstop_at <= now {

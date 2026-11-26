@@ -1238,6 +1238,7 @@ fn fixture_registry(audit: &Path, switches: &[&str]) -> Result<PluginRegistry, B
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-invocation-worker.php"),
         common::NO_DEADLINE,
+        common::NO_DEADLINE,
         &environment,
     );
     let external = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)?;

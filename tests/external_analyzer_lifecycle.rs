@@ -231,6 +231,7 @@ fn external_analyzer_lifecycle_is_exact_across_workers_and_incremental_runs() {
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-lifecycle-worker.php"),
         common::NO_DEADLINE,
+        common::NO_DEADLINE,
         &[("MAGO_LIFECYCLE_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
     );
     let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)
@@ -391,6 +392,7 @@ fn orchestrator_loads_initialization_stubs_into_the_source_database() {
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-lifecycle-worker.php"),
         common::NO_DEADLINE,
+        common::NO_DEADLINE,
         &[("MAGO_LIFECYCLE_AUDIT_LOG", audit_log.to_str().expect("a UTF-8 path"))],
     );
     let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)
@@ -431,13 +433,16 @@ fn orchestrator_loads_initialization_stubs_into_the_source_database() {
     );
 }
 
-/// The `request-timeout-ms` of each host the deadline tests start: the CPU time one unit of a request may use with no
-/// progress.
+/// The deadline of each host the deadline tests start: the CPU time one unit of a request may use with no progress.
 const DEADLINE: Duration = Duration::from_millis(500);
 
-/// The wall time one unit of a request of those hosts may go with no progress, ten times `DEADLINE`, which stops a host
-/// that sleeps.
+/// The backstop of a host whose hook sleeps forever: the wall time one unit of a request may go with no progress, ten
+/// times `DEADLINE`, as `request-timeout-ms` gives it.
 const BACKSTOP: Duration = Duration::from_secs(5);
+
+/// The backstop of a host whose test checks the deadline of CPU time or no deadline: long past any test, so only
+/// `DEADLINE` can stop it, however starved of CPU a loaded machine leaves its thread.
+const UNREACHED_BACKSTOP: Duration = Duration::from_secs(120);
 
 /// An extension host whose plugin `rules` registers three after-analysis hooks: `QuickRule`, which sleeps for 0.6 times
 /// `BACKSTOP`, then `SpinsRule`, which never finishes, then `SecondQuickRule`.
@@ -661,11 +666,12 @@ final class LooksUpARoute implements Plugin, AfterFileAnalysisHook
 "#;
 
 /// The plugin registry of an extension host `acme` whose worker `source` registers, a PHP file written into
-/// `directory`, with `DEADLINE` as its `request-timeout-ms`.
-fn deadline_registry(source: &str, directory: &Path) -> PluginRegistry {
+/// `directory`, with `DEADLINE` and `backstop`.
+fn deadline_registry(source: &str, directory: &Path, backstop: Duration) -> PluginRegistry {
     let file = directory.join("host.php");
     std::fs::write(&file, source).expect("host source should be written");
-    let analyzer = ExternalAnalyzer::initialize([common::host(&file, DEADLINE, &[])], PHPVersion::PHP85, &[], false)
+    let host = common::host(&file, DEADLINE, backstop, &[]);
+    let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)
         .expect("PHP host analyzer should initialize");
     let mut registry = PluginRegistry::with_library_providers();
     registry.set_external_analyzer(Arc::new(ExternalAnalyzerHandle::ready(analyzer)));
@@ -695,7 +701,7 @@ fn an_after_analysis_hook_that_never_finishes_fails_at_the_deadline_naming_its_h
     }
 
     let temporary = tempfile::tempdir().expect("temporary host directory should be created");
-    let registry = deadline_registry(HOST_WHOSE_SECOND_AFTER_ANALYSIS_HOOK_NEVER_FINISHES, temporary.path());
+    let registry = deadline_registry(HOST_WHOSE_SECOND_AFTER_ANALYSIS_HOOK_NEVER_FINISHES, temporary.path(), BACKSTOP);
     let database = deadline_database();
     let mut service = IncrementalAnalysisService::new(
         database.read_only(),
@@ -727,7 +733,7 @@ fn an_issue_filter_that_never_finishes_fails_at_the_deadline_naming_its_file() {
     }
 
     let temporary = tempfile::tempdir().expect("temporary host directory should be created");
-    let registry = deadline_registry(HOST_WHOSE_ISSUE_FILTER_NEVER_FINISHES, temporary.path());
+    let registry = deadline_registry(HOST_WHOSE_ISSUE_FILTER_NEVER_FINISHES, temporary.path(), BACKSTOP);
     let database = deadline_database();
     let mut service = IncrementalAnalysisService::new(
         database.read_only(),
@@ -758,7 +764,7 @@ fn an_after_file_hook_that_never_finishes_fails_at_the_deadline_naming_its_hook_
     }
 
     let temporary = tempfile::tempdir().expect("temporary host directory should be created");
-    let registry = deadline_registry(HOST_WHOSE_AFTER_FILE_HOOK_NEVER_FINISHES, temporary.path());
+    let registry = deadline_registry(HOST_WHOSE_AFTER_FILE_HOOK_NEVER_FINISHES, temporary.path(), BACKSTOP);
     let database = deadline_database();
     let service = AnalysisService::new(
         database.read_only(),
@@ -780,8 +786,9 @@ fn an_after_file_hook_that_never_finishes_fails_at_the_deadline_naming_its_hook_
     );
 }
 
-/// A hook that computes and reports no progress fails once its thread uses the deadline of CPU time, long before the
-/// backstop of wall time, and the error names the CPU time.
+/// A hook that computes and reports no progress fails once its thread uses the deadline of CPU time, and the error names
+/// the CPU time. Its backstop is past any test, so however starved of CPU a loaded machine leaves the thread, only the
+/// deadline of CPU time can stop it.
 #[test]
 fn an_after_file_hook_that_computes_forever_fails_at_its_deadline_of_cpu_time() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -790,7 +797,7 @@ fn an_after_file_hook_that_computes_forever_fails_at_its_deadline_of_cpu_time() 
     }
 
     let temporary = tempfile::tempdir().expect("temporary host directory should be created");
-    let registry = deadline_registry(HOST_WHOSE_AFTER_FILE_HOOK_COMPUTES_FOREVER, temporary.path());
+    let registry = deadline_registry(HOST_WHOSE_AFTER_FILE_HOOK_COMPUTES_FOREVER, temporary.path(), UNREACHED_BACKSTOP);
     let database = deadline_database();
     let service = AnalysisService::new(
         database.read_only(),
@@ -805,7 +812,7 @@ fn an_after_file_hook_that_computes_forever_fails_at_its_deadline_of_cpu_time() 
     let error = service.oneshot(FileId::new(b"src/Route.php")).expect_err("the after-file hook should fail");
     let elapsed = started_at.elapsed();
 
-    assert!(elapsed >= DEADLINE && elapsed < BACKSTOP, "the analysis failed after {elapsed:?}");
+    assert!(elapsed >= DEADLINE, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
         "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 500 ms of CPU time in the hooks of src/Route.php, in the hook `SpinningFile`"
@@ -824,7 +831,7 @@ fn a_file_whose_hook_looked_up_a_class_is_analyzed_again_when_the_class_changes(
     }
 
     let temporary = tempfile::tempdir().expect("temporary host directory should be created");
-    let registry = deadline_registry(HOST_LOOKING_UP_A_CLASS, temporary.path());
+    let registry = deadline_registry(HOST_LOOKING_UP_A_CLASS, temporary.path(), UNREACHED_BACKSTOP);
     let mut database = deadline_database();
     let mut service = IncrementalAnalysisService::new(
         database.read_only(),
