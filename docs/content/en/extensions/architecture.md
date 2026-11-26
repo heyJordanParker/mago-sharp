@@ -95,7 +95,7 @@ Mago distinguishes optional semantic hints from lifecycle operations:
 
 - A failed optional provider is logged and native analysis continues with its original type, signature, assertion, or initialization knowledge.
 - Registration, initialization, codebase-scan, and lifecycle callback failures fail the current operation.
-- A request that makes no progress for the host's `request-timeout-ms` is interrupted, and its interpreter starts again before its next request, receiving the successful bootstrap state first.
+- A request that makes no progress for the host's `request-timeout-ms` of CPU time, or for ten times as much wall time however it spends it, is interrupted, and its interpreter starts again before its next request, receiving the successful bootstrap state first.
 
 Worker exceptions are returned as error responses, and Mago's diagnostics name the host.
 

@@ -188,7 +188,7 @@ fn a_worker_reducer_reports_a_body_written_in_two_files_once_at_the_second()
     let pool = rayon::ThreadPoolBuilder::new().num_threads(3).build()?;
     let issues = pool.install(|| -> Result<Vec<Issue>, Box<dyn std::error::Error + Send + Sync>> {
         let analyzer = ExternalAnalyzer::initialize(
-            [common::host(&file, common::NO_DEADLINE, &[])],
+            [common::host(&file, common::NO_DEADLINE, common::NO_DEADLINE, &[])],
             PHPVersion::PHP85,
             &[],
             false,
@@ -242,6 +242,7 @@ fn worker_reducers_merge_every_interpreter_in_one() -> Result<(), Box<dyn std::e
     let temporary = tempfile::tempdir()?;
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/worker-reducer.php"),
+        common::NO_DEADLINE,
         common::NO_DEADLINE,
         &[("MAGO_REDUCTION_AUDIT_DIRECTORY", temporary.path().to_str().expect("a UTF-8 path"))],
     );

@@ -1,6 +1,8 @@
 use std::io;
 use std::time::Duration;
 
+use mago_engine::Clock;
+
 /// Errors encountered while encoding or decoding a domain payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadError {
@@ -72,11 +74,12 @@ pub enum WorkerError {
     Setting { name: String, first: String, second: String },
     /// The host's worker failed the request, with what it threw.
     Remote { host: String, message: String },
-    /// A request made no progress within its deadline: `running` is the unit the worker last said the request started,
+    /// A request made no progress for `duration` of `clock`, the limit that ran out: the host's deadline of CPU time, or
+    /// the backstop of ten times as much wall time. `running` is the unit the worker last said the request started,
     /// such as "the after-analysis hooks of plugin `rules`", or else what mago named the request, such as "the linter
     /// rules of app/User.php", with the hook the worker was running when the stopped call's stack names one, as "the
     /// after-analysis hooks of plugin `rules`, in the hook `SpinsRule`".
-    Timeout { host: String, running: Option<String>, duration: Duration },
+    Timeout { host: String, running: Option<String>, duration: Duration, clock: Clock },
     /// The engine stopped the request on a fatal error, with what it printed.
     Failed { host: String, message: String },
     /// A worker reducer could not collect or reduce the workers' state.
@@ -104,8 +107,12 @@ impl std::fmt::Display for WorkerError {
             Self::Remote { host, message } => {
                 write!(formatter, "extension host `{host}` failed the request: {message}")
             }
-            Self::Timeout { host, running, duration } => {
-                write!(formatter, "extension host `{host}` made no progress for {} ms", duration.as_millis())?;
+            Self::Timeout { host, running, duration, clock } => {
+                write!(
+                    formatter,
+                    "extension host `{host}` made no progress for {} ms of {clock}",
+                    duration.as_millis()
+                )?;
                 match running {
                     Some(running) => write!(formatter, " in {running}"),
                     None => Ok(()),

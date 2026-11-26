@@ -5,9 +5,8 @@
 //! the root, with `.sharp` replaced by `.sharpc`. The folder mirrors the accepted sources exactly: a refused, removed
 //! or renamed source loses its compiled file. It writes nothing outside that folder.
 //!
-//! It writes `preload.php` in the `.sharp` folder too, the script `opcache.preload` names to preload every type it
-//! accepted outside `autoload-dev` folders, and `autoload.php`, which requires the project's Composer autoloader for a
-//! program and for the preload script, spec section 27.
+//! It writes `autoload.php` in the `.sharp` folder too, which requires the project's Composer autoloader for a program,
+//! spec section 27.
 //!
 //! A compile that warns of nothing beyond what it refused keeps a record of everything it read and wrote, and of what it
 //! printed, in the `.sharp` folder, and the next compile checks it before any analysis: when every input and output is
@@ -40,13 +39,8 @@ use mago_analyzer::external::ExternalAnalyzerError;
 use mago_analyzer::external::ExternalAnalyzerHandle;
 use mago_analyzer::external::ReturnTypeRequests;
 use mago_analyzer::plugin::PluginError;
-use mago_codex::metadata::CodebaseMetadata;
-use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::scanner::scan_program;
 use mago_codex::scanner::var_tag_class_likes;
-use mago_codex::symbol::SymbolKind;
-use mago_composer::autoload::Autoload;
-use mago_composer::autoload::AutoloadError;
 use mago_composer::autoload::MAPS;
 use mago_composer::autoload::vendor_folder;
 use mago_database::Database;
@@ -129,12 +123,8 @@ const VENDOR: &[u8] = b"vendor/";
 /// compile of a project with a PHP# file writes it, listeners or none, so the engine can tell when it is out of date.
 const LISTENERS: &str = "listeners.php";
 
-/// The preload script in the `.sharp` folder, spec section 27, which `opcache.preload` names to preload every type
-/// the compile accepted outside `autoload-dev` folders.
-const PRELOAD: &str = "preload.php";
-
 /// The script in the `.sharp` folder that requires the project's Composer autoloader, spec section 27, which a program
-/// loads before it builds its class, and the preload script before the types it preloads.
+/// loads before it builds its class.
 const AUTOLOAD: &str = "autoload.php";
 
 /// The record of everything the last compile read and wrote, in the `.sharp` folder and in the hosts' folder, which the
@@ -2085,19 +2075,6 @@ fn compiled(
         }
         written.insert(compiled_files_path);
         written.insert(compiled_folder.join(PROOFS));
-        let codebase = server.codebase();
-        let mut types = BTreeSet::new();
-        let mut loaded = up_front_files(&root)?;
-        for class in codebase.class_likes.values() {
-            if class.flags.is_module() || !accepted.contains(&class.span.file_id) {
-                continue;
-            }
-            let file = database.get_ref(&class.span.file_id)?;
-            if file.folder_namespace != Some(FolderNamespace::Test) {
-                types.insert(file.name.as_ref());
-                loaded.insert(class.span.file_id);
-            }
-        }
         let autoload = compiled_folder.join(AUTOLOAD);
         let bytes = autoload_script(&root)?;
         write_if_changed(&autoload, &bytes)?;
@@ -2105,13 +2082,6 @@ fn compiled(
             record.output(&autoload, unit::source_hash(&bytes));
         }
         written.insert(autoload);
-        let preload = compiled_folder.join(PRELOAD);
-        let bytes = preload_script(&types, &anonymous_class_types(codebase, loaded));
-        write_if_changed(&preload, &bytes)?;
-        if let Some(record) = record.as_mut() {
-            record.output(&preload, unit::source_hash(&bytes));
-        }
-        written.insert(preload);
         let kept: BTreeSet<PathBuf> = written
             .iter()
             .cloned()
@@ -3079,78 +3049,6 @@ fn autoload_script(root: &Path) -> Result<Vec<u8>, Error> {
     script.extend_from_slice(b";\n");
 
     Ok(script)
-}
-
-/// The PHP source of the preload script, spec section 27, for `types`, the workspace-relative name of each source whose
-/// type the compile accepted, a test's left out. It requires the project's Composer autoloader through `autoload.php`,
-/// then each source, so a type whose parent another file declares, plain PHP or PHP#, gets its parent from the
-/// autoloader, as in a request. Then it loads each of `named`, a type an anonymous class names, through the function
-/// its kind's check takes.
-fn preload_script(types: &BTreeSet<&[u8]>, named: &BTreeSet<(&str, &[u8])>) -> Vec<u8> {
-    let mut script = b"<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/autoload.php';\n".to_vec();
-    for name in types {
-        script.extend_from_slice(b"require_once __DIR__ . ");
-        quoted(&mut script, &[b"/../", *name].concat());
-        script.extend_from_slice(b";\n");
-    }
-    for (check, name) in named {
-        script.extend_from_slice(check.as_bytes());
-        script.push(b'(');
-        quoted(&mut script, name);
-        script.extend_from_slice(b");\n");
-    }
-
-    script
-}
-
-/// The files Composer's autoloader in `root` loads up front, `autoload_files.php`'s, which the preload loads with it.
-///
-/// # Errors
-///
-/// Returns the error of reading `composer.json` or Composer's autoload maps.
-fn up_front_files(root: &Path) -> Result<HashSet<FileId>, Error> {
-    let unreadable = |error: AutoloadError| OrchestratorError::General(error.to_string());
-    let Some(autoload) = Autoload::read(&vendor_folder(root).map_err(unreadable)?).map_err(unreadable)? else {
-        return Ok(HashSet::new());
-    };
-
-    Ok(autoload.files().iter().map(|path| FileId::new(&File::logical_name(root, path))).collect())
-}
-
-/// Each type outside PHP's own an anonymous class names as its parent, an interface or a trait, with the function that
-/// loads it, for each anonymous class in a file the preload loads: one of `loaded`, or the file of a type a loaded
-/// file's types name so. PHP declares an anonymous class only when its code runs, so nothing else loads what it names
-/// before opcache links the preloaded classes, and opcache would warn that it can't preload it.
-fn anonymous_class_types(codebase: &CodebaseMetadata, mut loaded: HashSet<FileId>) -> BTreeSet<(&'static str, &[u8])> {
-    let mut declared: HashMap<FileId, Vec<&ClassLikeMetadata>> = HashMap::new();
-    for class in codebase.class_likes.values() {
-        declared.entry(class.span.file_id).or_default().push(class);
-    }
-
-    let mut named = BTreeSet::new();
-    let mut unread: Vec<FileId> = loaded.iter().copied().collect();
-    while let Some(file) = unread.pop() {
-        for class in declared.get(&file).into_iter().flatten() {
-            let names =
-                class.direct_parent_class.iter().chain(&class.direct_parent_interfaces).chain(&class.used_traits);
-            let used = names.filter_map(|name| codebase.get_class_like(*name));
-            for used in used.filter(|used| !used.flags.is_built_in()) {
-                if loaded.insert(used.span.file_id) {
-                    unread.push(used.span.file_id);
-                }
-                if class.name_span.is_none() {
-                    let check = match used.kind {
-                        SymbolKind::Trait => "trait_exists",
-                        SymbolKind::Interface => "interface_exists",
-                        SymbolKind::Class | SymbolKind::Enum => "class_exists",
-                    };
-                    named.insert((check, used.original_name.as_bytes()));
-                }
-            }
-        }
-    }
-
-    named
 }
 
 /// Appends `text` to `table` as a PHP single-quoted string.

@@ -41,7 +41,7 @@ const LOAD: &str = "Mago\\Sdk\\Internal\\Hosts::load";
 const WORKER: &str = "Mago\\Sdk\\Worker";
 /// The SDK's entry that finds the host whose file declares a class-like.
 const DECLARER: &str = "Mago\\Sdk\\Internal\\Hosts::declarer";
-/// The longest an interpreter may take to move to the configuration's directory.
+/// The CPU time an interpreter may take to move to the configuration's directory.
 const CHDIR: Duration = Duration::from_secs(1);
 
 static NEXT_HOSTS: AtomicU64 = AtomicU64::new(1);
@@ -51,6 +51,15 @@ thread_local! {
     static PREPARED: RefCell<HashMap<u64, Prepared>> = RefCell::default();
 }
 
+/// The backstop of a host whose `request-timeout-ms` is `deadline`: ten times as much wall time.
+///
+/// It ends a unit of a request that makes no progress however it spends its time, as one that sleeps or waits on a lock
+/// uses no CPU time, and lets a thread a loaded machine starves of CPU run ten times its deadline first.
+#[must_use]
+pub fn backstop(deadline: Duration) -> Duration {
+    deadline.saturating_mul(10)
+}
+
 /// One host mago runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostFile {
@@ -58,8 +67,10 @@ pub struct HostFile {
     pub name: String,
     /// The PHP file that registers the host's worker.
     pub file: PathBuf,
-    /// The longest one unit of a request may run.
+    /// The CPU time one unit of a request may use with no progress.
     pub deadline: Duration,
+    /// The wall time one unit of a request may go with no progress, however it spends it, as [`backstop`] gives it.
+    pub backstop: Duration,
     /// The environment variables the host's worker reads.
     pub environment: BTreeMap<String, String>,
     /// The PHP settings the host's worker runs with, by name.
@@ -177,10 +188,12 @@ impl Hosts {
     /// Starts the calling thread's interpreter in the configuration's directory, loads every host's file in it, and
     /// gives it every bootstrap.
     fn start(&self) -> Result<(), WorkerError> {
-        self.engine.call("chdir", &[path_value(&self.directory)], CHDIR, &mut refuse).map_err(WorkerError::Start)?;
+        self.engine
+            .call("chdir", &[path_value(&self.directory)], CHDIR, backstop(CHDIR), &mut refuse)
+            .map_err(WorkerError::Start)?;
         for (index, host) in self.files.iter().enumerate() {
             let arguments = [Value::String(host.name.clone().into_bytes()), path_value(&host.file)];
-            if let Err(error) = self.engine.call(LOAD, &arguments, host.deadline, &mut refuse) {
+            if let Err(error) = self.engine.call(LOAD, &arguments, host.deadline, host.backstop, &mut refuse) {
                 let message = error.to_string();
                 return Err(match redeclared(&message) {
                     Some(class) => self.clash(index, class),
@@ -272,6 +285,7 @@ impl Hosts {
             DECLARER,
             &[earlier, Value::String(class.clone().into_bytes())],
             self.files[second].deadline,
+            self.files[second].backstop,
             &mut refuse,
         );
         if let Some(interpreter) = self.engine.interpreter() {
@@ -307,6 +321,7 @@ impl Hosts {
             HANDLE,
             &[Value::Int(index), Value::List(request)],
             file.deadline,
+            file.backstop,
             &mut |asked| match asked.as_slice() {
                 [Value::String(question), Value::List(query)] if question == b"query" => {
                     handler.handle(query).map(Value::List).map_err(|error| String::from_utf8_lossy(&error).into())
@@ -330,7 +345,7 @@ impl Hosts {
                 _ => Err(unanswered(file)),
             },
             Ok(_) => Err(unanswered(file)),
-            Err(EngineError::Deadline { duration, frames }) => {
+            Err(EngineError::Deadline { duration, clock, frames }) => {
                 let running = progressed.or_else(|| running.map(ToString::to_string));
                 let running = match (running, started_hook(&frames)) {
                     (Some(running), Some(hook)) => Some(format!("{running}, in the hook `{hook}`")),
@@ -338,7 +353,7 @@ impl Hosts {
                     (running, None) => running,
                 };
 
-                Err(WorkerError::Timeout { host: file.name.clone(), running, duration })
+                Err(WorkerError::Timeout { host: file.name.clone(), running, duration, clock })
             }
             Err(error) => Err(WorkerError::Failed { host: file.name.clone(), message: error.to_string() }),
         }
@@ -649,6 +664,7 @@ mod tests {
                     name: (*name).to_owned(),
                     file,
                     deadline: Duration::from_secs(5),
+                    backstop: backstop(Duration::from_secs(5)),
                     environment: BTreeMap::new(),
                     ini: BTreeMap::new(),
                 }
@@ -691,6 +707,7 @@ mod tests {
             name: "reports".to_owned(),
             file,
             deadline: Duration::from_secs(5),
+            backstop: backstop(Duration::from_secs(5)),
             environment: BTreeMap::new(),
             ini: BTreeMap::from([
                 ("memory_limit".to_owned(), "2G".to_owned()),
@@ -736,6 +753,7 @@ mod tests {
             name: name.to_owned(),
             file: PathBuf::from(format!("{name}.php")),
             deadline: Duration::from_secs(1),
+            backstop: backstop(Duration::from_secs(1)),
             environment: BTreeMap::from([("APP_ENV".to_owned(), value.to_owned())]),
             ini: BTreeMap::from([("memory_limit".to_owned(), value.to_owned())]),
         }

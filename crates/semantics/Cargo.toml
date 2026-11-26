@@ -19,6 +19,10 @@ path = "tests/main.rs"
 [lints]
 workspace = true
 
+[lib]
+# No unit test lives in src, so no lib test binary builds. A unit test added there removes this line.
+test = false
+
 [dependencies]
 mago-bytes = { workspace = true }
 mago-casing = { workspace = true }

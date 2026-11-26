@@ -22,8 +22,8 @@ use mago_extension::Host;
 use mago_extension::HostFile;
 use mago_extension::Hosts;
 
-/// The deadline of a host whose test checks no deadline: a day, longer than any CI job runs, so a loaded machine never
-/// reaches it, where `Duration::MAX` would overflow the engine's clock.
+/// The deadline and the backstop of a host whose test checks neither: a day, longer than any CI job runs, so a loaded
+/// machine never reaches it, where `Duration::MAX` would overflow the engine's clock.
 pub const NO_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A `mago analyze --watch` that a test reads the log of as the watch writes it, so the test waits for the watch's own
@@ -111,13 +111,15 @@ pub fn php_sdk_is_available(repository: &std::path::Path, test: &str) -> bool {
 }
 
 /// The extension host `acme` whose worker `file` registers, as mago runs it from the repository: in each thread's
-/// interpreter of the engine linked into the test binary, with `deadline` and `environment`.
-pub fn host(file: &Path, deadline: Duration, environment: &[(&str, &str)]) -> Host {
+/// interpreter of the engine linked into the test binary, with its `deadline` of CPU time, its `backstop` of wall time,
+/// and `environment`.
+pub fn host(file: &Path, deadline: Duration, backstop: Duration, environment: &[(&str, &str)]) -> Host {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     let file = HostFile {
         name: "acme".to_owned(),
         file: file.to_path_buf(),
         deadline,
+        backstop,
         environment: environment.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect(),
         ini: Default::default(),
     };
