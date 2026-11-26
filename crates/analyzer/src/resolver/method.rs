@@ -31,6 +31,7 @@ use mago_codex::ttype::get_iterable_parameters;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_sharp_received_list;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::template::GenericTemplate;
@@ -725,24 +726,47 @@ where
     // its own, spec section 12, beside the methods its objects have, as `held.contains("tea")` on a
     // `List<string>|Set<string>|Box` runs the member or the method of the kind the value holds.
     if let ClassLikeMemberSelector::Identifier(name) = selector {
-        for (kind, parts) in collection_kinds(collection_parts) {
-            match resolve_extension(context, &parts, name, MetadataFlags::EXTENSION_METHOD) {
-                Some(Extension::Member(method))
-                    if context
-                        .codebase
-                        .get_method_by_id(&method)
-                        .is_some_and(|metadata| is_collection_member(method.get_class_name(), metadata)) =>
-                {
-                    result.part_members.push((method, parts));
-                }
+        let codebase = context.codebase;
+        let kinds: Vec<_> = collection_kinds(collection_parts)
+            .into_iter()
+            .map(|(kind, parts)| {
+                let member = match resolve_extension(context, &parts, name, MetadataFlags::EXTENSION_METHOD) {
+                    Some(Extension::Member(method))
+                        if codebase
+                            .get_method_by_id(&method)
+                            .is_some_and(|metadata| is_collection_member(method.get_class_name(), metadata)) =>
+                    {
+                        Ok(method)
+                    }
+                    resolved => Err(resolved),
+                };
+
+                (kind, parts, member)
+            })
+            .collect();
+        // The kind that reaches the member, which a value plain PHP's `array<V>` gives may be instead.
+        let having = kinds.iter().find(|(_, _, member)| member.is_ok()).map(|(kind, parts, _)| (*kind, parts.clone()));
+        for (kind, parts, member) in kinds {
+            match member {
+                Ok(method) => result.part_members.push((method, parts)),
                 // A refusal the resolution reported stands alone.
                 // A tuple's missing element is refused as its read is, since a tuple has no members of its own.
-                resolved => {
+                Err(resolved) => {
                     if !matches!(resolved, Some(Extension::Refused)) {
                         if let [tuple @ TAtomic::Array(TArray::List(list))] = parts.types.as_ref()
                             && let Some(elements) = list.tuple_elements()
                         {
                             resolve_tuple_element(context, tuple, &elements, name, false);
+                        } else if let Some((having_kind, having_parts)) = &having
+                            && let Some(value) = plain_either_value(&parts, having_parts)
+                        {
+                            report_plain_either_member(
+                                context,
+                                (&parts, having_parts, *having_kind),
+                                &value,
+                                (object.span(), selector.span()),
+                                word(name.value),
+                            );
                         } else {
                             report_non_existent_collection_member(
                                 context,
@@ -1855,6 +1879,54 @@ fn collection_kinds(mut parts: Vec<TAtomic>) -> Vec<(CollectionKind, TUnion)> {
         .chunk_by(|part, next| kind(part) == kind(next))
         .map(|parts| (kind(&parts[0]), TUnion::from_vec(parts.to_vec())))
         .collect()
+}
+
+/// The value type `V` of plain PHP's `array<V>`, whose `List<V>` and `Map<int|string, V>` the receiver's parts `parts`
+/// and `other` are, one each, as [`get_sharp_received_list`] reads it. None for any other pair.
+fn plain_either_value(parts: &TUnion, other: &TUnion) -> Option<TUnion> {
+    let (list, map) = match (parts.types.as_ref(), other.types.as_ref()) {
+        ([TAtomic::Array(TArray::List(list))], [TAtomic::Array(map @ TArray::Keyed(_))])
+        | ([TAtomic::Array(map @ TArray::Keyed(_))], [TAtomic::Array(TArray::List(list))]) => (list, map),
+        _ => return None,
+    };
+    let either = get_sharp_received_list(map)?;
+
+    (list.known_elements.is_none() && list.element_type == either.element_type)
+        .then(|| either.element_type.as_ref().clone())
+}
+
+/// Reports `method_name`, a member of the `having` kind alone, called on a value plain PHP's `array<V>` gives, whose
+/// `V` is `value`, which PHP# reads as a `List<V>` or a `Map<int|string, V>`, spec section 12: one error that names
+/// the part that lacks the member, `lacking`, and the one that has it, `having_parts`, and the test to make first.
+fn report_plain_either_member<A>(
+    context: &mut Context<'_, '_, A>,
+    (lacking, having_parts, having): (&TUnion, &TUnion, CollectionKind),
+    value: &TUnion,
+    (obj_span, selector_span): (Span, Span),
+    method_name: Word,
+) where
+    A: Arena,
+{
+    let receiver = quoted_source(context, obj_span);
+    let lacking = display_type(context, lacking);
+    let having_parts = display_type(context, having_parts);
+    let plain = if value.is_mixed() { "array".to_owned() } else { format!("array<{}>", display_type(context, value)) };
+    let kind = having.name();
+
+    context.collector.report_with_code(
+        IssueCode::NonExistentMethod,
+        Issue::error(format!(
+            "`{receiver}` is a `{lacking}` or a `{having_parts}`, since plain PHP's `{plain}` holds either, and \
+             `{method_name}` is a `{kind}`'s. Test it with `is` first."
+        ))
+        .with_annotation(Annotation::primary(selector_span).with_message(format!("A method of a `{kind}` only.")))
+        .with_annotation(
+            Annotation::secondary(obj_span).with_message(format!("This is a `{lacking}` or a `{having_parts}`.")),
+        )
+        .with_help(format!(
+            "Narrow `{receiver}` to the `{having_parts}` with `is` or `as`, then call `{method_name}`."
+        )),
+    );
 }
 
 /// Reports a method called with `->`, or `.` in PHP#, on `object`, whose type `object_type` holds `null`, unless the

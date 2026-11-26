@@ -14350,8 +14350,9 @@ fn a_template_refuses_every_type_but_int_float_string_and_bool() {
 }
 
 /// Spec section 12: plain PHP's `array<int, T>`, returned or held in a property, arrives as a `List<T>`, which PHP#
-/// renumbers where it arrives, and still makes a `Map<int, T>` of its keys. An array keyed by `string` or by
-/// `int|string`, and a shape, stay a `Map`.
+/// renumbers where it arrives, and still makes a `Map<int, T>` of its keys. An array keyed by `string`, and a shape, stay
+/// a `Map`, and one keyed by `int|string` is a `List<T>` or a `Map<int|string, T>`, so neither a `List` nor a `Map` of
+/// another key type takes it.
 #[test]
 fn a_plain_php_int_keyed_array_arrives_as_a_list() {
     let users = "<?php\n\nnamespace App;\n\nfinal class Users\n{\n    /** @var array<int, Person> */\n    public array $cached = [];\n\n    /** @return array<int, Person> */\n    public function all(): array { return []; }\n\n    /** @return non-empty-array<int, Person> */\n    public function some(): array { return [new Person()]; }\n\n    /** @return array<string, Person> */\n    public function byName(): array { return []; }\n\n    /** @return array<int|string, Person> */\n    public function mixed(): array { return []; }\n}\n";
@@ -14401,6 +14402,50 @@ fn a_plain_php_int_keyed_shape_or_field_arrives_as_a_list() {
     let sharp = "namespace App;\n\nclass Reader\n{\n    public int read(Pivot pivot, Any? changed)\n    {\n        List<int> pair = pivot.pair();\n        List<int> attached = pivot.changes().get(\"attached\") ?? [];\n        List<int> grouped = pivot.grouped()[\"a\"] ?? [];\n        const sum = match (pivot.pair()) { [int a, int b] => a + b, default => 0 };\n        const listed = match (pivot.listed()) { [int a, int b] => a + b, default => 0 };\n        return changed is List<int> ? sum + listed + pair[0] + attached.count() + grouped.count() : sum;\n    }\n}\n";
 
     assert_eq!(issues(("src/App/Reader.sharp", sharp), &[("src/App/Pivot.php", pivot)]), [] as [&str; 0]);
+}
+
+/// Spec section 12: plain PHP's `array<V>` holds a list as often as a map, so PHP# reads it as a `List<V>` or a
+/// `Map<int|string, V>`. A `Map` method called on it is one error that names both and the test to make first, with no
+/// error for its arguments beside it.
+#[test]
+fn a_map_method_on_a_list_or_map_from_plain_php_is_one_error() {
+    let bag = "<?php\n\nnamespace App;\n\nfinal class Bag\n{\n    /** @return array<string, array<string>> */\n    public function messages(): array { return []; }\n}\n";
+    let sharp = "namespace App;\n\nclass Reader\n{\n    public string? first(Bag bag)\n    {\n        for (const lines of bag.messages().values()) {\n            return lines.get(0);\n        }\n        return null;\n    }\n}\n";
+
+    assert_eq!(
+        worded(("src/App/Reader.sharp", sharp), &[("src/App/Bag.php", bag)]),
+        [
+            "8:26 non-existent-method `lines` is a `List<string>` or a `Map<int|string, string>`, since plain PHP's `array<string>` holds either, and `get` is a `Map`'s. Test it with `is` first. | A method of a `Map` only. | This is a `List<string>` or a `Map<int|string, string>`. | Narrow `lines` to the `Map<int|string, string>` with `is` or `as`, then call `get`."
+        ]
+    );
+}
+
+/// Spec section 12: plain PHP's array keyed by `int` alone still arrives as a `List` alone, returned, held in a
+/// property, and as a `Map`'s value, since its keys are a list's.
+#[test]
+fn an_int_keyed_plain_php_array_still_arrives_as_a_list() {
+    let users = "<?php\n\nnamespace App;\n\nfinal class Users\n{\n    /** @var array<int, Person> */\n    public array $cached = [];\n\n    /** @return array<int, Person> */\n    public function all(): array { return []; }\n\n    /** @return array<string, array<int, string>> */\n    public function grouped(): array { return []; }\n}\n";
+    let person = "<?php\n\nnamespace App;\n\nfinal class Person\n{\n}\n";
+    let sharp = "namespace App;\n\nclass Roster\n{\n    public List<Person> all(Users users) => users.all();\n\n    public List<Person> cached(Users users) => users.cached;\n\n    public List<string> grouped(Users users) => users.grouped()[\"a\"] ?? [];\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Roster.sharp", sharp), &[("src/App/Users.php", users), ("src/App/Person.php", person)]),
+        [] as [&str; 0]
+    );
+}
+
+/// Spec section 12: plain PHP's array keyed by `string` alone still arrives as a `Map` alone, so a `Map` method reads
+/// it with no test first.
+#[test]
+fn a_string_keyed_plain_php_array_still_arrives_as_a_map() {
+    let users = "<?php\n\nnamespace App;\n\nfinal class Users\n{\n    /** @return array<string, Person> */\n    public function byName(): array { return []; }\n}\n";
+    let person = "<?php\n\nnamespace App;\n\nfinal class Person\n{\n}\n";
+    let sharp = "namespace App;\n\nclass Roster\n{\n    public Map<string, Person> all(Users users) => users.byName();\n\n    public Person? named(Users users) => users.byName().get(\"a\");\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Roster.sharp", sharp), &[("src/App/Users.php", users), ("src/App/Person.php", person)]),
+        [] as [&str; 0]
+    );
 }
 
 /// Spec section 12: a `List` is not a `Map`, so a `List` value where only a `Map` is declared is refused, as a `List`

@@ -2102,20 +2102,48 @@ fn get_php_signature_form(atomic: &TAtomic, codebase: &CodebaseMetadata, crossin
 /// section 12: plain PHP's `array<int, T>` holds a list whose keys may have gaps, such as what `array_filter` returns,
 /// and PHP# renumbers it where it arrives, as a field of a shape and an element of a collection too. A shape whose keys
 /// are a list's, `array{0: int, 1: string}`, is that list's shape, and any other shape keyed by `int` alone is a `List`
-/// of its fields. An array keyed by `string` or by `int|string` stays a `Map`. Each `array-key`, a key's or a value's,
-/// is the `int|string` PHP# writes for it.
+/// of its fields. An array keyed by `string` stays a `Map`. One keyed by `int|string`, as `array`, `array<V>` and
+/// `array<array-key, V>`, is a `List<V>` or a `Map<int|string, V>`, as [`get_sharp_received_list`] says. Each
+/// `array-key`, a key's or a value's, is the `int|string` PHP# writes for it.
 #[must_use]
 pub fn get_sharp_received_type(r#type: &TUnion) -> TUnion {
     let mut types = Vec::with_capacity(r#type.types.len());
     for atomic in r#type.types.iter() {
         match atomic {
             TAtomic::Scalar(TScalar::ArrayKey) => types.extend_from_slice(INT_STRING_ATOMIC_SLICE),
-            TAtomic::Array(array) => types.push(TAtomic::Array(get_sharp_received_array(array))),
+            TAtomic::Array(array) => {
+                let array = get_sharp_received_array(array);
+                if let Some(list) = get_sharp_received_list(&array) {
+                    types.push(TAtomic::Array(TArray::List(list)));
+                }
+                types.push(TAtomic::Array(array));
+            }
             atomic => types.push(atomic.clone()),
         }
     }
 
     r#type.clone_with_types(types)
+}
+
+/// The `List<V>` that `array`, a plain PHP array keyed by `int|string` as `array<V>` reads it, may be, spec section 12.
+/// Plain PHP gives a list under that type as often as a map, so PHP# reads it as a `List<V>` or a `Map<int|string, V>`
+/// and keeps the PHP array plain PHP gave, whose keys decide which it is. None for any other array.
+#[must_use]
+pub fn get_sharp_received_list(array: &TArray) -> Option<TList> {
+    let TArray::Keyed(keyed) = array else {
+        return None;
+    };
+    let (key, value) = keyed.parameters.as_ref()?;
+    let keys_either = key.types.iter().any(TAtomic::is_int)
+        && key.types.iter().any(TAtomic::is_string)
+        && key.types.iter().all(|key| key.is_int() || key.is_string());
+    if keyed.known_items.is_some() || keyed.known_non_list || !keys_either {
+        return None;
+    }
+    let mut list = TList::new(value.clone());
+    list.non_empty = keyed.non_empty;
+
+    Some(list)
 }
 
 /// `array` as [`get_sharp_received_type`] reads it.
