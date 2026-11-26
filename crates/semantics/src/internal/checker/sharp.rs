@@ -6530,11 +6530,11 @@ pub fn check_unary_postfix(unary_postfix: &UnaryPostfix, context: &mut Context<'
 }
 
 /// The value a write gives a local, which the help for a parameter's write declares a local with.
-enum Written<'a, 'arena> {
+enum Written<'ast, 'arena> {
     /// The value of `=`.
-    Value(&'a Expression<'arena>),
+    Value(&'ast Expression<'arena>),
     /// A compound assignment, such as `+=`, and its right side.
-    Compound(&'a AssignmentOperator, &'a Expression<'arena>),
+    Compound(&'ast AssignmentOperator, &'ast Expression<'arena>),
     /// The operator of `++` or `--`, which adds or subtracts 1.
     Step(&'static str),
 }
