@@ -312,15 +312,17 @@ impl<'analysis> Types<'analysis> {
         self.expression_type(expression).types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
     }
 
-    /// The position of the element `access` reads by its name in the tuple its object holds, spec section 30, or `None`
-    /// when the object holds no tuple. The checker refuses a name the tuple does not write.
-    pub(crate) fn tuple_element_index(&self, access: &PropertyAccess) -> Option<usize> {
-        let ClassLikeMemberSelector::Identifier(name) = &access.property else {
-            unreachable!("check_slice refuses the member name `{}`", access.property);
+    /// The position of the element `property` reads by its name in the tuple `object` holds, spec section 30, or `None`
+    /// when `object` holds no tuple. A tuple `?.` reads, `T?`, holds one when it isn't null. The checker refuses a name
+    /// the tuple does not write.
+    pub(crate) fn tuple_element_index(&self, object: &Expression, property: &ClassLikeMemberSelector) -> Option<usize> {
+        let ClassLikeMemberSelector::Identifier(name) = property else {
+            unreachable!("check_slice refuses the member name `{property}`");
         };
         // A class a static member is read on has no type.
-        let TAtomic::Array(TArray::List(list)) = self.artifacts.get_expression_type(access.object)?.types.first()?
-        else {
+        let object_type = self.artifacts.get_expression_type(object)?;
+        let mut held = object_type.types.iter().filter(|atomic| !atomic.is_null());
+        let (Some(TAtomic::Array(TArray::List(list))), None) = (held.next(), held.next()) else {
             return None;
         };
 
