@@ -1334,7 +1334,8 @@ impl CodebaseMetadata {
     /// nearest first, as `fields()` orders them, a private one included, and none a plain PHP ancestor declares. Each
     /// names the class that declares it, whose scope reads and writes it. A computed property stores nothing. A
     /// parameter that declares its property is that property's one field. A property the main constructor sets on
-    /// every path may be left out, and is read once, by the parameter, when a parameter reads its key. Any other
+    /// every path, itself or through a parent's constructor its `: super(…)` runs, as a parent's promoted property, may
+    /// be left out, and is read once, by the parameter, when a parameter reads its key. Any other
     /// property a parameter's key or another class's property names is a second field of that key, which the struct
     /// check refuses.
     #[must_use]
@@ -1363,12 +1364,17 @@ impl CodebaseMetadata {
                 })
             })
             .collect();
-        let set_by_constructor = constructor
-            .and_then(|constructor| constructor.method_metadata.as_ref())
-            .map(|constructor| &constructor.assigned_properties);
         let Some(metadata) = self.get_class_like(class) else {
             return parameters;
         };
+        let assigned: WordSet = constructor
+            .into_iter()
+            .chain(
+                metadata.all_parent_classes.iter().filter_map(|parent| self.get_method(*parent, word("__construct"))),
+            )
+            .filter_map(|constructor| constructor.method_metadata.as_ref())
+            .flat_map(|constructor| constructor.assigned_properties.iter().copied())
+            .collect();
         let ancestors = std::iter::successors(Some(metadata), |metadata| {
             metadata.direct_parent_class.and_then(|parent| self.get_class_like(parent))
         })
@@ -1388,7 +1394,7 @@ impl CodebaseMetadata {
                 else {
                     continue;
                 };
-                let set_by_constructor = set_by_constructor.is_some_and(|assigned| assigned.contains(&property.name.0));
+                let set_by_constructor = property.flags.is_promoted_property() || assigned.contains(&property.name.0);
                 if set_by_constructor && parameters.iter().any(|parameter| parameter.key == name) {
                     continue;
                 }
@@ -1907,15 +1913,15 @@ impl CodebaseMetadata {
     ///
     /// # Returns
     /// Returns the logical names of files whose top-level code references an invalidated symbol,
-    /// and whether `read` names one. Returns `None` if the cascade was too large to compute.
+    /// and whether `read` names one.
     pub fn mark_safe_symbols(
         &mut self,
         diff: &CodebaseDiff,
         references: &SymbolReferences,
         read: &HashSet<SymbolIdentifier>,
-    ) -> Option<(WordSet, bool)> {
+    ) -> (WordSet, bool) {
         let (invalid_symbols, partially_invalid, invalid_files, read_invalid) =
-            references.get_invalid_symbols(self, diff, read)?;
+            references.get_invalid_symbols(self, diff, read);
 
         // Mark all symbols in 'keep' set as safe (unless invalidated by cascade)
         for keep_symbol in diff.get_keep() {
@@ -1932,7 +1938,7 @@ impl CodebaseMetadata {
             }
         }
 
-        Some((invalid_files, read_invalid))
+        (invalid_files, read_invalid)
     }
 
     /// Drops each PHP# module whose name a plain PHP class holds in any case, with its members, as [`Self::extend`]

@@ -7638,6 +7638,24 @@ fn a_lambda_called_with_a_wrong_argument_or_returning_a_wrong_type_is_an_error_a
     assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/Report.php", php), &[])));
 }
 
+/// Spec section 4: a static method has no `this`, and neither has a lambda written in it, at any depth, whatever its
+/// body, and passed to a call too, so each read of `this` gets the refusal a read in the method's own body gets. A
+/// lambda in an instance method still reads `this`.
+#[test]
+fn a_lambda_in_a_static_method_cannot_read_this() {
+    let sharp = "namespace Demo;\n\npublic class Probe\n{\n    private string prefix = \"probe-\";\n\n    public static string expression()\n    {\n        const make = () => this.prefix;\n        return make();\n    }\n\n    public static string block()\n    {\n        const make = () => { return this.prefix; };\n        return make();\n    }\n\n    public static string nested()\n    {\n        const make = () => () => this.prefix;\n        return make()();\n    }\n\n    public static string passed() => Probe.apply((string item) => this.prefix + item);\n\n    public string instance()\n    {\n        const make = () => this.prefix;\n        return make();\n    }\n\n    private static string apply(Function<string(string)> make) => make(\"x\");\n}\n";
+
+    assert_eq!(
+        reported(("src/Demo/Probe.sharp", sharp), &[]),
+        [
+            "9:28 undefined-variable Undefined variable: `this`.",
+            "15:37 undefined-variable Undefined variable: `this`.",
+            "21:34 undefined-variable Undefined variable: `this`.",
+            "25:67 undefined-variable Undefined variable: `this`.",
+        ]
+    );
+}
+
 #[test]
 fn a_lambda_passed_to_php_takes_its_parameter_types_from_the_php_signature_as_in_php() {
     let numbers = "<?php\n\nnamespace Lib;\n\nfinal class Numbers\n{\n    /**\n     * @param \\Closure(int): bool $keep\n     */\n    public static function count(\\Closure $keep): int\n    {\n        return $keep(1) ? 1 : 0;\n    }\n}\n";
@@ -18017,6 +18035,30 @@ fn every_struct_parses() {
             "Give `celsius` another key with `[Key(\"…\")]`.",
         ]
     );
+}
+
+/// Spec section 10: a main constructor runs its parent's through `: super(…)`, so a property the parent's constructor
+/// sets is set by the main constructor, and is read once, by the parameter of its name. `Url` passes its parameter
+/// `value` to `BaseText`, whose main constructor declares `value`, so `Url` stores one field, `value`, and a struct
+/// that holds a `Url` parses.
+#[test]
+fn a_property_the_parents_constructor_sets_through_super_is_read_by_the_parameter_of_its_name() {
+    let sharp = [
+        (
+            "src/Demo/BaseText.sharp",
+            "namespace Demo;\n\npublic abstract class BaseText\n{\n    public BaseText(public string value { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Url.sharp",
+            "namespace Demo;\n\npublic final class Url : BaseText\n{\n    public Url(string value) : super(value) { }\n}\n",
+        ),
+        (
+            "src/Demo/UploadTarget.sharp",
+            "namespace Demo;\n\npublic struct UploadTarget\n{\n    public UploadTarget(public Url url { get; }) { }\n\n    public static UploadTarget read(Map<string, Any?> input) => UploadTarget.parse(input);\n}\n",
+        ),
+    ];
+
+    assert_eq!(each_file(reported, &sharp, &[]).concat(), Vec::<String>::new());
 }
 
 /// Spec section 10: a PHP# class that can be created parses the same way a struct does, as C#'s `System.Text.Json`
@@ -37984,4 +38026,67 @@ fn a_tagged_machine_reads_and_writes_its_cases_as_a_family() {
         ]
     );
     assert_eq!(refusals(stored, &[KEY, TAG, JSON, JSON_VALUE, status]), Vec::<String>::new());
+}
+
+/// `Renders`, a PHP# attribute class, and `Marker`, an interface whose `marked` is pure, which the tests of a generic
+/// helper that reads `attributes<TAttribute>()` share.
+const GENERIC_READS: [(&str, &str); 2] = [
+    (
+        "app/Reads/Renders.sharp",
+        "namespace App.Reads;\n\n[Attribute]\ninternal class Renders\n{\n    public Renders() { }\n}\n",
+    ),
+    (
+        "app/Reads/Marker.sharp",
+        "namespace App.Reads;\n\ninternal interface Marker\n{\n    bool marked(Class<Object> type);\n}\n",
+    ),
+];
+
+/// Spec sections 1 and 25: "reading the attributes of a PHP# class with `attributes<T>()` is pure". A generic helper
+/// that reads `attributes<TAttribute>()` has the effects of the class its call names, so `Probe.has<Renders>(type)`
+/// is pure, as `type.attributes<Renders>()` is.
+#[test]
+fn a_generic_attribute_read_is_pure_for_a_sharp_attribute_class() {
+    let probe = (
+        "app/Reads/Probe.sharp",
+        "namespace App.Reads;\n\ninternal class Probe : Marker\n{\n    public bool marked(Class<Object> type) => Probe.has<Renders>(type);\n\n    private static bool has<TAttribute : Object>(Class<Object> type) => type.attributes<TAttribute>().count() > 0;\n\n    public int main() => this.marked(typeof(Renders)) ? 0 : 1;\n}\n",
+    );
+    let [renders, marker] = GENERIC_READS;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(issues(probe, &[renders, marker, a, b, c, d, e, f, g]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[probe, renders, marker, a, b, c, d, e, f, g]), Vec::<String>::new());
+}
+
+/// The same helper given a plain PHP attribute class may run any code its constructor runs, so the call keeps every
+/// effect, spec section 29.
+#[test]
+fn a_generic_attribute_read_of_a_plain_php_attribute_has_every_effect() {
+    let legacy = ("src/Lib/Legacy.php", "<?php\n\nnamespace Lib;\n\n#[\\Attribute]\nfinal class Legacy\n{\n}\n");
+    let plain = (
+        "app/Reads/Plain.sharp",
+        "namespace App.Reads;\n\nimport Lib.Legacy;\n\ninternal class Plain : Marker\n{\n    public bool marked(Class<Object> type) => Plain.has<Legacy>(type);\n\n    private static bool has<TAttribute : Object>(Class<Object> type) => type.attributes<TAttribute>().count() > 0;\n}\n",
+    );
+    let [renders, marker] = GENERIC_READS;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[plain, legacy, renders, marker, a, b, c, d, e, f, g]),
+        [
+            "app/Reads/Plain.sharp:7:47 incompatible-effects: `Plain.marked` reaches `ClassMembers.attributes`, which may have every effect, so the pure `Marker.marked` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
+/// A generic helper that passes its own type parameter on to another stays pure for each call that names a PHP#
+/// attribute class, however many helpers it passes through.
+#[test]
+fn a_generic_attribute_read_through_two_helpers_stays_pure() {
+    let forward = (
+        "app/Reads/Forward.sharp",
+        "namespace App.Reads;\n\ninternal class Forward : Marker\n{\n    public bool marked(Class<Object> type) => Forward.has<Renders>(type);\n\n    private static bool has<TAttribute : Object>(Class<Object> type) => Forward.count<TAttribute>(type) > 0;\n\n    private static int count<TRead : Object>(Class<Object> type) => type.attributes<TRead>().count();\n}\n",
+    );
+    let [renders, marker] = GENERIC_READS;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(effect_issues(&[forward, renders, marker, a, b, c, d, e, f, g]), Vec::<String>::new());
 }

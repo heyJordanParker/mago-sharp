@@ -68,6 +68,10 @@ pub enum ParseError<'arena> {
     /// A `? :` written at the top of a PHP# `when` condition, such as `when strict ? forced : ready =>`, at the whole
     /// conditional. A `when` condition binds as tightly as `??`, as in C#, so it needs parentheses there.
     ConditionalInGuardInSharp(Span),
+    /// A call written as a PHP# `match` arm's pattern, such as `typeof(Clock) =>`, with its text and the name the help
+    /// compares it with, the `match`'s subject when it is a plain name and `value` otherwise, at the call. Spec section
+    /// 21: a pattern takes types and constants only, and a value is compared in `when`.
+    CallInPatternInSharp(&'arena [u8], &'arena [u8], Span),
     /// A PHP# operator declared with a symbol that is no binary operator, such as `operator !`, with the symbol, at the
     /// symbol. Semantics refuses a binary operator a class cannot declare.
     UndeclarableOperatorInSharp(&'arena [u8], Span),
@@ -143,6 +147,7 @@ impl HasFileId for ParseError<'_> {
             | ParseError::InvalidTemplateEscapeInSharp(span)
             | ParseError::LambdaAfterOperatorInSharp(span)
             | ParseError::ConditionalInGuardInSharp(span)
+            | ParseError::CallInPatternInSharp(_, _, span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
             | ParseError::FunctionParameterInUsesInSharp(_, span)
@@ -190,6 +195,7 @@ impl HasSpan for ParseError<'_> {
             | ParseError::InvalidTemplateEscapeInSharp(span)
             | ParseError::LambdaAfterOperatorInSharp(span)
             | ParseError::ConditionalInGuardInSharp(span)
+            | ParseError::CallInPatternInSharp(_, _, span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
             | ParseError::UsesAfterFunctionTypeInSharp(span)
             | ParseError::FunctionParameterInUsesInSharp(_, span)
@@ -272,6 +278,12 @@ impl std::fmt::Display for ParseError<'_> {
             }
             ParseError::ConditionalInGuardInSharp(_) => {
                 "A `? :` in a `when` condition needs parentheses, as in `when (strict ? forced : ready) =>`.".to_string()
+            }
+            ParseError::CallInPatternInSharp(call, subject, _) => {
+                let (call, subject) = (String::from_utf8_lossy(call), String::from_utf8_lossy(subject));
+                format!(
+                    "A pattern takes types and constants only, so `{call}` can't be one. Compare it in `when`: `_ when {subject} == {call} =>`."
+                )
             }
             ParseError::UndeclarableOperatorInSharp(symbol, _) => {
                 let symbol = String::from_utf8_lossy(symbol);
@@ -391,6 +403,7 @@ impl From<&ParseError<'_>> for Issue {
             | ParseError::InvalidTemplateEscapeInSharp(..)
             | ParseError::LambdaAfterOperatorInSharp(..)
             | ParseError::ConditionalInGuardInSharp(..)
+            | ParseError::CallInPatternInSharp(..)
             | ParseError::UndeclarableOperatorInSharp(..)
             | ParseError::UsesAfterFunctionTypeInSharp(..)
             | ParseError::FunctionParameterInUsesInSharp(..)

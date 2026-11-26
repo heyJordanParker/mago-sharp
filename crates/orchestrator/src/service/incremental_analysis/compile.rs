@@ -3799,10 +3799,8 @@ mod tests {
             service.codebase.safe_symbol_members.clear();
             let unchanged: Vec<FileId> = files.iter().copied().filter(|file_id| *file_id != edited.id).collect();
             let extension_reads = super::super::extension_reads(&service.file_states, &service.before_analysis_reads);
-            let (mut invalid_files, extension_symbol_changed) = service
-                .codebase
-                .mark_safe_symbols(&diff, &service.native_symbol_references, &extension_reads.symbols)
-                .expect("each fixture's cascade ends within the warm path's limit");
+            let (mut invalid_files, extension_symbol_changed) =
+                service.codebase.mark_safe_symbols(&diff, &service.native_symbol_references, &extension_reads.symbols);
             if extension_symbol_changed {
                 invalid_files.extend(unchanged.iter().map(|file_id| mago_word::word(name(file_id).as_bytes())));
             }
