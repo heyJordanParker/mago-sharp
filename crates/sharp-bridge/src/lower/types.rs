@@ -1098,6 +1098,17 @@ impl<'analysis> Types<'analysis> {
         Some(format!("{}.{}", class_text(owner.name, self.codebase), String::from_utf8_lossy(&variable[1..])))
     }
 
+    /// The type the `extern` property the access `access` reaches declares, spec section 14.3, which its class keeps
+    /// among its magic properties, not its declared ones. None for any other access.
+    pub(crate) fn extern_property_type(&self, access: &Expression) -> Option<&'analysis TUnion> {
+        let (class, variable) = self.accessed_property(access)?;
+        let name = word(&variable);
+        let declaring = *self.codebase.get_class_like(word(class))?.magic_property_ids.get(&name)?;
+        let property = self.codebase.get_class_like(declaring)?.magic_properties.get(&name)?;
+
+        Some(&property.type_metadata.as_ref()?.type_union)
+    }
+
     /// The key plain PHP's `__get` and `__set` receive for the `extern` property the read or write `access` reaches,
     /// spec section 14.3, as [`Self::extern_key`] gives it. None for any other access.
     pub(crate) fn extern_property_key(&self, access: &Expression) -> Option<&'analysis [u8]> {

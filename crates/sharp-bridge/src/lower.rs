@@ -5287,7 +5287,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let object = self.expression(object);
                 let call = self.extern_call(line, object, key, &[b"__", accessor].concat(), arguments, false);
 
-                let declared = self.types.property_type(access).filter(|_| accessor == b"get");
+                let declared = self.types.extern_property_type(access).filter(|_| accessor == b"get");
 
                 return match declared {
                     Some(declared) => self.extern_read(line, access, call, declared),
