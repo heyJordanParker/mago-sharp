@@ -27,7 +27,7 @@ mago-php-version = { workspace = true }
 serde = { workspace = true, optional = true }
 strum = { workspace = true }
 paste = { workspace = true }
-ordered-float = { workspace = true, features = ["rand"] }
+ordered-float = { workspace = true }
 mago-allocator = { workspace = true }
 memchr = { workspace = true }
 
