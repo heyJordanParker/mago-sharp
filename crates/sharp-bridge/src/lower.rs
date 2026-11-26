@@ -145,6 +145,7 @@ use mago_syntax::cst::StringPart;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Try;
 use mago_syntax::cst::TryCatchClause;
+use mago_syntax::cst::TypeArgumentList;
 use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::UnaryPostfixOperator;
 use mago_syntax::cst::UnaryPrefixOperator;
@@ -241,6 +242,7 @@ use crate::sharp_kind::SHARP_AST_PROP_GROUP;
 use crate::sharp_kind::SHARP_AST_PROPERTY_HOOK;
 use crate::sharp_kind::SHARP_AST_PROPERTY_HOOK_SHORT_BODY;
 use crate::sharp_kind::SHARP_AST_RETURN;
+use crate::sharp_kind::SHARP_AST_SHARP_CALL_TYPE_ARGS;
 use crate::sharp_kind::SHARP_AST_SHARP_CLASS_METADATA;
 use crate::sharp_kind::SHARP_AST_SHARP_EXTERN;
 use crate::sharp_kind::SHARP_AST_SHARP_IS_TYPE;
@@ -579,6 +581,9 @@ struct Lowering<'lowering, 'arena> {
     /// The type PHP writes for each type parameter, by the offset of its declared name: its bound, or `mixed` without
     /// one.
     type_parameters: HashMap<u32, PhpType>,
+    /// The index of each type parameter of a method, by the offset of its declared name, as a call's written order names
+    /// it, `#0`.
+    method_type_parameters: HashMap<u32, usize>,
     /// Whether the file declares a test module, so each of its classes starts and ends its tests.
     tested: bool,
     /// Whether the expression being lowered is one PHP evaluates as a constant expression, where a `Map` or a `Set`
@@ -628,6 +633,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             local_types: HashMap::default(),
             promoted_beside: false,
             type_parameters: HashMap::default(),
+            method_type_parameters: HashMap::default(),
             tested: false,
             in_constant_expression: false,
             in_default: false,
@@ -639,9 +645,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// in the tree is fully qualified.
     fn program(mut self, checked: &CheckedProgram<'arena>) -> Unit {
         for node in Node::Program(checked.program()).filter_map(|node| {
-            matches!(node, Node::ArrowFunction(_) | Node::Closure(_) | Node::TypeParameter(_)).then_some(*node)
+            matches!(node, Node::ArrowFunction(_) | Node::Closure(_) | Node::TypeParameter(_) | Node::Method(_))
+                .then_some(*node)
         }) {
             let lambda = match node {
+                Node::Method(method) => {
+                    for (index, parameter) in
+                        method.type_parameters.iter().flat_map(|list| list.parameters.iter()).enumerate()
+                    {
+                        self.method_type_parameters.insert(parameter.name.span.start.offset, index);
+                    }
+
+                    continue;
+                }
                 Node::TypeParameter(parameter) => {
                     // Only the standard library bounds one by a union, `int|float`, which PHP's one type can't name.
                     let php_type = match parameter.bound.as_ref().map(|bound| &bound.hint) {
@@ -1519,8 +1535,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Adds to `order` each class the written type `hint` names, and each scalar type a union in it holds, at any depth,
-    /// in the order it writes them, once each: a class by its full dotted name as it is declared, `App.Card`, and a
-    /// scalar type as the type text writes it, `int`. `in_union` tells whether `hint` is a union's member.
+    /// in the order it writes them, once each: a class by its full dotted name as it is declared, `App.Card`, a scalar
+    /// type as the type text writes it, `int`, and a type parameter of the method it is written in as `#` and its index,
+    /// whose order the method's call gives. `in_union` tells whether `hint` is a union's member.
     fn written_order(&self, hint: &Hint, in_union: bool, order: &mut Vec<String>) {
         let mut add = |written: String| {
             if !order.contains(&written) {
@@ -1533,6 +1550,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
         };
         match hint {
+            Hint::Identifier(name) if let Some(Binding::TypeParameter { declaration }) = self.names.binding(name) => {
+                if let Some(index) = self.method_type_parameters.get(&declaration.start.offset) {
+                    add(format!("#{index}"));
+                }
+            }
             Hint::Identifier(name) => add_class(self.names.resolve(name)),
             Hint::String(_) if in_union => add("string".to_owned()),
             Hint::Integer(_) if in_union => add("int".to_owned()),
@@ -1552,6 +1574,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Hint::Parenthesized(parenthesized) => self.written_order(parenthesized.hint, in_union, order),
             _ => {}
         }
+    }
+
+    /// The written order of the type arguments `written` a call writes, as `ZEND_AST_SHARP_CALL_TYPE_ARGS` gives it: each
+    /// one's [`Self::written_order`], when it holds more than one name or a type parameter of the method the call is in,
+    /// one after another, split by `; `. None when none does, or the call writes no type arguments.
+    fn call_order(&self, written: Option<&TypeArgumentList>) -> Option<String> {
+        let orders: Vec<String> = written?
+            .arguments
+            .iter()
+            .map(|hint| {
+                let mut order = Vec::new();
+                self.written_order(hint, false, &mut order);
+                if order.len() > 1 || order.iter().any(|name| name.starts_with('#')) {
+                    order.join(", ")
+                } else {
+                    String::new()
+                }
+            })
+            .collect();
+
+        orders.iter().any(|order| !order.is_empty()).then(|| orders.join("; "))
     }
 
     /// A struct's or a PHP# class's `parse`, spec section 10, as
@@ -1616,7 +1659,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let method = self.string(0, line, b"parse");
         let mut arguments = vec![self.variable(span, b"value")];
         if let Some(count) = self.static_type_parameters {
-            arguments.push(self.type_arguments_argument(line, &type_parameters_text(count)));
+            arguments.push(self.type_arguments_argument(line, &type_parameters_text(count), None));
         }
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
         let parsed = self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
@@ -5208,7 +5251,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let method = self.string(0, line, &[name, b"#", accessor].concat());
         let mut arguments = arguments.to_vec();
         if let Some(type_arguments) = self.types.statics_type_arguments(&span) {
-            arguments.push(self.type_arguments_argument(line, &type_arguments));
+            arguments.push(self.type_arguments_argument(line, &type_arguments, None));
         }
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
 
@@ -6948,7 +6991,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // A plain case of a generic enum is the object of the type arguments the read gives it, spec section 31.
             let type_arguments = self.types.statics_type_arguments(read);
             let type_arguments: Vec<u32> =
-                type_arguments.iter().map(|text| self.type_arguments_argument(line, text)).collect();
+                type_arguments.iter().map(|text| self.type_arguments_argument(line, text, None)).collect();
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &type_arguments);
 
             return self.node(SHARP_AST_STATIC_CALL, 0, line, &[case_class, instance, arguments]);
@@ -7026,7 +7069,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if classes.iter().any(|class| self.types.is_static_accessor(word(class), name.as_bytes())) {
             let method = self.string(0, line, &[name.as_bytes(), b"#get"].concat());
             let arguments: Vec<u32> = type_arguments
-                .map(|type_arguments| self.type_arguments_argument(line, &type_arguments))
+                .map(|type_arguments| self.type_arguments_argument(line, &type_arguments, None))
                 .into_iter()
                 .collect();
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
@@ -7845,8 +7888,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         let around = std::mem::take(&mut self.captures_type_arguments);
         if let Some(type_arguments) = type_arguments {
-            let text = self.type_text(line, type_arguments);
-            values.push(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text]));
+            values.push(self.type_arguments_argument(line, type_arguments, None));
         }
         let receiver = self.variable(value.span(), b"receiver");
         let body = call(self, receiver, &values);
@@ -9148,7 +9190,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             kind == SHARP_AST_STATIC_CALL && self.types.call_target(expression).kind == DeclarationKind::StaticProperty;
         // The type arguments a static field's call records are its class's, which pick the field's statics entry, and
         // a function value takes none.
-        let type_arguments = if static_property_call { None } else { self.types.call_type_arguments(expression) };
+        let type_arguments = if static_property_call { None } else { self.types.call_type_arguments(expression) }
+            .map(|text| (text, self.call_order(call.type_arguments.as_ref())));
         let parameters = self.types.call_parameters(expression);
         let callee = self.types.sharp_callee(expression);
         // A built-in method's failure the standard library reads from its value, as `ZipArchive::close`'s `false`,
@@ -9249,7 +9292,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let method = self.types.call_target(expression).name;
         let object = self.variable(super_of.span(), b"this");
         let method = self.string(0, self.line(&call.method), &super_alias(interface, method));
-        let type_arguments = self.types.call_type_arguments(expression);
+        let type_arguments = self
+            .types
+            .call_type_arguments(expression)
+            .map(|text| (text, self.call_order(call.type_arguments.as_ref())));
         let parameters = self.types.call_parameters(expression);
         let callee = self.types.sharp_callee(expression);
 
@@ -9954,18 +10000,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             .collect()
     }
 
-    /// The last argument of a call of a generic method, the type arguments `text` the checker found, a
-    /// `SHARP_TYPE_ARGS` without a `new`, which the engine resolves right before the call.
-    fn type_arguments_argument(&mut self, line: u32, text: &str) -> u32 {
+    /// The last argument of a call of a generic method, a `SHARP_CALL_TYPE_ARGS` of the type arguments `text` the checker
+    /// found, which the engine resolves right before the call, and their written `order`, see [`Self::call_order`].
+    fn type_arguments_argument(&mut self, line: u32, text: &str, order: Option<&str>) -> u32 {
         let text = self.type_text(line, text);
+        let order = order.map_or(NULL, |order| self.string(0, line, order.as_bytes()));
 
-        self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text])
+        self.node(SHARP_AST_SHARP_CALL_TYPE_ARGS, 0, line, &[text, order])
     }
 
     /// The call `call` builds from its lowered arguments, which starts at `site`, or none for a call through a function
     /// value, where `callee` is the PHP# function, method or constructor it runs, when the analysis knows one, and
     /// otherwise `parameters` are the parameters of the plain PHP one, and `type_arguments` the type arguments of a
-    /// generic method, which go last, as [`Self::type_arguments_argument`] writes them. A value that holds a `Map` or a
+    /// generic method and their written order, which go last, as [`Self::type_arguments_argument`] writes them. A value that holds a `Map` or a
     /// `Set`, or can, crosses into a plain PHP parameter whose type takes an array, such as `array`, `iterable`, `mixed`
     /// or none, as its PHP array, spec section 12, as [`Self::received_value`] gives it. A
     /// parameter whose type takes no array, such as `object` or an interface, takes the object, and so does any
@@ -9976,7 +10023,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         &mut self,
         site: Option<Span>,
         list: &ArgumentList,
-        type_arguments: Option<String>,
+        type_arguments: Option<(String, Option<String>)>,
         parameters: Option<Vec<PlainParameter>>,
         callee: Option<&FunctionLikeMetadata>,
         call: impl FnOnce(&mut Self, u32) -> u32,
@@ -9992,7 +10039,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         &mut self,
         site: Option<Span>,
         list: &ArgumentList,
-        type_arguments: Option<String>,
+        type_arguments: Option<(String, Option<String>)>,
         parameters: Option<Vec<PlainParameter>>,
         callee: Option<&FunctionLikeMetadata>,
         receiver: Option<(Span, &[u8])>,
@@ -10004,8 +10051,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             (Some(parameters), None) => self.crossing_arguments(list, &parameters, receiver),
             (None, None) => (self.argument_nodes(list), Vec::new()),
         };
-        if let Some(type_arguments) = type_arguments {
-            arguments.push(self.type_arguments_argument(line, &type_arguments));
+        if let Some((type_arguments, order)) = type_arguments {
+            arguments.push(self.type_arguments_argument(line, &type_arguments, order.as_deref()));
         }
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
         let call = call(self, arguments);
