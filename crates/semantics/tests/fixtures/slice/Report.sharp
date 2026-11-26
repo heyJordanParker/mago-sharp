@@ -50,8 +50,9 @@ public class Report
         const read = () => this.count;
     }
 
-    public int run([Field] [Entity(false)] int extra, float rate = 1.5, string label = "\u{41}\n", bool strict = !false)
+    public int run([Field] [Entity(false)] int given, float rate = 1.5, string label = "\u{41}\n", bool strict = !false)
     {
+        let extra = given;
         let total = extra * 2 + 1;
         const base = (total - 3) % 4;
         total += base;
@@ -73,7 +74,7 @@ public class Report
         const order = total < base || total > base || total <= base || total >= base;
         const nothing = null;
         this.count += extra;
-        return Report.part(first: extra, second: 2) + this.scale(rate) + this.count;
+        return Report.part(first: extra, second: 2) + this.scale(rate) + this.count + (same ? 1 : 0);
     }
 
     public static int part(int first, int second = 2 * 3 - -1, int limit = Lib.TOP)
@@ -149,8 +150,9 @@ public class Report
         return 0.5;
     }
 
-    public Calc? find(int? id, Calc? fallback = null, string? label = "none", float? rate = null, bool? on = null ?? true)
+    public Calc? find(int? given, Calc? fallback = null, string? label = "none", float? rate = null, bool? on = null ?? true)
     {
+        int? id = given;
         const first = id ?? 0;
         let second = id;
         second ??= first;
@@ -160,14 +162,14 @@ public class Report
         int count = 2;
         const float? share = rate;
         const Calc made = Calc.make();
-        kept = null;
         const sum = fallback?.add(1, 2) ?? fallback?.rate;
         const again = this.find(id)?.price.cents;
         return label == null ? null : (fallback ?? throw new Calc(0));
     }
 
-    public int branch(int value)
+    public int branch(int given)
     {
+        let value = given;
         if (value > 100) {
             throw new Calc(value);
         }
@@ -205,8 +207,9 @@ public class Report
         return Int.parse(quantity) * (Float.tryParse(price) ?? Float.parse("0.5")) + (Int.tryParse(price) ?? 0);
     }
 
-    public int attempt(int value)
+    public int attempt(int given)
     {
+        let value = given;
         try {
             value += 1;
         } catch (Calc | Missing failure) {
@@ -219,8 +222,9 @@ public class Report
         return value;
     }
 
-    public int repeat(int times)
+    public int repeat(int given)
     {
+        let times = given;
         let total = 0;
         while (times > 0) {
             total += times;
@@ -265,16 +269,18 @@ public class Report
     }
 
     [Entity(["a", "b"], ["x": 1])]
-    public Map<string, List<int>>? collect(List<Calc> items, Map<string, int> sizes = ["a": 1], List<int> none = [])
+    public Map<string, List<int>>? collect(List<Calc> items, Map<string, int> start = ["a": 1], List<int> none = [])
     {
+        let sizes = start;
         List<int> numbers = [1, 2];
         const named = ["a": 1, 2: numbers[0]];
         const Map<string, int> empty = [:];
         Map<int, string>? labels = null;
         sizes["a"] = (sizes["a"] ?? 0) + numbers[1];
         this.sizes["b"] = Lib.total(numbers);
-        const nested = [["a": items[1].rate]];
+        let nested = [["a": items[1].rate]];
         nested[0]["a"] = items.getOrNull(0)?.rate ?? items[1].rate;
+        this.sizes["c"] = nested.count();
         for (const [string name, size] of sizes) {
             this.sizes[name] = size;
         }

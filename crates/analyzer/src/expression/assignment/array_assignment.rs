@@ -129,14 +129,21 @@ where
     let root_is_array_access_object =
         root_array_type.types.iter().all(|atomic| atomic.extends_or_implements(context.codebase, word("ArrayAccess")));
 
-    // Spec section 2: an index write changes the collection a local holds. An object's indexer runs its `set` instead.
-    if context.dialect.is_sharp()
-        && !root_is_array_access_object
-        && root_array_type.types.iter().any(|atomic| CollectionKind::of(atomic).is_some())
-        && let Expression::ConstantAccess(name) = root_array_expression.unparenthesized()
-    {
-        check_local_collection_change(context, block_context, name, &root_array_type);
-    }
+    // Spec section 2: an index write changes the `List` or the `Map` a local holds, when it reaches the local through
+    // `List` indexes alone. An object's indexer runs its `set` instead, and a `Set` has no index, which its own check
+    // refuses.
+    let changed_local = match root_array_expression.unparenthesized() {
+        Expression::ConstantAccess(name)
+            if context.dialect.is_sharp()
+                && !root_is_array_access_object
+                && root_array_type.types.iter().any(|atomic| {
+                    matches!(CollectionKind::of(atomic), Some(CollectionKind::List | CollectionKind::Map))
+                }) =>
+        {
+            Some((name, root_array_type.clone()))
+        }
+        _ => None,
+    };
 
     let mut current_type = root_array_type.clone();
 
@@ -183,7 +190,7 @@ where
     // reached through `?.` remembers the written value.
     let root_var_id = get_block_expression_id(root_array_expression, context, block_context)
         .filter(|_| !(context.dialect.is_sharp() && expression_is_nullsafe(root_array_expression)));
-    let current_index = analyze_nested_array_assignment(
+    let (current_index, reaches_root) = analyze_nested_array_assignment(
         context,
         block_context,
         artifacts,
@@ -193,6 +200,9 @@ where
         &mut root_array_type,
         &mut current_type,
     )?;
+    if reaches_root && let Some((name, read)) = changed_local {
+        check_local_collection_change(context, block_context, name, &read);
+    }
 
     // Spec section 12: `list[i] = v` and `map[key] = value` run the standard library's `set` of a `List` and of a `Map`,
     // so a project without the library has it no more than any other member of a collection.
@@ -892,6 +902,8 @@ where
     result
 }
 
+/// Analyzes each step of an index write, innermost first, and gives the index of the last step and whether the write
+/// reaches the root collection: through `List` indexes alone, since a `Map` read is a copy.
 pub(crate) fn analyze_nested_array_assignment<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -901,7 +913,7 @@ pub(crate) fn analyze_nested_array_assignment<'ctx, 'ast, 'arena, A>(
     root_var_id: Option<Word>,
     root_type: &mut TUnion,
     last_array_expr_type: &mut TUnion,
-) -> Result<Option<&'ast Expression<'arena>>, AnalysisError>
+) -> Result<(Option<&'ast Expression<'arena>>, bool), AnalysisError>
 where
     A: Arena,
 {
@@ -961,7 +973,7 @@ where
 
         let Some(mut array_expression_type) = artifacts.get_rc_expression_type(array_target.get_array()).cloned()
         else {
-            return Ok(array_target.get_index());
+            return Ok((array_target.get_index(), !through_copy));
         };
 
         if array_expression_type.is_never() {
@@ -1155,7 +1167,7 @@ where
         var_id_additions.pop();
     }
 
-    Ok(last_array_expression_index)
+    Ok((last_array_expression_index, !through_copy))
 }
 
 fn get_index_literal_types(expression_index_type: &TUnion) -> Vec<TAtomic> {

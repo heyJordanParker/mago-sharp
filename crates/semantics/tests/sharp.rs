@@ -1073,7 +1073,7 @@ fn a_break_or_continue_names_a_loop_around_it_and_a_loop_name_is_used_once() {
 /// A name before any statement but a loop is PHP's `goto` label, which fails as a typo does, at the name.
 #[test]
 fn a_name_before_a_statement_that_is_no_loop_fails_as_a_typo_does() {
-    let code = leak(method("        checked: if (extra > 0) { extra = 0; }\n        return extra;\n"));
+    let code = leak(method("        checked: if (extra > 0) { return 0; }\n        return extra;\n"));
 
     assert_eq!(issues(code), ["7:9 Unexpected `checked`"]);
 }
@@ -3691,7 +3691,7 @@ fn a_constructor_parameter_with_an_access_modifier_declares_a_field_or_a_propert
 
 #[test]
 fn a_promoted_member_read_without_this_is_an_error_that_names_this() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(private int count)\n    {\n        count = 1;\n    }\n\n    public int total()\n    {\n        return count;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(private int count)\n    {\n        this.count = 1;\n    }\n\n    public int total()\n    {\n        return count;\n    }\n}\n";
 
     assert_eq!(issues(code), ["12:16 Write `this.count`: members of the same object are always written with `this.`."]);
 }
