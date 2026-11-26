@@ -87,6 +87,8 @@ pub struct CodebaseEntryKeys {
     /// Class-like FQCN atoms (also used for symbol removal).
     pub class_like_names: Vec<Word>,
     pub class_like_aliases: Vec<(Word, Word, Span)>,
+    /// The modules the file declares, as its scan gave them, before population gives each binding its service id.
+    pub modules: Vec<ModuleMetadata>,
     /// Function-like `(scope, name)` tuples.
     pub function_like_keys: Vec<(Word, Word)>,
     /// Constant FQN atoms.
@@ -2457,7 +2459,14 @@ impl CodebaseMetadata {
         file_ids.sort_unstable();
         file_ids.dedup();
 
-        CodebaseEntryKeys { class_like_names, class_like_aliases, function_like_keys, constant_names, file_ids }
+        CodebaseEntryKeys {
+            class_like_names,
+            class_like_aliases,
+            modules: self.modules.clone(),
+            function_like_keys,
+            constant_names,
+            file_ids,
+        }
     }
 
     /// Removes entries whose keys match the given [`CodebaseEntryKeys`].

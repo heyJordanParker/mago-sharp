@@ -1657,8 +1657,8 @@ fn lint_logs_a_slow_host_linter_rule_before_a_quick_one_at_the_debug_level() {
     assert!(!printed(&info).contains("Host rule"), "{}", printed(&info));
 }
 
-/// An extension host that loads `App\Word`, the class of `app/Word.sharp`, and appends its process id and the word the
-/// compiled file holds to `host.log` as each analysis starts. The `php` the tests run is plain PHP, which never declares
+/// An extension host that loads `App\Word`, the class of `app/Word.sharp`, and appends its process id, the id of the
+/// `mago` process that started it and the word the compiled file holds to `host.log` as each analysis starts. The `php` the tests run is plain PHP, which never declares
 /// a PHP# class, so the worker fails to load it, which counts as loading it.
 const HOST_LOGGING_ITS_PROCESS: &str = r#"<?php
 
@@ -1691,7 +1691,7 @@ final class LogsItsProcess implements Plugin, BeforeAnalysisHook
         class_exists('App\Word');
         $compiled = (string) @file_get_contents(getenv('SHARP_COMPILED') . '/app/Word.sharpc');
         $word = str_contains($compiled, 'second') ? 'second' : (str_contains($compiled, 'first') ? 'first' : 'nothing');
-        file_put_contents('host.log', MAGO_TEST_WORKER . " {$word}\n", FILE_APPEND);
+        file_put_contents('host.log', MAGO_TEST_WORKER . ' ' . posix_getppid() . " {$word}\n", FILE_APPEND);
     }
 }
 
@@ -1734,7 +1734,7 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     let seen = watch.stop();
 
     let hosts = log();
-    let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.split_once(' ')).collect();
+    let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.rsplit_once(' ')).collect();
     let failure = format!("{hosts}\n{seen}");
     assert!(rechecked && runs.len() >= 2, "{failure}");
     assert_eq!(runs[0].1, "first", "{failure}");
@@ -2081,12 +2081,17 @@ fn a_watch_starts_the_hosts_again_when_another_run_compiled_an_edit_while_it_wai
     let seen = watch.stop();
 
     let hosts = log();
-    let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.split_once(' ')).collect();
+    let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.rsplit_once(' ')).collect();
     let failure = format!("{hosts}\n{seen}");
     assert!(idle, "the watch never waited for a change: {failure}");
     let terminal = terminal.unwrap();
     assert!(terminal.status.success(), "{}", printed(&terminal));
     assert!(restarted, "{failure}");
+    assert_eq!(
+        runs.iter().filter(|(_, word)| *word == "first").count(),
+        1,
+        "the watch's start ran one host: {failure}"
+    );
     assert_eq!(runs[0].1, "first", "{failure}");
     assert_eq!(runs[1].1, "second", "the terminal's run: {failure}");
     assert_eq!(runs[2].1, "second", "{failure}");

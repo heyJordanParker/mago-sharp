@@ -79,7 +79,7 @@ L'attestation est liée à l'archive, pas au binaire extrait. Si vous n'avez gar
 Pour les projets PHP :
 
 ```sh
-composer require --dev "heyjordanparker/mago-sharp:^0.6"
+composer require --dev "heyjordanparker/mago-sharp:^0.8"
 ```
 
 Le paquet Composer est un fin wrapper. Le premier appel à `vendor/bin/mago` télécharge le binaire pré-construit correspondant depuis la release GitHub et le met en cache. Les appels suivants réutilisent le cache et ne font aucune requête réseau. Chaque version du paquet contient le SHA-256 de chaque archive construite par sa release, et le wrapper refuse de décompresser un téléchargement dont le SHA-256 diffère : la version que vous requérez épingle le binaire exact.

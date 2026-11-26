@@ -50,7 +50,6 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::r#extern::ExternMetadata;
 use mago_codex::metadata::r#extern::ExternNamespaceMetadata;
 use mago_codex::metadata::r#extern::extern_namespace_classes;
-use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::populator::populate_codebase_targeted;
@@ -1473,13 +1472,12 @@ impl IncrementalAnalysisService {
             return self.analyze();
         }
 
-        let modules_changed = new_file_scans
+        let modules_changed = new_file_scans.iter().any(|(file_id, metadata)| {
+            self.file_states.get(file_id).map_or(&[][..], |state| &state.entry_keys.modules) != metadata.modules
+        }) || self
+            .file_states
             .iter()
-            .any(|(file_id, metadata)| modules_in(metadata, *file_id) != modules_in(&self.codebase, *file_id))
-            || self
-                .file_states
-                .keys()
-                .any(|file_id| !current_file_ids.contains(file_id) && !modules_in(&self.codebase, *file_id).is_empty());
+            .any(|(file_id, state)| !current_file_ids.contains(file_id) && !state.entry_keys.modules.is_empty());
 
         if modules_changed {
             return self.analyze();
@@ -3017,12 +3015,6 @@ fn externs_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ExternMetada
         codebase.externs.values().flatten().filter(|declaration| declaration.span.file_id == file_id).collect();
     externs.sort();
     externs
-}
-
-/// The modules `file_id` declares, spec section 32. Every class takes its services from the modules of its namespace
-/// and the namespaces above it, so a change to them changes files that the signature diff cannot see.
-fn modules_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<&ModuleMetadata> {
-    codebase.modules.iter().filter(|module| module.span.file_id == file_id).collect()
 }
 
 /// The extension members `file_id` declares, spec section 26, each with its method and its receiver's type as written,
@@ -4620,6 +4612,31 @@ mod tests {
         service.analyze_incremental(None).expect("Incremental analysis failed.");
         assert_eq!(captive(&service), 0, "the added module binds a singleton Mailer");
         assert_matches_full(&service, &db, "the Admin module is added again");
+    }
+
+    /// A newline appended to a module file leaves its module as it was, so the watch rechecks that file alone.
+    #[test]
+    fn test_watch_a_newline_in_a_module_file_rechecks_that_file_alone() {
+        let mailer = "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n";
+        let smtp = "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n";
+        let panel = "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic class Panel\n{\n    public Panel(private Mailer mailer) { }\n}\n";
+        let shop = "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule\n{\n    scoped Mailer = SmtpMailer;\n}\n";
+        let shop_id = FileId::new(b"app/Shop/Module.sharp");
+        let mut db = make_database(vec![
+            ("app/Mail/Mailer.sharp", mailer),
+            ("app/Mail/SmtpMailer.sharp", smtp),
+            ("app/Shop/Panel.sharp", panel),
+            ("app/Shop/Module.sharp", shop),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(shop_id, Cow::Owned(format!("{shop}\n").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[shop_id])).expect("Incremental analysis failed.");
+        assert_eq!(service.analyzed_files, HashSet::from_iter([shop_id]));
+        assert_matches_full(&service, &db, "a newline is appended to the Shop module");
     }
 
     /// A signature edit re-analyzes its file in watch mode, and the methods it did not touch keep what they do.
