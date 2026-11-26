@@ -64,7 +64,8 @@ pub enum EngineError {
     Threw(Thrown),
     /// The call stopped on a fatal error, with what the engine printed. The interpreter is reset.
     Failed(String),
-    /// The call ran past its deadline `duration`, stopped in `frames`, the functions it was running, innermost first.
+    /// The call's thread used its deadline `duration` of CPU time, and the call stopped in `frames`, the functions it was
+    /// running, innermost first.
     /// The interpreter is reset.
     Deadline { duration: Duration, frames: Vec<Frame> },
     /// The call returned a value of this engine type, which no [`Value`] holds.
@@ -304,15 +305,15 @@ impl Engine {
     }
 
     /// Starts the deadline of the call that runs on this thread again, as when the call started, so a call that
-    /// reports its progress through its `answer` runs as long as each part keeps within the deadline.
+    /// reports its progress through its `answer` runs as long as each part keeps within the deadline of CPU time.
     pub fn restart_deadline(&self) {
         Deadlines::get().restart();
     }
 
     /// Calls the PHP function `function`, such as `name` or `Class::method`, with `arguments` in the calling thread's
     /// interpreter, and returns what it returns. While it runs, `answer` answers each `\Mago\Engine\ask()` it makes. A
-    /// thread that runs no interpreter starts one before the call, outside `deadline`. A call that runs past `deadline`
-    /// is interrupted.
+    /// thread that runs no interpreter starts one before the call, outside `deadline`. A call whose thread uses
+    /// `deadline` of CPU time is interrupted, and a thread the machine starves of CPU, or that sleeps, is not.
     ///
     /// # Errors
     ///
@@ -574,24 +575,79 @@ unsafe extern "C" fn mago_engine_variable_at(
     true
 }
 
-/// The deadline of the call the calling thread runs, if it runs one. Only the thread and the deadlines thread lock it,
-/// so a call's lock waits for nothing but the deadlines thread's look at it.
-#[derive(Default)]
+/// The CPU clock of one thread, which any thread reads while that thread runs, as PHP's `max_execution_time` counts
+/// CPU time rather than wall time.
+#[derive(Clone, Copy)]
+struct ThreadClock(#[cfg(target_os = "macos")] libc::mach_port_t, #[cfg(not(target_os = "macos"))] libc::clockid_t);
+
+impl ThreadClock {
+    #[cfg(target_os = "macos")]
+    fn of_this_thread() -> Self {
+        // SAFETY: the calling thread's own handle names a running thread, and its port takes no port right.
+        Self(unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn of_this_thread() -> Self {
+        let mut clock: libc::clockid_t = 0;
+        // SAFETY: the calling thread's own handle names a running thread, and `clock` is writable.
+        let result = unsafe { libc::pthread_getcpuclockid(libc::pthread_self(), &raw mut clock) };
+        assert_eq!(result, 0, "the thread's CPU clock could not be read: error {result}");
+
+        Self(clock)
+    }
+
+    /// The CPU time the thread has used, in user and system mode.
+    #[cfg(target_os = "macos")]
+    fn time(self) -> Duration {
+        // SAFETY: `thread_basic_info` is plain integers, which zero fills.
+        let mut info: libc::thread_basic_info = unsafe { std::mem::zeroed() };
+        let mut count = libc::THREAD_BASIC_INFO_COUNT;
+        // SAFETY: the thread runs while its clock is read, and `info` holds the `count` integers the call writes.
+        let result = unsafe {
+            libc::thread_info(self.0, libc::THREAD_BASIC_INFO as u32, (&raw mut info).cast(), &raw mut count)
+        };
+        assert_eq!(result, libc::KERN_SUCCESS, "the thread's CPU time could not be read: error {result}");
+
+        let (user, system) = (info.user_time, info.system_time);
+        Duration::new(
+            (user.seconds + system.seconds) as u64,
+            ((user.microseconds + system.microseconds) * 1_000) as u32,
+        )
+    }
+
+    /// The CPU time the thread has used, in user and system mode.
+    #[cfg(not(target_os = "macos"))]
+    fn time(self) -> Duration {
+        let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: the thread runs while its clock is read, and `time` is writable.
+        let result = unsafe { libc::clock_gettime(self.0, &raw mut time) };
+        assert_eq!(result, 0, "the thread's CPU time could not be read: error {result}");
+
+        Duration::new(time.tv_sec as u64, time.tv_nsec as u32)
+    }
+}
+
+/// The CPU clock of a thread and the deadline of the call it runs, if it runs one. Only the thread and the deadlines
+/// thread lock it, so a call's lock waits for nothing but the deadlines thread's look at it.
 struct Slot {
+    clock: ThreadClock,
     call: Mutex<Option<Deadline>>,
 }
 
-/// One call's deadline, which the deadlines thread enforces by setting its interpreter's timeout flag and VM
-/// interrupt, so the engine stops the PHP at its next instruction boundary.
+/// One call's deadline: `after` of the thread's CPU time from `since`, its CPU time when the call started or last
+/// reported its progress. The deadlines thread enforces it by setting the interpreter's timeout flag and VM interrupt,
+/// so the engine stops the PHP at its next instruction boundary.
 struct Deadline {
-    at: Instant,
+    since: Duration,
     after: Duration,
     globals: usize,
     fired: bool,
 }
 
-/// Every thread's [`Slot`], and when the deadlines thread wakes next. A call wakes it only when the call's deadline
-/// comes before that, so a stream of calls that each end in time wakes it once per deadline, not twice per call.
+/// Every thread's [`Slot`], and when the deadlines thread wakes next: the soonest a call could use the rest of its
+/// deadline, in wall time. A call wakes it only when its deadline could come before that, so a stream of calls that
+/// each end in time wakes it once per deadline, not twice per call.
 struct Deadlines {
     slots: Mutex<Vec<Weak<Slot>>>,
     /// Held by the deadlines thread except while it sleeps, so a call that wakes it can't wake it before it sleeps.
@@ -624,26 +680,26 @@ impl Deadlines {
 
     /// The calling thread's slot, which the deadlines thread looks at from now on.
     fn register(&self) -> Arc<Slot> {
-        let slot = Arc::new(Slot::default());
+        let slot = Arc::new(Slot { clock: ThreadClock::of_this_thread(), call: Mutex::default() });
         lock(&self.slots).push(Arc::downgrade(&slot));
         slot
     }
 
-    /// Starts the deadline of the call the calling thread starts, `after` from now, which interrupts `globals`, the
-    /// thread's interpreter.
+    /// Starts the deadline of the call the calling thread starts, `after` of its CPU time from now, which interrupts
+    /// `globals`, the thread's interpreter.
     fn watch(&self, after: Duration, globals: *mut c_void) {
-        let at = Instant::now() + after;
         SLOT.with(|slot| {
-            *lock(&slot.call) = Some(Deadline { at, after, globals: globals as usize, fired: false });
+            let since = slot.clock.time();
+            *lock(&slot.call) = Some(Deadline { since, after, globals: globals as usize, fired: false });
         });
-        self.wake_by(at);
+        self.wake_by(Instant::now() + after);
     }
 
-    /// Moves the deadline of the calling thread's call to its `after` from now, unless it already passed.
+    /// Moves the deadline of the calling thread's call to its `after` of CPU time from now, unless it already passed.
     fn restart(&self) {
         SLOT.with(|slot| {
             if let Some(deadline) = lock(&slot.call).as_mut().filter(|deadline| !deadline.fired) {
-                deadline.at = Instant::now() + deadline.after;
+                deadline.since = slot.clock.time();
             }
         });
     }
@@ -672,7 +728,8 @@ impl Deadlines {
         u64::try_from(at.saturating_duration_since(self.epoch).as_nanos()).unwrap_or(u64::MAX - 1)
     }
 
-    /// Interrupts each interpreter whose deadline passed, and sleeps until the next deadline.
+    /// Interrupts each interpreter whose thread used its deadline of CPU time, and sleeps until the soonest another
+    /// could.
     fn enforce(&self) -> ! {
         let mut sleeping = lock(&self.sleeping);
         loop {
@@ -684,13 +741,15 @@ impl Deadlines {
                     return false;
                 };
                 if let Some(deadline) = lock(&slot.call).as_mut().filter(|deadline| !deadline.fired) {
-                    if deadline.at <= now {
+                    let used = slot.clock.time().saturating_sub(deadline.since);
+                    if used >= deadline.after {
                         // SAFETY: a deadline's interpreter runs until its call finishes the deadline, which takes the
                         // slot's lock first, and setting its flags is what the engine's own timer does.
                         unsafe { engine_interrupt(deadline.globals as *mut c_void) };
                         deadline.fired = true;
                     } else {
-                        next = Some(next.map_or(deadline.at, |next| next.min(deadline.at)));
+                        let at = now + (deadline.after - used);
+                        next = Some(next.map_or(at, |next| next.min(at)));
                     }
                 }
 

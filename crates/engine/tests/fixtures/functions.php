@@ -81,14 +81,26 @@ function spin(): never
     }
 }
 
-function spin_asking(int $rounds): int
+function ask_rounds(int $rounds): int
 {
     for ($round = 0; $round < $rounds; $round++) {
-        usleep(40_000);
         ask('progress');
     }
 
     return $rounds;
+}
+
+function nap(int $microseconds): int
+{
+    usleep($microseconds);
+
+    return $microseconds;
+}
+
+function nap_then_spin(int $microseconds): never
+{
+    usleep($microseconds);
+    spin();
 }
 
 function variable(string $name): array

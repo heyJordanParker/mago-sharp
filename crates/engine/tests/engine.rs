@@ -402,14 +402,63 @@ fn an_answer_that_restarts_the_deadline_keeps_a_call_that_progresses_running() {
     let deadline = Duration::from_millis(100);
     let rounds = [Value::Int(5)];
 
-    let progressed = engine.call("Mago\\Tests\\Engine\\spin_asking", &rounds, deadline, &mut |_| {
+    let round = Duration::from_millis(40);
+
+    let progressed = engine.call("Mago\\Tests\\Engine\\ask_rounds", &rounds, deadline, &mut |_| {
+        spend(round);
         engine.restart_deadline();
         Ok(Value::Null)
     });
-    let stalled = engine.call("Mago\\Tests\\Engine\\spin_asking", &rounds, deadline, &mut |_| Ok(Value::Null));
+    let stalled = engine.call("Mago\\Tests\\Engine\\ask_rounds", &rounds, deadline, &mut |_| {
+        spend(round);
+        Ok(Value::Null)
+    });
 
     assert_eq!(progressed, Ok(Value::Int(5)));
     assert!(matches!(stalled, Err(EngineError::Deadline { duration, .. }) if duration == deadline), "{stalled:?}");
+}
+
+#[test]
+fn a_call_whose_thread_sleeps_past_its_deadline_runs_on() {
+    let engine = engine();
+
+    let napped =
+        engine.call("Mago\\Tests\\Engine\\nap", &[Value::Int(400_000)], Duration::from_millis(100), &mut no_questions);
+
+    assert_eq!(napped, Ok(Value::Int(400_000)));
+}
+
+#[test]
+fn a_call_stops_once_its_thread_has_used_its_deadline_of_cpu_time() {
+    let engine = engine();
+    let deadline = Duration::from_millis(200);
+    let nap = Duration::from_millis(300);
+    let (start, cpu) = (Instant::now(), cpu_time());
+
+    let stopped =
+        engine.call("Mago\\Tests\\Engine\\nap_then_spin", &[Value::Int(300_000)], deadline, &mut no_questions);
+
+    assert!(matches!(stopped, Err(EngineError::Deadline { duration, .. }) if duration == deadline), "{stopped:?}");
+    assert!(cpu_time() - cpu >= deadline, "the call stopped after {:?} of CPU time", cpu_time() - cpu);
+    assert!(start.elapsed() >= nap + deadline, "the call stopped {:?} after it started", start.elapsed());
+}
+
+/// The CPU time the calling thread has used.
+fn cpu_time() -> Duration {
+    let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `time` is writable.
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut time) };
+    assert_eq!(result, 0, "the thread's CPU time could not be read: error {result}");
+
+    Duration::new(time.tv_sec as u64, time.tv_nsec as u32)
+}
+
+/// Spends `cpu` of the calling thread's CPU time.
+fn spend(cpu: Duration) {
+    let until = cpu_time() + cpu;
+    while cpu_time() < until {
+        std::hint::spin_loop();
+    }
 }
 
 #[test]
