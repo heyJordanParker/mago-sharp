@@ -718,7 +718,7 @@ fn the_lowercase_keyword_a_keyword_in_another_case_names_compiles() {
 #[test]
 fn the_php_sharp_form_a_refused_php_construct_names_compiles() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    public bool run(int? value, List<int> items, List<int> pair, Map<string, int> map, string key)\n    {\n        const listed = [1, 2];\n        const first = pair[0];\n        map.remove(key);\n        return value != null && items.count() == 0 && listed.count() == first;\n    }\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    public bool run(int? value, List<int> items, List<int> pair, Map<string, int> map, string key)\n    {\n        const listed = [1, 2];\n        const first = pair[0];\n        let kept = map;\n        kept.remove(key);\n        return value != null && items.count() == 0 && listed.count() == first && !kept.has(key);\n    }\n}\n",
     );
 
     assert_eq!(lowered.diagnostics(), Vec::<String>::new());
@@ -10107,7 +10107,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
 #[test]
 fn a_change_after_a_null_safe_link_reaches_the_place_below_it() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    private List<List<int>> grid = [];\n\n    public int? run(Report? other, List<List<int>>? rows)\n    {\n        other?.grid.add([1]);\n        return rows?.removeLast().count();\n    }\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    private List<List<int>> grid = [];\n\n    public int? run(Report? other, List<List<int>>? rows)\n    {\n        other?.grid.add([1]);\n        let rest = rows;\n        return rest?.removeLast().count();\n    }\n}\n",
     );
 
     assert_eq!(
@@ -10469,7 +10469,7 @@ fn a_ref_member_makes_the_object_only_of_a_php_array_its_place_holds() {
 /// whose value code reads gives the value it stores, which a hidden variable holds.
 #[test]
 fn a_map_index_write_without_inline_forms_calls_the_map_s_members() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int stored(Map<int, int> counts, int extra) => counts[1] = extra;\n\n    public void kept(Map<int, int> counts)\n    {\n        counts[2] ??= 3;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private Map<int, int> counts = [:];\n\n    public int stored(int extra) => this.counts[1] = extra;\n\n    public void kept()\n    {\n        this.counts[2] ??= 3;\n    }\n}\n";
     let lowered = Lowered(common::checked_inlining(
         &common::sharp_files::type_file(code),
         code,
@@ -10759,7 +10759,7 @@ fn a_map_index_write_runs_the_map_s_set_member() {
 /// the unit names that member's form among the forms it inlines, and a change to the form reaches the write.
 #[test]
 fn a_list_index_write_runs_the_standard_library_s_set_member() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public void run(List<int> sizes)\n    {\n        sizes[0] = 1;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public List<int> run(List<int> given)\n    {\n        let sizes = given;\n        sizes[0] = 1;\n        return sizes;\n    }\n}\n";
     let lowered = Lowered::new(code);
     let inlined: Vec<String> = lowered
         .unit()
@@ -11336,7 +11336,7 @@ fn a_set_method_changes_a_property_through_the_property() {
 /// `set` stores it.
 #[test]
 fn a_change_runs_its_values_before_it_takes_its_place() {
-    let code = "namespace App;\n\nclass Report\n{\n    public static Map<string, int> counts { get => field; set => field = value; } = [:];\n\n    public static Set<string> tags { get => field; set => field = value; } = [];\n\n    public Map<int, int> memo { get; set; } = [:];\n\n    public void run(Report? other, List<Money> prices, Money extra)\n    {\n        Report.counts[this.label()] = this.at(1);\n        Report.tags.add(this.label());\n        other?.memo.remove(this.at(2));\n        this.memo[3] ??= this.at(3);\n        prices[this.at(0)] += extra;\n    }\n\n    private int at(int n) => n;\n\n    private string label() => \"a\";\n}\n";
+    let code = "namespace App;\n\nclass Report\n{\n    public static Map<string, int> counts { get => field; set => field = value; } = [:];\n\n    public static Set<string> tags { get => field; set => field = value; } = [];\n\n    public Map<int, int> memo { get; set; } = [:];\n\n    public void run(Report? other, List<Money> prices, Money extra)\n    {\n        Report.counts[this.label()] = this.at(1);\n        Report.tags.add(this.label());\n        other?.memo.remove(this.at(2));\n        this.memo[3] ??= this.at(3);\n        let held = prices;\n        held[this.at(0)] += extra;\n    }\n\n    private int at(int n) => n;\n\n    private string label() => \"a\";\n}\n";
 
     assert_eq!(
         Lowered::with(code, &[("src/App/Money.sharp", MONEY)]).body(),
@@ -11683,7 +11683,7 @@ fn a_coalescing_write_runs_its_value_before_it_takes_the_place_with_or_without_a
 /// as PHP runs a null-safe call's arguments.
 #[test]
 fn a_change_holds_only_a_value_that_runs_code() {
-    let code = "namespace App;\n\nclass Report\n{\n    public Map<int, int>? maybe { get; set; } = null;\n\n    public void run(List<Map<string, int>> rows, List<List<int>> grid, List<int> numbers)\n    {\n        rows[0] = [\"a\": 1];\n        grid[0] = [...numbers];\n        this.maybe?.remove(this.at(4));\n    }\n\n    private int at(int n) => n;\n}\n";
+    let code = "namespace App;\n\nclass Report\n{\n    public Map<int, int>? maybe { get; set; } = null;\n\n    public int run(List<Map<string, int>> given, List<List<int>> cells, List<int> numbers)\n    {\n        let rows = given;\n        let grid = cells;\n        rows[0] = [\"a\": 1];\n        grid[0] = [...numbers];\n        this.maybe?.remove(this.at(4));\n        return rows.count() + grid.count();\n    }\n\n    private int at(int n) => n;\n}\n";
 
     assert_eq!(
         Lowered::new(code).body(),
@@ -11858,7 +11858,7 @@ fn a_change_holds_only_a_value_that_runs_code() {
 #[test]
 fn a_null_safe_set_method_tests_its_receiver_first() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Report\n{\n    private Set<string>? tags = null;\n\n    public bool? run(Set<string>? names, Report? other)\n    {\n        names?.add(\"vip\");\n        other?.tags?.remove(\"old\");\n        return names?.contains(\"vip\");\n    }\n}\n",
+        "namespace App.Tenant;\n\nclass Report\n{\n    private Set<string>? tags = null;\n\n    public bool? run(Set<string>? given, Report? other)\n    {\n        let names = given;\n        names?.add(\"vip\");\n        other?.tags?.remove(\"old\");\n        return names?.contains(\"vip\");\n    }\n}\n",
     );
 
     assert_eq!(
@@ -15425,6 +15425,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
             {
                 Box<Order> box = Pager.orders();
                 box = Pager.orders();
+                this.keep(box);
                 let untyped = Pager.orders();
                 this.keep(Pager.orders());
                 this.auto = Pager.orders();
@@ -15507,6 +15508,7 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
             "STMT_LIST\n".to_owned(),
             assign("box"),
             assign("box"),
+            "  METHOD_CALL\n    VAR\n      ZVAL \"this\"\n    ZVAL \"keep\"\n    ARG_LIST\n      VAR\n        ZVAL \"box\"\n".to_owned(),
             assign("untyped"),
             format!("  METHOD_CALL\n    VAR\n      ZVAL \"this\"\n    ZVAL \"keep\"\n    ARG_LIST\n{}", orders(3)),
             format!("  ASSIGN\n    PROP\n      VAR\n        ZVAL \"this\"\n      ZVAL \"auto\"\n{}", orders(2)),
@@ -26221,8 +26223,9 @@ fn a_try_with_a_generic_catch_clause_catches_throwable_and_tests_each_clause_in_
 
         public class Report
         {
-            public int run(int extra)
+            public int run(int given)
             {
+                let extra = given;
                 try {
                     extra += 1;
                 } catch (Failure<int> numbers) {
@@ -26328,10 +26331,10 @@ fn a_try_with_a_generic_catch_clause_catches_throwable_and_tests_each_clause_in_
 fn a_try_without_a_generic_catch_clause_keeps_its_catch_list_beside_one_with_it() {
     let source = |guarded: &str| {
         format!(
-            "namespace App;\n\nimport Exception;\nimport RuntimeException;\n\npublic class Report\n{{\n    public int plain(int extra)\n    {{\n        try {{\n            extra += 1;\n        }} catch (RuntimeException failure) {{\n            throw failure;\n        }} catch (Exception) {{\n        }}\n        return extra;\n    }}\n{guarded}}}\n"
+            "namespace App;\n\nimport Exception;\nimport RuntimeException;\n\npublic class Report\n{{\n    public int plain(int given)\n    {{\n        let extra = given;\n        try {{\n            extra += 1;\n        }} catch (RuntimeException failure) {{\n            throw failure;\n        }} catch (Exception) {{\n        }}\n        return extra;\n    }}\n{guarded}}}\n"
         )
     };
-    let guarded = "\n    public int guarded(int extra)\n    {\n        try {\n            extra += 1;\n        } catch (Failure<int>) {\n        }\n        return extra;\n    }\n";
+    let guarded = "\n    public int guarded(int given)\n    {\n        let extra = given;\n        try {\n            extra += 1;\n        } catch (Failure<int>) {\n        }\n        return extra;\n    }\n";
     let alone = Lowered::with(&source(""), &[FAILURE]);
 
     assert_eq!(Lowered::with(&source(guarded), &[FAILURE]).body_of("plain"), alone.body_of("plain"));
@@ -26349,8 +26352,9 @@ fn a_catch_clause_of_a_type_parameter_tests_its_type_argument() {
 
         public class Report
         {
-            public int run<TError : RuntimeException>(int extra)
+            public int run<TError : RuntimeException>(int given)
             {
+                let extra = given;
                 try {
                     extra += 1;
                 } catch (TError) {
