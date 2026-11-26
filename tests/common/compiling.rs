@@ -7,6 +7,8 @@ use std::process::Command;
 use std::process::Output;
 
 use mago_database::process;
+use mago_sharp_bridge::unit::CURRENT_GENERATION;
+use mago_sharp_bridge::unit::GENERATION_PREFIX;
 
 pub const ORDER: &str = "namespace App;\n\npublic class Order\n{\n    public int total(int extra)\n    {\n        return extra + 1;\n    }\n}\n";
 pub const MONEY: &str =
@@ -72,6 +74,9 @@ pub fn files_under(folder: &Path) -> Vec<PathBuf> {
         };
         for entry in entries {
             let path = entry.unwrap().path();
+            if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(GENERATION_PREFIX)) {
+                continue;
+            }
             if path.is_dir() {
                 folders.push(path);
             } else {
@@ -84,7 +89,7 @@ pub fn files_under(folder: &Path) -> Vec<PathBuf> {
 }
 
 pub fn compiled(root: &Path, name: &str) -> PathBuf {
-    root.join(".sharp").join(name).with_extension("sharpc")
+    root.join(".sharp").join(CURRENT_GENERATION).join(name).with_extension("sharpc")
 }
 
 pub fn read(root: &Path, name: &str) -> String {

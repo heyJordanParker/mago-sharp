@@ -251,10 +251,7 @@ pub(crate) fn record_parse<A>(
     for field in codebase.struct_parse_fields(class.name) {
         if !field.is_parameter {
             let property = word([b"$".as_slice(), field.name].concat());
-            let Some(declaring) = class.declaring_property_ids.get(&property) else {
-                unreachable!("a property field is one of its class's properties, each of which has a declaring class");
-            };
-            let set = Body::Accessor(codebase.class_key(*declaring), property, word(b"set"));
+            let set = Body::Accessor(codebase.class_key(field.declaring), property, word(b"set"));
             reach(&mut parsing, class.name, set, field.name);
         }
         parsed_classes(codebase, field.r#type, &mut nested);

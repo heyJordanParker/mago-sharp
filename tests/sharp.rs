@@ -693,7 +693,7 @@ fn compile_accepts_extern_methods_in_the_vendored_standard_library() {
     for compiled in
         ["src/App/Page.sharpc", "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharpc"]
     {
-        assert!(directory.path().join(".sharp").join(compiled).is_file(), "{compiled}: {printed}");
+        assert!(directory.path().join(".sharp/current").join(compiled).is_file(), "{compiled}: {printed}");
     }
 }
 
@@ -709,7 +709,7 @@ fn compile_inlines_a_vendored_library_form_into_a_project_caller() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert!(output.status.success(), "{printed}");
-    let page = std::fs::read(directory.path().join(".sharp/src/App/Page.sharpc")).unwrap();
+    let page = std::fs::read(directory.path().join(".sharp/current/src/App/Page.sharpc")).unwrap();
     assert!(page.windows(b"mb_ucfirst".len()).any(|window| window == b"mb_ucfirst"), "the form is inlined");
 }
 
@@ -739,11 +739,11 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
     assert!(printed.contains("Compiled 70 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
-    assert!(root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
-    assert!(root.join(".sharp/library/Sharp/System/Environment.sharpc").is_file(), "{printed}");
-    let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
+    assert!(root.join(".sharp/current/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
+    assert!(root.join(".sharp/current/library/Sharp/System/Environment.sharpc").is_file(), "{printed}");
+    let title = std::fs::read(root.join(".sharp/current/example/App/Title.sharpc")).unwrap();
     assert!(title.windows(b"mb_ucfirst".len()).any(|window| window == b"mb_ucfirst"), "the form is inlined");
-    assert!(!root.join(".sharp/example/App/Native.sharpc").exists(), "{printed}");
+    assert!(!root.join(".sharp/current/example/App/Native.sharpc").exists(), "{printed}");
     assert!(printed.contains("native-body-outside-library"), "{printed}");
 }
 
@@ -759,7 +759,7 @@ fn compile_refuses_extern_under_library_sharp_without_the_composer_json_of_the_l
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(!root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").exists(), "{printed}");
+    assert!(!root.join(".sharp/current/library/Sharp/Text/StringMembers.sharpc").exists(), "{printed}");
     assert!(printed.contains("native-body-outside-library"), "{printed}");
 }
 
@@ -1136,7 +1136,7 @@ fn compile_accepts_a_struct_that_renames_an_import_to_keep_the_short_name_free()
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert!(output.status.success(), "{printed}");
-    assert!(root.join(".sharp/src/App/Entry.sharpc").is_file(), "{printed}");
+    assert!(root.join(".sharp/current/src/App/Entry.sharpc").is_file(), "{printed}");
 }
 
 /// A PHP# attribute class keeps the targets its `[Attribute(Attribute.TARGET_METHOD)]` reads, so the attribute on a
@@ -1637,7 +1637,7 @@ fn compile_refuses_a_sharp_file_whose_error_an_ignore_entry_or_a_baseline_entry_
 
         assert_eq!(output.status.code(), Some(1), "{suppression}: {printed}");
         assert!(printed.contains("invalid-return-statement"), "{suppression}: {printed}");
-        assert!(!directory.path().join(".sharp/src/Demo/Broken.sharpc").exists(), "{suppression}");
+        assert!(!directory.path().join(".sharp/current/src/Demo/Broken.sharpc").exists(), "{suppression}");
     }
 }
 
@@ -1742,7 +1742,7 @@ fn compile_takes_a_function_value_for_an_extern_callable_parameter_and_refuses_c
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert!(output.status.success(), "{printed}");
-    assert!(root.join(".sharp/app/Posts/Saving.sharpc").exists(), "{printed}");
+    assert!(root.join(".sharp/current/app/Posts/Saving.sharpc").exists(), "{printed}");
 }
 
 /// Spec section 6: a getter never writes `this`, and `compile` refuses the file that breaks the rule, while it still
@@ -1761,8 +1761,8 @@ fn compile_refuses_a_file_whose_getter_writes_this() {
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
     assert!(printed.contains("Getter `read` changes `this.reads`. A getter never writes `this`."), "{printed}");
-    assert!(!directory.path().join(".sharp/app/Shop/Label.sharpc").exists());
-    assert!(directory.path().join(".sharp/app/Stubs/Stripe.sharpc").exists(), "{printed}");
+    assert!(!directory.path().join(".sharp/current/app/Shop/Label.sharpc").exists());
+    assert!(directory.path().join(".sharp/current/app/Stubs/Stripe.sharpc").exists(), "{printed}");
 }
 
 /// The members of `App\Shop\Stop` its tests call: `halt`, which never returns, and `say` and `size`, which do. The file
@@ -1789,7 +1789,7 @@ fn compile_refuses_a_file_with_a_statement_that_never_runs() {
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
     assert!(printed.contains("This statement never runs, because line 9 ends the block."), "{printed}");
-    assert!(!root.join(".sharp/app/Shop/Stop.sharpc").exists());
+    assert!(!root.join(".sharp/current/app/Shop/Stop.sharpc").exists());
 }
 
 /// A condition that never finishes is refused with the code to write in place of its `if` or `for … of`, and the file
@@ -1847,7 +1847,7 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(0), "{printed}");
-    assert!(root.join(".sharp/app/Shop/Stop.sharpc").exists());
+    assert!(root.join(".sharp/current/app/Shop/Stop.sharpc").exists());
 }
 
 /// Spec section 23 reads a plain PHP constant through its namespace, so `mago compile` writes a file that reads the
@@ -1883,7 +1883,7 @@ fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(0), "{printed}");
-    assert!(root.join(".sharp/app/Shop/Reads.sharpc").exists());
+    assert!(root.join(".sharp/current/app/Shop/Reads.sharpc").exists());
 
     for (read, status) in [
         ("Pdf.measure", 0),
@@ -1980,8 +1980,8 @@ fn compile_refuses_a_file_whose_law_calls_plain_php_with_an_effect() {
         ),
         "{printed}"
     );
-    assert!(!root.join(".sharp/app/Shop/Refund.sharpc").exists());
-    assert!(root.join(".sharp/app/Stubs/Billing.sharpc").exists(), "{printed}");
+    assert!(!root.join(".sharp/current/app/Shop/Refund.sharpc").exists());
+    assert!(root.join(".sharp/current/app/Stubs/Billing.sharpc").exists(), "{printed}");
 }
 
 /// A `set` that empties its `List` with `field = []` and adds to it again, as php-sharp's `Accessors.sharp` does,
@@ -2003,7 +2003,7 @@ fn compile_writes_a_list_property_whose_set_empties_and_refills_it() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(0), "{printed}");
-    assert!(root.join(".sharp/app/Store/Product.sharpc").is_file(), "{printed}");
+    assert!(root.join(".sharp/current/app/Store/Product.sharpc").is_file(), "{printed}");
 }
 
 #[test]

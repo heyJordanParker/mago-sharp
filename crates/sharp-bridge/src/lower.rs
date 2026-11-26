@@ -9,6 +9,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::is_sealed_class;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::Member;
+use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::metadata::module::ModuleKind;
@@ -1319,10 +1320,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             let fields = if parses { self.types.struct_parse_fields(word(self.class)) } else { Vec::new() };
             for field in fields {
-                if !self.types.has_property(word(self.class), field.name) {
+                if !self.types.has_property(field.declaring, field.name) {
                     continue;
                 }
-                let mut value = self.this_property(span, field.name);
+                let mut value = self.field_read(span, &field);
                 if Types::holds_secret(field.r#type) {
                     let mut path: Vec<u8> =
                         self.class.iter().map(|&byte| if byte == b'\\' { b'.' } else { byte }).collect();
@@ -1333,7 +1334,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 let write = self.json_write(span, &json, field.key, value);
                 statements.push(if field.omits_null {
-                    let held = self.this_property(span, field.name);
+                    let held = self.field_read(span, &field);
                     let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
                     let present = self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[held, null]);
 
@@ -1385,6 +1386,53 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         ))
     }
 
+    /// The value of the stored `field` of `$this`, read in the scope of the class that declares it: `$this->name` for
+    /// one the class being lowered declares, and for one an ancestor declares, a parent's private property included,
+    /// PHP's read in another class's scope, a closure bound to it:
+    /// `\Closure::bind(static fn($stored) => $stored->name, null, 'App\Base')($this)`.
+    fn field_read(&mut self, span: Span, field: &ParsedField<'_>) -> u32 {
+        let Some(declaring) = self.declaring_name(field) else {
+            return self.this_property(span, field.name);
+        };
+        let line = self.line(span);
+        let name = self.string(0, line, b"stored");
+        let parameter = self.node(SHARP_AST_PARAM, 0, line, &[NULL, name, NULL, NULL, NULL, NULL]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
+        let stored = self.variable(span, b"stored");
+        let property = self.string(0, line, field.name);
+        let read = self.node(SHARP_AST_PROP, 0, line, &[stored, property]);
+        let reader = self.declaration(
+            SHARP_AST_ARROW_FUNC,
+            ZEND_ACC_STATIC,
+            span,
+            span,
+            b"",
+            &[parameters, NULL, read, NULL, NULL],
+        );
+        let closure = self.string(ZEND_NAME_FQ, line, b"Closure");
+        let bind = self.string(0, line, b"bind");
+        let unbound = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+        let scope = self.string(0, line, declaring.as_bytes());
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[reader, unbound, scope]);
+        let bound = self.node(SHARP_AST_STATIC_CALL, 0, line, &[closure, bind, arguments]);
+        let this = self.variable(span, b"this");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[this]);
+
+        self.node(SHARP_AST_CALL, 0, line, &[bound, arguments])
+    }
+
+    /// The name of the class that declares `field`, as `App\Base`, when it is not the class being lowered.
+    fn declaring_name(&self, field: &ParsedField<'_>) -> Option<String> {
+        let codebase = self.types.codebase();
+        if codebase.class_key(field.declaring) == codebase.class_key(word(self.class)) {
+            return None;
+        }
+
+        codebase
+            .get_class_like(field.declaring)
+            .map(|declaring| declaring.original_name.as_str_lossy().trim_start_matches('\\').to_owned())
+    }
+
     /// `$this->name`.
     fn this_property(&mut self, span: Span, name: &[u8]) -> u32 {
         let line = self.line(span);
@@ -1406,15 +1454,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The `#fields` of the struct or PHP# class being lowered, at `span`, with `members` its declared members, which the
     /// engine's reader calls to build the type, spec section 10: a row per field `struct_parse_fields` gives, of its
-    /// name, its key, its type text, whether the main constructor takes it, and whether a missing key leaves it to its
-    /// default, then, for a field whose declaration writes more than one class or scalar type, those in the order it
-    /// writes them, which a union of them tries in that order. None for a type with a field whose type has no type
-    /// text, a function, which no input holds. No PHP# or plain PHP code can call a method whose name holds `#`.
+    /// name, its key, its type text, whether the main constructor takes it, whether a missing key leaves it to its
+    /// default, and the class that declares it, in whose scope the reader writes it, then, for a field whose
+    /// declaration writes more than one class or scalar type, those in the order it writes them, which a union of them
+    /// tries in that order. None for a type with a field whose type has no type text, a function, which no input holds.
+    /// No PHP# or plain PHP code can call a method whose name holds `#`.
     ///
     /// ```php
     /// public static function '#fields'(): array
     /// {
-    ///     return [['returnUrl', 'return_url', 'string', true, false], ['method', 'method', 'App.Bank|App.Card', true, false, 'App.Card, App.Bank']];
+    ///     return [['returnUrl', 'return_url', 'string', true, false, 'App\Checkout'], ['method', 'method', 'App.Bank|App.Card', true, false, 'App\Checkout', 'App.Card, App.Bank']];
     /// }
     /// ```
     fn parse_fields(&mut self, members: &Sequence<ClassLikeMember>, span: Span) -> Option<u32> {
@@ -1438,6 +1487,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     |_| {},
                 ),
             ];
+            let declaring = self
+                .declaring_name(field)
+                .unwrap_or_else(|| String::from_utf8_lossy(self.class).trim_start_matches('\\').to_owned());
+            parts.push(self.string(0, line, declaring.as_bytes()));
             let mut order = Vec::new();
             if let Some(hint) = written_hint(members, field.name) {
                 self.written_order(hint, false, &mut order);
