@@ -25445,25 +25445,24 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
 }
 
 /// ```php
-/// return \Sharp\Internal\containsKey(\Sharp\Internal\returned(\Lib\Calc::prices(), null, '', 'Map<int|string, int>', …), 5)
+/// return \Sharp\Internal\containsKey(\Sharp\Internal\returned(\Lib\Calc::prices(), null, '', 'Map<string, int>', …), $key)
 ///     && (($nullsafe#1 = \Sharp\Internal\returned(\Lib\Calc::maybe(), …)) === null ? null
-///         : \Sharp\Internal\containsKey(\is_array($crossing#2 = $nullsafe#1) ? … : $crossing#2, 5)) == true;
+///         : \Sharp\Internal\containsKey(\is_array($crossing#2 = $nullsafe#1) ? … : $crossing#2, $key)) == true;
 /// ```
 ///
 /// Spec section 12: a plain PHP array a `Map` member reads becomes the `\Sharp\Map` first, as it does where a typed
-/// local holds it, null-safe or not, so the member runs on the `Map` and a key keeps its type. Plain PHP's
-/// `array-key` arrives as `int|string`, so the project's `array<array-key, int>` is checked as a `Map<int|string, int>`
-/// and its `Map` takes those type arguments. The call runs once: the hidden local a null-safe link holds it in takes
-/// the result as the call reads it.
+/// local holds it, null-safe or not, so the member runs on the `Map` and a key keeps its type. The project's
+/// `array<string, int>` is checked as a `Map<string, int>`, and its `Map` takes those type arguments. The call runs
+/// once: the hidden local a null-safe link holds it in takes the result as the call reads it.
 #[test]
 fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
     assert_eq!(
         body_in(
-            "bool run()",
-            "        return Calc.prices().has(5) && Calc.maybe()?.has(5) == true;\n",
+            "bool run(string key)",
+            "        return Calc.prices().has(key) && Calc.maybe()?.has(key) == true;\n",
             &[(
                 "src/Lib/Calc.php",
-                "<?php namespace Lib;\nfinal class Calc { /** @return array<array-key, int> */ public static function prices(): array { return []; } /** @return array<array-key, int>|null */ public static function maybe(): ?array { return null; } }",
+                "<?php namespace Lib;\nfinal class Calc { /** @return array<string, int> */ public static function prices(): array { return []; } /** @return array<string, int>|null */ public static function maybe(): ?array { return null; } }",
             )]
         ),
         indoc! {r#"
@@ -25482,9 +25481,10 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
                             ARG_LIST
                           ZVAL null
                           ZVAL ""
-                          ZVAL "Map<int|string, int>"
+                          ZVAL "Map<string, int>"
                           ZVAL "Lib\\Calc::prices()"
-                      ZVAL 5
+                      VAR
+                        ZVAL "key"
                   BINARY_OP [16]
                     CONDITIONAL [1]
                       BINARY_OP [16]
@@ -25500,7 +25500,7 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
                                 ARG_LIST
                               ZVAL null
                               ZVAL ""
-                              ZVAL "Map<int|string, int>?"
+                              ZVAL "Map<string, int>?"
                               ZVAL "Lib\\Calc::maybe()"
                         ZVAL null
                       ZVAL null
@@ -25522,10 +25522,11 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
                               ARG_LIST
                                 VAR
                                   ZVAL "crossing#2"
-                                ZVAL "int|string, int"
+                                ZVAL "string, int"
                             VAR
                               ZVAL "crossing#2"
-                          ZVAL 5
+                          VAR
+                            ZVAL "key"
                     ZVAL true
         "#}
     );

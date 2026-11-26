@@ -2146,6 +2146,20 @@ pub fn get_sharp_received_list(array: &TArray) -> Option<TList> {
     Some(list)
 }
 
+/// Whether `list`, one of the union parts `parts`, is the `List<V>` of plain PHP's `array<V>`, which the union holds
+/// beside its `Map<int|string, V>`, as [`get_sharp_received_list`] reads it. The value keeps the PHP array plain PHP
+/// gave, which PHP's own loop and index write read as one array, a list or a map.
+#[must_use]
+pub fn is_sharp_received_either_list<'part>(list: &TList, mut parts: impl Iterator<Item = &'part TAtomic>) -> bool {
+    list.known_elements.is_none()
+        && parts.any(|atomic| match atomic {
+            TAtomic::Array(map @ TArray::Keyed(_)) => {
+                get_sharp_received_list(map).is_some_and(|either| either.element_type == list.element_type)
+            }
+            _ => false,
+        })
+}
+
 /// `array` as [`get_sharp_received_type`] reads it.
 fn get_sharp_received_array(array: &TArray) -> TArray {
     match array {

@@ -25,6 +25,7 @@ use mago_codex::ttype::get_iterable_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_non_negative_int;
+use mago_codex::ttype::is_sharp_received_either_list;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_reporting::Annotation;
@@ -1001,7 +1002,12 @@ where
                 written_type.to_non_nullable().get_single_array().and_then(TArray::get_key_type).map(Rc::new);
         } else if context.dialect.is_sharp()
             && !through_copy
-            && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+            // Plain PHP's `array<V>`, a `List<V>` or a `Map<int|string, V>`, keeps the PHP array plain PHP gave, which
+            // PHP's own index write writes as one array, so its `List` part takes the write as the `Map` does.
+            && written_type.types.iter().any(|atomic| {
+                matches!(atomic, TAtomic::Array(TArray::List(list))
+                    if !is_sharp_received_either_list(list, written_type.types.iter()))
+            })
             && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
         {
             context.collector.report_with_code(
