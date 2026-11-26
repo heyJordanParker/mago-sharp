@@ -103,6 +103,10 @@ use crate::service::telemetry::SlowestFiles;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod compile;
 
+/// A file's scan in a recheck, with the names it would resolve to a class of its namespace, and the class-likes it
+/// reached.
+type IncrementalScan<Snapshot> = ((FileId, CodebaseMetadata, Snapshot, Vec<mago_word::Word>), WordSet);
+
 /// Per-file cached state for incremental analysis.
 #[derive(Debug, Clone)]
 struct FileState {
@@ -1373,16 +1377,16 @@ impl IncrementalAnalysisService {
         naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| bounding.contains(file_id)));
         let namespace_classes = self.namespace_classes_after(&scans, &current_file_ids);
         if namespace_classes != self.namespace_classes {
-            let renames = |named: &[mago_word::Word]| {
+            let resolves_otherwise = |named: &[mago_word::Word]| {
                 named.iter().any(|name| {
                     namespace_classes.contains(name.as_bytes()) != self.namespace_classes.contains(name.as_bytes())
                 })
             };
             naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| {
-                self.file_states.get(file_id).is_some_and(|state| renames(&state.named_namespace_classes))
+                self.file_states.get(file_id).is_some_and(|state| resolves_otherwise(&state.named_namespace_classes))
             }));
             let (renaming, kept): (Vec<_>, Vec<_>) =
-                std::mem::take(&mut scans).into_iter().partition(|((_, _, _, named), _)| renames(named));
+                std::mem::take(&mut scans).into_iter().partition(|((_, _, _, named), _)| resolves_otherwise(named));
             scans = kept;
             naming_removed.extend(renaming.into_iter().map(|((file_id, _, _, _), _)| file_id));
             self.namespace_classes = namespace_classes;
@@ -2099,7 +2103,7 @@ impl IncrementalAnalysisService {
     /// no read of their own, so only an analysis of every file finds what each file read again, as a cold run does.
     fn namespace_classes_after<Snapshot>(
         &self,
-        scans: &[((FileId, CodebaseMetadata, Snapshot, Vec<mago_word::Word>), WordSet)],
+        scans: &[IncrementalScan<Snapshot>],
         current_file_ids: &HashSet<FileId>,
     ) -> NamespaceClasses {
         let scanned: HashSet<FileId> = scans.iter().map(|((file_id, _, _, _), _)| *file_id).collect();
@@ -2119,7 +2123,7 @@ impl IncrementalAnalysisService {
 
     fn extern_namespaces_changed<Snapshot>(
         &self,
-        scans: &[((FileId, CodebaseMetadata, Snapshot, Vec<mago_word::Word>), WordSet)],
+        scans: &[IncrementalScan<Snapshot>],
         current_file_ids: &HashSet<FileId>,
     ) -> bool {
         let rescanned: HashSet<FileId> = scans
@@ -2162,7 +2166,7 @@ impl IncrementalAnalysisService {
 
     fn codebase_after<Snapshot>(
         &self,
-        scans: &[((FileId, CodebaseMetadata, Snapshot, Vec<mago_word::Word>), WordSet)],
+        scans: &[IncrementalScan<Snapshot>],
         current_file_ids: &HashSet<FileId>,
     ) -> CodebaseMetadata {
         let scanned: HashSet<FileId> = scans.iter().map(|((file_id, _, _, _), _)| *file_id).collect();
@@ -2181,7 +2185,7 @@ impl IncrementalAnalysisService {
 
     fn changed_extensions<Snapshot>(
         &self,
-        scans: &[((FileId, CodebaseMetadata, Snapshot, Vec<mago_word::Word>), WordSet)],
+        scans: &[IncrementalScan<Snapshot>],
         current_file_ids: &HashSet<FileId>,
     ) -> HashSet<mago_word::Word> {
         let names =
