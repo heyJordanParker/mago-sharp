@@ -88,6 +88,12 @@ pub const STARTS_LISTENER: &str = "Sharp\\Internal\\StartsListener";
 /// values have no effects.
 pub const CREATES_ATTRIBUTES: &str = "Sharp\\Internal\\CreatesAttributes";
 
+/// The mark of a property whose value is a member's name from the code, as `Method.name`.
+///
+/// A comparison of it with a string fixed at compile time selects no value from data, spec section 24, since no enum
+/// can declare a member's name, so the checker reads the mark and copies no library class list.
+pub const NAMES_MEMBER: &str = "Sharp\\Internal\\NamesMember";
+
 /// The mark of a method that runs the initial value of a property, as `Property.defaultValue()`.
 ///
 /// A call has the effects of every initial value the program declares that is not constant, spec section 29.

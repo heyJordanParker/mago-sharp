@@ -760,7 +760,7 @@ fn report_collection_selection<A>(
 {
     let selection = format!("`{method}`");
     if is_compile_time_string(context, artifacts, value) {
-        report_selection(context, &selection, receiver, value, None, span);
+        report_selection(context, artifacts, &selection, receiver, value, None, span);
     } else if artifacts.get_expression_type(value).is_some_and(TUnion::has_string)
         && let Expression::Array(literal) = receiver.unparenthesized()
         && !literal.elements.is_empty()
@@ -768,7 +768,7 @@ fn report_collection_selection<A>(
             matches!(element, ArrayElement::Value(element) if is_compile_time_string(context, artifacts, element.value))
         })
     {
-        report_selection(context, &selection, value, receiver, None, span);
+        report_selection(context, artifacts, &selection, value, receiver, None, span);
     }
 }
 
@@ -793,7 +793,7 @@ fn report_text_selection<A>(
         };
     let empty_test = artifacts.get_expression_type(fixed).is_some_and(is_empty_text).then_some("isEmpty");
 
-    report_selection(context, &format!("`{method}`"), compared, fixed, empty_test, span);
+    report_selection(context, artifacts, &format!("`{method}`"), compared, fixed, empty_test, span);
 }
 
 /// `receiver_type` as the collection member `metadata` reads its receiver, spec section 12: a member whose receiver is

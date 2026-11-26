@@ -497,6 +497,14 @@ final class StartsListener {}
 final class CreatesAttributes {}
 
 /**
+ * Marks a standard library property whose value is a member's name from the code, as the `name` of `Method`,
+ * `Property`, `Field`, `Parameter`, `Constant` and `EnumCase` is, so the checker holds a comparison of it with a string
+ * fixed at compile time to no selection from data: no enum can declare a member's name.
+ */
+#[\Attribute(\Attribute::TARGET_PROPERTY | \Attribute::TARGET_PARAMETER)]
+final class NamesMember {}
+
+/**
  * Marks a standard library method that runs the initial value of a property, as `Property.defaultValue()` and
  * `Field.defaultValue()` do, so a call has the effects of every initial value the program declares that is not
  * constant, and none for a constant one.

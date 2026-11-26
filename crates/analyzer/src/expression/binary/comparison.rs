@@ -22,15 +22,18 @@ use mago_codex::ttype::holds_equatable_interface;
 use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
+use mago_names::NAMES_MEMBER;
 use mago_names::binding::php_operator_name;
 use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
@@ -1415,7 +1418,7 @@ fn report_compile_time_selection<A>(
     });
     let span = if is_pattern { operator } else { binary.span() };
 
-    report_selection(context, &selection, compared, fixed, empty_test, span);
+    report_selection(context, artifacts, &selection, compared, fixed, empty_test, span);
 }
 
 /// Whether `value` is the empty text alone, `""`.
@@ -1427,9 +1430,10 @@ pub(crate) fn is_empty_text(value: &TUnion) -> bool {
 /// fixed at compile time or a collection literal of them, so it selects one of a closed set of values, and a closed set
 /// of values is a backed enum. The error, at `span`, names both sides. Where `fixed` is `""` and `compared` is text, it
 /// tests for the empty text, and the error names `empty_test`, as `isEmpty`. Two strings from data compare as text,
-/// and a library is exempt.
+/// a member's name from the code, as `method.name`, is no data, and a library is exempt.
 pub(crate) fn report_selection<A>(
     context: &mut Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
     selection: &str,
     compared: &Expression<'_>,
     fixed: &Expression<'_>,
@@ -1438,7 +1442,8 @@ pub(crate) fn report_selection<A>(
 ) where
     A: Arena,
 {
-    if !context.dialect.is_sharp() || !context.source_file.is_project {
+    if !context.dialect.is_sharp() || !context.source_file.is_project || reads_member_name(context, artifacts, compared)
+    {
         return;
     }
     // A pattern reads the value its `match` tests through a variable that spans nothing: the local itself, or the
@@ -1469,6 +1474,33 @@ pub(crate) fn report_selection<A>(
     };
 
     context.collector.report_with_code(IssueCode::InvalidOperand, issue.with_annotation(Annotation::primary(span)));
+}
+
+/// Whether `compared` reads a property the standard library marks `NamesMember`, as `method.name` of each value a
+/// `Method` or a `Method?` holds: a member's name from the code, which no enum can declare (spec section 25).
+fn reads_member_name<A>(context: &Context<'_, '_, A>, artifacts: &AnalysisArtifacts, compared: &Expression<'_>) -> bool
+where
+    A: Arena,
+{
+    let (object, property) = match compared.unparenthesized() {
+        Expression::Access(Access::Property(access)) => (access.object, &access.property),
+        Expression::Access(Access::NullSafeProperty(access)) => (access.object, &access.property),
+        _ => return false,
+    };
+    let (ClassLikeMemberSelector::Identifier(name), Some(object)) = (property, artifacts.get_expression_type(object))
+    else {
+        return false;
+    };
+    let property = word(&[b"$".as_slice(), name.value].concat());
+    let mut classes = object.types.iter().filter(|atomic| !atomic.is_null()).peekable();
+
+    classes.peek().is_some()
+        && classes.all(|atomic| {
+            matches!(atomic, TAtomic::Object(TObject::Named(class)) if context
+                .codebase
+                .get_declaring_property(class.name, property)
+                .is_some_and(|declared| declared.has_attribute(context.codebase, word(NAMES_MEMBER))))
+        })
 }
 
 pub(crate) fn report_sharp_refusal<A>(
