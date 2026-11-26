@@ -18,6 +18,7 @@ workspace = true
 test = false
 
 [dependencies]
+libc = { workspace = true }
 sharp = { workspace = true }
 
 [build-dependencies]

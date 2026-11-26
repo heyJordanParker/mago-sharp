@@ -3875,6 +3875,7 @@ mod tests {
     use mago_codex::ttype::get_int;
     use mago_codex::ttype::get_mixed;
     use mago_codex::ttype::get_string;
+    use mago_extension::Clock;
     use mago_extension::WorkerError;
     use mago_span::Position;
 
@@ -3955,6 +3956,7 @@ mod tests {
                 host: "acme".to_owned(),
                 running: running.map(ToString::to_string),
                 duration: Duration::from_secs(30),
+                clock: Clock::Cpu,
             })
         }
     }
@@ -4266,7 +4268,7 @@ mod tests {
                 "the hooks of src/Route.php",
             ]
             .map(|running| Some(format!(
-                "external analyzer worker failed: extension host `acme` made no progress for 30000 ms in {running}"
+                "external analyzer worker failed: extension host `acme` made no progress for 30000 ms of CPU time in {running}"
             )))
         );
     }

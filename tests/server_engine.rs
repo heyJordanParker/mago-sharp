@@ -55,6 +55,7 @@ fn server_with(repository: &Path, database: Database<'static>, analyzer_settings
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-server-worker.php"),
         common::NO_DEADLINE,
+        common::NO_DEADLINE,
         &[],
     );
     let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)

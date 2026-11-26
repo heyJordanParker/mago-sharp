@@ -1772,16 +1772,17 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     }
 
     /// The configuration of a project at `root` of `files`, as [`project`] builds it, with an extension host `counter` of
-    /// [`HOST_COUNTING_ITS_WORKERS`] with a deadline of 15 s, which logs to `host.log`, and never finishes the
-    /// after-analysis hooks of the proof `hangs_in` names. Each proof's hooks finish in under 1 s, so a loaded machine
-    /// that stops one for seconds still lets it finish.
+    /// [`HOST_COUNTING_ITS_WORKERS`] with a deadline of 1.5 s of CPU time and so a backstop of 15 s of wall time, which
+    /// logs to `host.log`, and never finishes the after-analysis hooks of the proof `hangs_in` names, where it sleeps
+    /// until the backstop stops it. Each proof's hooks finish in under 1 s, so a loaded machine that stops one for
+    /// seconds still lets it finish.
     fn hosted(root: &Path, files: &[(String, String)], hangs_in: Option<&str>) -> Configuration {
         project(root, files);
         std::fs::create_dir_all(root.join("tools")).unwrap();
         std::fs::write(root.join("tools/host.php"), HOST_COUNTING_ITS_WORKERS).unwrap();
         let mut toml = std::fs::read_to_string(root.join("mago.toml")).unwrap();
         toml.push_str(&format!(
-            "\n[extension-hosts.counter]\nfile = \"tools/host.php\"\nrequest-timeout-ms = 15000\nenvironment = {{ HOST_LOG = {:?}{} }}\n",
+            "\n[extension-hosts.counter]\nfile = \"tools/host.php\"\nrequest-timeout-ms = 1500\nenvironment = {{ HOST_LOG = {:?}{} }}\n",
             root.join("host.log").display().to_string(),
             hangs_in.map(|proof| format!(", HANGS_IN = {proof:?}")).unwrap_or_default(),
         ));
@@ -1885,7 +1886,7 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     }
 
     /// The error the host of [`hosted`] gives when its after-analysis hook makes no progress.
-    const TIMEOUT: &str = "Orchestrator error: Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `counter` made no progress for 15000 ms in the after-analysis hooks of plugin `counts-workers`, in the hook `CountsWorkers`";
+    const TIMEOUT: &str = "Orchestrator error: Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `counter` made no progress for 15000 ms of wall time in the after-analysis hooks of plugin `counts-workers`, in the hook `CountsWorkers`";
 
     /// Once a run writes its files, fresh hosts that load them prove the project again. When that proof can't finish,
     /// the files are written and git holds their plain PHP, so the run still names them, logs the error, and fails as
