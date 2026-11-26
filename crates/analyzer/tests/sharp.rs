@@ -13644,6 +13644,94 @@ fn any_code_extends_class_and_takes_a_ref_receiver_and_an_extension_reaches_its_
     assert_eq!(compile_errors(calls, &[order, extensions]), Vec::<String>::new());
 }
 
+/// The help of each issue of `analyzed`, analyzed with `others`, in the order of its issues.
+fn helps_of(analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]) -> Vec<String> {
+    analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().filter_map(|issue| issue.help).collect()
+}
+
+/// Spec section 2: a parameter never changes, so a change to the list, map or set it holds, by a `ref` member call or
+/// an index write, is refused: its caller would never see it. The help names a `ref` extension or a changed copy.
+#[test]
+fn changing_a_collection_parameter_is_an_error() {
+    let indexes = (
+        "src/Demo/Indexes.sharp",
+        "namespace Demo;\n\npublic class Indexes\n{\n    public void add(Map<string, List<string>> index, string name)\n    {\n        index[name] = [name];\n    }\n\n    public void tag(List<string> tags)\n    {\n        tags.add(\"x\");\n    }\n\n    public void mark(Set<string> marks)\n    {\n        marks.add(\"x\");\n    }\n}\n",
+    );
+
+    assert_eq!(
+        reported(indexes, &[]),
+        [
+            "7:9 parameter-change `index` is a parameter, so it never changes, and its caller never sees this write.",
+            "12:9 parameter-change `tags` is a parameter, so it never changes, and its caller never sees this write.",
+            "17:9 parameter-change `marks` is a parameter, so it never changes, and its caller never sees this write.",
+        ]
+    );
+    assert_eq!(
+        helps_of(indexes, &[]),
+        [
+            "Change the caller's map with a `ref` extension, or return a changed copy.",
+            "Change the caller's list with a `ref` extension, or return a changed copy.",
+            "Change the caller's set with a `ref` extension, or return a changed copy.",
+        ]
+    );
+}
+
+/// Spec section 26: an extension that takes its receiver by `ref` changes its caller's collection, so a change to the
+/// receiver compiles, and the caller reads the change.
+#[test]
+fn a_ref_extension_receiver_changes_its_callers_collection() {
+    let extensions = (
+        "src/Demo/Extensions.sharp",
+        "namespace Demo;\n\npublic static class Extensions\n{\n    extension(ref Map<string, List<string>> index)\n    {\n        public void addName(string name)\n        {\n            index[name] = [name];\n        }\n    }\n}\n",
+    );
+    let names = (
+        "src/Demo/Names.sharp",
+        "namespace Demo;\n\npublic class Names\n{\n    public Map<string, List<string>> run(string name)\n    {\n        Map<string, List<string>> index = [:];\n        index.addName(name);\n        return index;\n    }\n}\n",
+    );
+
+    assert_eq!(compile_errors(extensions, &[names]), Vec::<String>::new());
+    assert_eq!(compile_errors(names, &[extensions]), Vec::<String>::new());
+}
+
+/// Spec section 2: a `const` local never changes, so a change to the list, map or set it holds is refused, as its
+/// reassignment is. The help declares it with `let`.
+#[test]
+fn changing_a_const_local_collection_is_an_error() {
+    let seen = (
+        "src/Demo/Seen.sharp",
+        "namespace Demo;\n\npublic class Seen\n{\n    public int count()\n    {\n        const seen = [1];\n        seen.add(2);\n        const index = [\"a\": 1];\n        index[\"b\"] = 2;\n        return seen.count() + index.count();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        reported(seen, &[]),
+        [
+            "8:9 const-local-change `seen` is `const`, so the list it holds never changes.",
+            "10:9 const-local-change `index` is `const`, so the map it holds never changes.",
+        ]
+    );
+    assert_eq!(helps_of(seen, &[]), ["Declare it with `let` to change it.", "Declare it with `let` to change it."]);
+}
+
+/// Spec section 2: a `let` or typed local changed after its declaration, by a reassignment, a `ref` member call or an
+/// index write, and read nowhere in its function is refused at its last change, since the change goes nowhere. A
+/// lambda that reads a changed local reads it, and a lambda that changes a local it captures counts as a read, since
+/// the local outlives the lambda.
+#[test]
+fn a_local_changed_and_never_read_is_an_error() {
+    let copies = (
+        "src/Demo/Copies.sharp",
+        "namespace Demo;\n\npublic class Copies\n{\n    public int run()\n    {\n        const seen = [1];\n        let copy = seen;\n        copy.add(3);\n        let count = 0;\n        count = 1;\n        let total = [1];\n        total.add(2);\n        const size = () => total.count();\n        let log = [1];\n        const append = () => log.add(2);\n        append();\n        return seen.count() + size();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        reported(copies, &[]),
+        [
+            "9:9 write-only-local `copy` is changed here and never read, so the change is lost.",
+            "11:9 write-only-local `count` is changed here and never read, so the change is lost.",
+        ]
+    );
+}
+
 /// Spec sections 27 and 29 refuse a superglobal, and a refused file never runs, so `mago compile` prints the refusal
 /// alone on its line, and none of the analyzer's errors about the superglobal read as a constant.
 #[test]

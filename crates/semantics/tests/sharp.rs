@@ -1178,6 +1178,22 @@ fn incrementing_or_decrementing_a_const_local_is_an_error() {
     );
 }
 
+/// Spec section 2: a parameter never changes, as a `const` local never does, so a reassignment, `??=`, `++` or `--`
+/// of one is refused.
+#[test]
+fn reassigning_a_parameter_is_an_error() {
+    let code = leak(method("        extra = extra + 1;\n        extra++;\n        --extra;\n        return extra;\n"));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:9 `extra` is a parameter, so it never changes.",
+            "8:9 `extra` is a parameter, so it never changes.",
+            "9:11 `extra` is a parameter, so it never changes.",
+        ]
+    );
+}
+
 #[test]
 fn redeclaring_a_name_an_enclosing_block_declares_is_an_error() {
     let code = leak(method(
