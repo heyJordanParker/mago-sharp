@@ -423,7 +423,7 @@ codegen-units = 256
 # mago-syntax, mago-linter and mago-sharp-lean, since sharp/bin/build-mago deletes every unit no build named (#730).
 [profile.dev]
 debug = 'line-tables-only'
-opt-level = 1
+opt-level = 0
 lto = 'off'
 panic = 'unwind'
 incremental = false
