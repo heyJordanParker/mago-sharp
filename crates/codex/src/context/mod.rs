@@ -25,6 +25,22 @@ impl<'ctx> ScopeContext<'ctx> {
         Self { reference_origin, function_like: None, class_like: None, property_hook: None, is_static: true }
     }
 
+    /// The scope of a lambda written in this scope, whose metadata is `function_like`.
+    ///
+    /// It keeps this scope's reference origin and class-like. It is static when this scope is, or when the lambda is
+    /// `written_static`, so a lambda in a static method, at any depth, has no `$this`, as the method has none.
+    #[inline]
+    #[must_use]
+    pub const fn lambda(&self, function_like: &'ctx FunctionLikeMetadata, written_static: bool) -> Self {
+        Self {
+            reference_origin: self.reference_origin,
+            function_like: Some(function_like),
+            class_like: self.class_like,
+            property_hook: None,
+            is_static: self.is_static || written_static,
+        }
+    }
+
     /// Returns the symbol or file from which references in this scope originate.
     #[inline]
     #[must_use]

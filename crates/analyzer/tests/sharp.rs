@@ -7638,6 +7638,24 @@ fn a_lambda_called_with_a_wrong_argument_or_returning_a_wrong_type_is_an_error_a
     assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/Report.php", php), &[])));
 }
 
+/// Spec section 4: a static method has no `this`, and neither has a lambda written in it, at any depth, whatever its
+/// body, and passed to a call too, so each read of `this` gets the refusal a read in the method's own body gets. A
+/// lambda in an instance method still reads `this`.
+#[test]
+fn a_lambda_in_a_static_method_cannot_read_this() {
+    let sharp = "namespace Demo;\n\npublic class Probe\n{\n    private string prefix = \"probe-\";\n\n    public static string expression()\n    {\n        const make = () => this.prefix;\n        return make();\n    }\n\n    public static string block()\n    {\n        const make = () => { return this.prefix; };\n        return make();\n    }\n\n    public static string nested()\n    {\n        const make = () => () => this.prefix;\n        return make()();\n    }\n\n    public static string passed() => Probe.apply((string item) => this.prefix + item);\n\n    public string instance()\n    {\n        const make = () => this.prefix;\n        return make();\n    }\n\n    private static string apply(Function<string(string)> make) => make(\"x\");\n}\n";
+
+    assert_eq!(
+        reported(("src/Demo/Probe.sharp", sharp), &[]),
+        [
+            "9:28 undefined-variable Undefined variable: `this`.",
+            "15:37 undefined-variable Undefined variable: `this`.",
+            "21:34 undefined-variable Undefined variable: `this`.",
+            "25:67 undefined-variable Undefined variable: `this`.",
+        ]
+    );
+}
+
 #[test]
 fn a_lambda_passed_to_php_takes_its_parameter_types_from_the_php_signature_as_in_php() {
     let numbers = "<?php\n\nnamespace Lib;\n\nfinal class Numbers\n{\n    /**\n     * @param \\Closure(int): bool $keep\n     */\n    public static function count(\\Closure $keep): int\n    {\n        return $keep(1) ? 1 : 0;\n    }\n}\n";
