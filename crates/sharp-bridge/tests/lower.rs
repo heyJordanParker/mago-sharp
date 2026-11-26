@@ -34507,6 +34507,9 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
                         ARRAY_ELEM
                           ZVAL false
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Ticket"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -34524,6 +34527,9 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
                           null
                         ARRAY_ELEM
                           ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Ticket"
                           null
                       null
                     ARRAY_ELEM
@@ -34543,6 +34549,9 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
                         ARRAY_ELEM
                           ZVAL true
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Ticket"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -34560,6 +34569,9 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Ticket"
                           null
                       null
               null
@@ -34707,6 +34719,9 @@ fn parse_reads_each_field_as_its_type() {
                         ARRAY_ELEM
                           ZVAL false
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -34724,6 +34739,9 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
                           null
                       null
                     ARRAY_ELEM
@@ -34743,6 +34761,9 @@ fn parse_reads_each_field_as_its_type() {
                         ARRAY_ELEM
                           ZVAL false
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -34760,6 +34781,9 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
                           null
                       null
                     ARRAY_ELEM
@@ -34779,6 +34803,9 @@ fn parse_reads_each_field_as_its_type() {
                         ARRAY_ELEM
                           ZVAL false
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -34796,6 +34823,9 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
                           null
                       null
                     ARRAY_ELEM
@@ -34815,6 +34845,9 @@ fn parse_reads_each_field_as_its_type() {
                         ARRAY_ELEM
                           ZVAL false
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -34832,6 +34865,9 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
                           null
                         ARRAY_ELEM
                           ZVAL "int, string"
@@ -34855,6 +34891,9 @@ fn parse_reads_each_field_as_its_type() {
                           ZVAL false
                           null
                         ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
+                        ARRAY_ELEM
                           ZVAL "App.Address, App.Point"
                           null
                       null
@@ -34874,6 +34913,9 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
                           null
                         ARRAY_ELEM
                           ZVAL "App.Point, App.Address"
@@ -34897,6 +34939,9 @@ fn parse_reads_each_field_as_its_type() {
                           ZVAL false
                           null
                         ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
+                        ARRAY_ELEM
                           ZVAL "App.Point, App.Address"
                           null
                       null
@@ -34917,6 +34962,9 @@ fn parse_reads_each_field_as_its_type() {
                         ARRAY_ELEM
                           ZVAL false
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -34934,6 +34982,9 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
                           null
                       null
                     ARRAY_ELEM
@@ -34953,6 +35004,9 @@ fn parse_reads_each_field_as_its_type() {
                         ARRAY_ELEM
                           ZVAL false
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -34970,6 +35024,9 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
                           null
                       null
                     ARRAY_ELEM
@@ -34989,6 +35046,9 @@ fn parse_reads_each_field_as_its_type() {
                         ARRAY_ELEM
                           ZVAL false
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -35006,6 +35066,9 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
                           null
                       null
                     ARRAY_ELEM
@@ -35025,6 +35088,9 @@ fn parse_reads_each_field_as_its_type() {
                         ARRAY_ELEM
                           ZVAL false
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -35043,6 +35109,9 @@ fn parse_reads_each_field_as_its_type() {
                         ARRAY_ELEM
                           ZVAL false
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -35060,6 +35129,9 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
                           null
                         ARRAY_ELEM
                           ZVAL "App.Point, App.Address"
@@ -35082,6 +35154,9 @@ fn parse_reads_each_field_as_its_type() {
                         ARRAY_ELEM
                           ZVAL true
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -35100,6 +35175,9 @@ fn parse_reads_each_field_as_its_type() {
                         ARRAY_ELEM
                           ZVAL true
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
                       null
                     ARRAY_ELEM
                       ARRAY [3]
@@ -35117,6 +35195,79 @@ fn parse_reads_each_field_as_its_type() {
                           null
                         ARRAY_ELEM
                           ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Order"
+                          null
+                      null
+              null
+              null
+        "##}
+    );
+}
+
+/// Spec section 10: a class's stored form holds every stored property it inherits from a PHP# parent after its own,
+/// so `#fields` lists the main constructor's `label`, then the parent's `key`, which `decode` reads and `Json.encode`
+/// writes.
+#[test]
+fn fields_list_a_stored_property_a_class_inherits_from_its_php_sharp_parent() {
+    let lowered = Lowered::with(
+        "namespace App;\n\ninternal final class DecodeChild : DecodeParent\n{\n    internal DecodeChild(internal string label { get; }) { }\n}\n",
+        &[(
+            "src/App/DecodeParent.sharp",
+            "namespace App;\n\ninternal abstract class DecodeParent\n{\n    internal string key { get; set; } = \"\";\n}\n",
+        )],
+    );
+
+    assert_eq!(
+        lowered.declared("#fields"),
+        indoc! {r##"
+            METHOD [17] "#fields" @3-3
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "label"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "label"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "string"
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\DecodeChild"
+                          null
+                      null
+                    ARRAY_ELEM
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "key"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "key"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "string"
+                          null
+                        ARRAY_ELEM
+                          ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL true
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\DecodeParent"
                           null
                       null
               null
@@ -35354,6 +35505,9 @@ fn a_class_parses_as_a_struct_does() {
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Note"
                           null
                       null
               null
@@ -36585,6 +36739,9 @@ fn a_field_of_a_generic_type_reads_with_its_type_arguments() {
                         ARRAY_ELEM
                           ZVAL false
                           null
+                        ARRAY_ELEM
+                          ZVAL "App\\Wrapped"
+                          null
                       null
               null
               null
@@ -36966,6 +37123,9 @@ fn a_family_reads_and_writes_a_variant_by_its_name() {
                           null
                         ARRAY_ELEM
                           ZVAL false
+                          null
+                        ARRAY_ELEM
+                          ZVAL "App\\Holder"
                           null
                       null
               null
