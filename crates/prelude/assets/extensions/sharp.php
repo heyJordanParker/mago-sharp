@@ -748,12 +748,33 @@ function enumBackingType(string $type): ?string {}
 function makeGenericType(string $type, array $arguments): string {}
 
 /**
- * The cases of the enum the class value `$type` names, in the order they are declared, none for a class value that
- * names no enum. The standard library's `Class<T>.enumCases()` makes an `EnumCase` of each.
+ * An object of the class the class value `$case` names, the standard library's `EnumCase`, for each case of the enum the
+ * class value `$type` names, in the order they are declared, none for a class value that names no enum, which the
+ * standard library's `Class<T>.enumCases()` gives.
  *
- * @return list<\UnitEnum>
+ * @template T
+ *
+ * @param class-string<T> $case
+ *
+ * @return list<T>
  */
-function enumCases(string $type): array {}
+function enumCases(string $type, string $case): array {}
+
+/**
+ * A new object of each attribute of the class the class value `$attribute` names, or of a class that extends or
+ * implements it, on the declaration `$kind` of the class value `$type`: "class", the method `$name` for "method", its
+ * parameter at `$position` for "parameter", the property or field `$name` for "property", and the constant or enum
+ * case `$name` for "constant". Each member's `attributes<T>()` of the standard library gives them.
+ *
+ * @template T
+ *
+ * @param class-string<T> $attribute
+ *
+ * @return list<T>
+ *
+ * @throws \Error
+ */
+function attributes(string $type, string $kind, string $name, int $position, string $attribute): array {}
 
 /**
  * The constants of the class the class value `$type` names, its own first and then those it inherits, in the order they
