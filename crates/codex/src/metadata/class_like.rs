@@ -163,6 +163,9 @@ pub struct ParsedField<'codebase> {
     pub has_default: bool,
     /// Whether the main constructor takes the field, rather than a write after it runs.
     pub is_parameter: bool,
+    /// The class that declares the field's property, whose scope reads and writes it, as a `Field` names it: the class
+    /// that declares the main constructor for a parameter.
+    pub declaring: Word,
     /// The span of the field's name, where the codex has one.
     pub span: Option<Span>,
 }
