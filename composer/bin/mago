@@ -1,8 +1,9 @@
 #!/bin/sh
 # Runs this platform's mago release binary, composer/bin/<target triple>/mago, with every argument, so one vendor/ serves
-# every platform it is mounted on and no start runs PHP. php-sharp-composer's plugin installs the installing platform's
-# binary and writes the release's version to composer/bin/version. A platform whose binary is missing downloads it once
-# here, checked against the SHA-256 the package pins in composer/sha256sums.txt, as the plugin checks it.
+# every platform it is mounted on and no start runs PHP. The release's version is composer/bin/version, which the
+# release commits into the package beside composer/sha256sums.txt, and php-sharp-composer's plugin, which installs the
+# installing platform's binary, writes too. A platform whose binary is missing downloads it once here, checked against
+# the SHA-256 the package pins in composer/sha256sums.txt, as the plugin checks it.
 set -eu
 self=$0
 while [ -L "$self" ]; do
@@ -36,10 +37,6 @@ if [ -x "$binary" ]; then
   exec "$binary" "$@"
 fi
 
-if [ ! -f "$bin/version" ]; then
-  echo "mago's binary is not installed: require heyjordanparker/php-sharp-composer and allow its plugin, then run \`composer install\`." >&2
-  exit 1
-fi
 if [ "$triple" != aarch64-apple-darwin ] && command -v ldd > /dev/null 2>&1 && ldd --version 2>&1 | grep -q musl; then
   refuse 'musl Linux, such as Alpine: it builds for glibc Linux'
 fi
