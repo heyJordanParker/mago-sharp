@@ -13,9 +13,13 @@ use mago_span::Span;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Assignment;
 use mago_syntax::cst::AssignmentOperator;
+use mago_syntax::cst::Call;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::ExpressionStatement;
+use mago_syntax::cst::MethodCall;
+use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::UnaryPostfix;
@@ -28,8 +32,9 @@ use crate::context::Context;
 /// Spec section 2: a `let` or typed local changed after its declaration, by a reassignment, a `ref` member call or an
 /// index write, and read nowhere in its method is refused at its last change, since the change goes nowhere, as Swift
 /// warns that a variable "was written to, but never read". Any other use of its name reads it: a compound assignment
-/// such as `+=`, `++`, and a lambda that captures it, a change in the lambda included, since the local outlives the
-/// lambda. A `catch` variable keeps its own rules.
+/// such as `+=`, `++`, a `ref` member call whose value the code uses, as Swift counts a mutating call as a read and a
+/// write, and a lambda that captures it, a change in the lambda included, since the local outlives the lambda. A
+/// `catch` variable keeps its own rules.
 pub(crate) fn check_write_only_locals<'arena, A>(context: &mut Context<'_, 'arena, A>, program: &Program<'arena>)
 where
     A: Arena,
@@ -40,6 +45,8 @@ where
         lambdas: Vec::new(),
         reassigned: HashSet::default(),
         compound: HashSet::default(),
+        called: HashSet::default(),
+        called_alone: HashSet::default(),
         caught: HashSet::default(),
         locals: HashMap::default(),
     };
@@ -76,6 +83,10 @@ struct LocalUses<'names, 'arena> {
     /// The names a compound assignment, such as `+=` or `??=`, or `++` or `--` writes, at the root of any index,
     /// which each reads.
     compound: HashSet<Span>,
+    /// The names a method is called on, at the root of any index.
+    called: HashSet<Span>,
+    /// The names a method is called on by a statement of its own, whose value the code drops.
+    called_alone: HashSet<Span>,
     /// The declaration of each `catch` variable.
     caught: HashSet<Span>,
     /// Each `let` local the code uses, by the start of its declaration.
@@ -142,6 +153,33 @@ impl<'ast, 'arena> Walker<'ast, 'arena, LocalUses<'_, 'arena>> for LocalUseWalke
         }
     }
 
+    fn walk_in_statement_expression(
+        &self,
+        statement: &'ast ExpressionStatement<'arena>,
+        uses: &mut LocalUses<'_, 'arena>,
+    ) {
+        let object = match statement.expression.unparenthesized() {
+            Expression::Call(Call::Method(call)) => call.object,
+            Expression::Call(Call::NullSafeMethod(call)) => call.object,
+            _ => return,
+        };
+        if let Some(name) = indexed_name(object) {
+            uses.called_alone.insert(name.span());
+        }
+    }
+
+    fn walk_in_method_call(&self, call: &'ast MethodCall<'arena>, uses: &mut LocalUses<'_, 'arena>) {
+        if let Some(name) = indexed_name(call.object) {
+            uses.called.insert(name.span());
+        }
+    }
+
+    fn walk_in_null_safe_method_call(&self, call: &'ast NullSafeMethodCall<'arena>, uses: &mut LocalUses<'_, 'arena>) {
+        if let Some(name) = indexed_name(call.object) {
+            uses.called.insert(name.span());
+        }
+    }
+
     fn walk_in_constant_access(&self, constant_access: &'ast ConstantAccess<'arena>, uses: &mut LocalUses<'_, 'arena>) {
         let Some(Binding::Local(local @ Local { kind: LocalKind::Let, .. })) =
             uses.names.binding(&constant_access.name)
@@ -155,9 +193,11 @@ impl<'ast, 'arena> Walker<'ast, 'arena, LocalUses<'_, 'arena>> for LocalUseWalke
         let span = constant_access.span();
         let declared = local.declaration.start.offset;
         let captured = uses.lambdas.iter().any(|&lambda| declared < lambda);
+        let value_used = uses.called.contains(&span) && !uses.called_alone.contains(&span);
         let changes = (uses.reassigned.contains(&span) || uses.collection_changes.contains(&span))
             && !uses.compound.contains(&span)
-            && !captured;
+            && !captured
+            && !value_used;
 
         let local_use = uses.locals.entry(declared).or_insert(LocalUse { local, read: false, last_change: None });
         if !changes {

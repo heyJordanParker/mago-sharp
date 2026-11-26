@@ -6585,7 +6585,7 @@ fn check_const_write(target: &Expression, write: &str, written: Written<'_, '_>,
                 Issue::error(format!("`{name}` is a parameter, so it never changes."))
                     .with_annotation(Annotation::primary(target.span()).with_message("Changed here."))
                     .with_annotation(Annotation::secondary(local.declaration).with_message("Declared here."))
-                    .with_help(format!("Declare a local: `let <name> = {value};`")),
+                    .with_help(format!("Declare a local: `let changed = {value};`")),
             );
         }
         _ => {}
