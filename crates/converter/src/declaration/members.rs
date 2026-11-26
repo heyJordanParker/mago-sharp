@@ -368,6 +368,12 @@ impl Converter<'_, '_> {
             PropertyHookConcreteBody::Block(block) => names.walk_block(block, &mut ()),
             PropertyHookConcreteBody::Expression(body) => names.walk_expression(body.expression, &mut ()),
         });
+        let copies = match body {
+            PropertyHookConcreteBody::Block(_) => copies,
+            PropertyHookConcreteBody::Expression(body) => {
+                self.copying_expression_body(copies, body.arrow, body.semicolon)
+            }
+        };
         self.method = Some(Method {
             name: None,
             returning: (!is_set).then(|| union.clone()),

@@ -1,0 +1,26 @@
+namespace App;
+
+// A `set` hook that changes `$value` copies it into a `let` local first, as a method does with its parameter, and a
+// short `set` becomes a body in braces for it (spec sections 2 and 6).
+internal final class Counter
+{
+    private int count {
+        get; set { let changedValue = value; field = ++changedValue; }
+    } = 0;
+
+    private int twice {
+        get; set {
+            let changedValue = value;
+            changedValue = changedValue * 2;
+            field = changedValue;
+        }
+    } = 0;
+
+    internal int store(int amount)
+    {
+        this.count = amount;
+        this.twice = amount;
+
+        return this.count + this.twice;
+    }
+}

@@ -89,14 +89,21 @@ impl Locals {
 
 /// A parameter the body changes, which PHP changes in the function's own copy of the argument, and a PHP# parameter
 /// never changes, so the body starts by copying it into a `let` local and uses that local instead (spec section 2).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ParameterCopy {
+    /// The parameter's PHP name.
+    name: Vec<u8>,
     /// The parameter's PHP# name.
     parameter: String,
     /// The local's name: `changed` and the parameter's name, as `changedInput`.
     local: String,
-    /// The first place the body changes it.
-    at: Span,
+}
+
+impl ParameterCopy {
+    /// The statement that copies the parameter, as `let changedInput = input;`.
+    fn declaration(&self) -> String {
+        format!("let {} = {};", self.local, self.parameter)
+    }
 }
 
 /// A property `$object->property` a condition tests and binds to `name`, which the code the binding covers reads where
@@ -730,9 +737,76 @@ impl Converter<'_, '_> {
             .cloned()
             .collect();
         let copies = self.parameter_copies(own, &names);
+        self.renamed.extend(copies.iter().map(|copy| (copy.name.clone(), copy.local.clone())));
         self.variables = names.variables.into_iter().chain(parameters.into_iter().map(<[u8]>::to_vec)).collect();
 
         copies
+    }
+
+    /// The copy of each of `parameters`, a lambda's, its body `walk` visits changes. Its local names the parameter in
+    /// the body ahead of any name the method around gives it, until [`Self::forget_copies`].
+    pub(super) fn lambda_copies<'ast, 'arena>(
+        &mut self,
+        parameters: &[Vec<u8>],
+        walk: impl FnOnce(&mut Names<'ast, 'arena>),
+    ) -> Vec<ParameterCopy> {
+        let mut names = Names::default();
+        walk(&mut names);
+        let copies = self.parameter_copies(parameters, &names);
+        for copy in copies.iter().rev() {
+            self.renamed.insert(0, (copy.name.clone(), copy.local.clone()));
+        }
+
+        copies
+    }
+
+    /// Leaves the names [`Self::lambda_copies`] gave `copies` once the lambda is converted.
+    pub(super) fn forget_copies(&mut self, copies: &[ParameterCopy]) {
+        self.renamed.retain(|(name, local)| !copies.iter().any(|copy| copy.name == *name && copy.local == *local));
+    }
+
+    /// Writes the body of an accessor `=> …`, from its `arrow` to its `semicolon`, as a block that starts by copying
+    /// each of `copies`, as `set { let changedValue = value; field = …; }`, and gives the copies a block body keeps.
+    pub(crate) fn copying_expression_body(
+        &mut self,
+        copies: Vec<ParameterCopy>,
+        arrow: Span,
+        semicolon: Span,
+    ) -> Vec<ParameterCopy> {
+        if copies.is_empty() {
+            return copies;
+        }
+        let declarations: Vec<String> = copies.iter().map(ParameterCopy::declaration).collect();
+        self.edits.replace(arrow, format!("{{ {}", declarations.join(" ")));
+        self.edits.insert(semicolon.end.offset, " }");
+
+        Vec::new()
+    }
+
+    /// Starts an arrow function's body, `value`, as a block that copies each of `copies` first, and gives the text
+    /// that ends it once `value` is converted: `(x) => { let changedX = x; return …; }`. A body that writes a copied
+    /// parameter is a statement of its own, after which the block returns the copy, as `(x) => { let changedX = x;
+    /// changedX += 1; return changedX; }`. A lambda that `returns` nothing returns nothing.
+    pub(super) fn copying_arrow(&mut self, copies: &[ParameterCopy], value: &Expression<'_>, returns: bool) -> String {
+        let copied = |variable: &DirectVariable<'_>| copies.iter().find(|copy| copy.name == variable.name);
+        let written = match value.unparenthesized() {
+            Expression::Assignment(Assignment { lhs: Expression::Variable(Variable::Direct(variable)), .. }) => {
+                copied(variable)
+            }
+            Expression::UnaryPrefix(UnaryPrefix {
+                operator,
+                operand: Expression::Variable(Variable::Direct(variable)),
+            }) if operator.is_increment_or_decrement() => copied(variable),
+            _ => None,
+        };
+        let declarations: Vec<String> = copies.iter().map(ParameterCopy::declaration).collect();
+        let returned = if returns && written.is_none() { "return " } else { "" };
+        self.edits.insert(value.span().start.offset, format!("{{ {} {returned}", declarations.join(" ")));
+
+        match written {
+            Some(copy) if returns => format!("; return {}; }}", copy.local),
+            _ => "; }".to_owned(),
+        }
     }
 
     /// The copy of each of `parameters` the body `names` walked changes, by a write, `++`, `--` or `unset` through any
@@ -742,17 +816,21 @@ impl Converter<'_, '_> {
     fn parameter_copies(&mut self, parameters: &[Vec<u8>], names: &Names<'_, '_>) -> Vec<ParameterCopy> {
         let mut copies: Vec<ParameterCopy> = Vec::new();
         for parameter in parameters {
-            let Some(changed) = names.changed.iter().find(|variable| variable.name == parameter.as_slice()) else {
+            if !names.changed.iter().any(|variable| variable.name == parameter.as_slice()) {
                 continue;
-            };
+            }
             let name = self.variable_name(parameter);
             let mut letters = name.trim_start_matches('@').chars();
             let capitalized: String =
                 letters.next().map(|first| first.to_uppercase().chain(letters).collect()).unwrap_or_default();
-            let chosen: Vec<String> = self.renamed.iter().map(|(_, camel)| camel.clone()).collect();
+            let chosen: Vec<String> = self
+                .renamed
+                .iter()
+                .map(|(_, camel)| camel.clone())
+                .chain(copies.iter().map(|copy| copy.local.clone()))
+                .collect();
             let local = self.unused_name(&format!("changed{capitalized}"), &chosen);
-            self.renamed.push((parameter.clone(), local.clone()));
-            copies.push(ParameterCopy { parameter: name, local, at: changed.span });
+            copies.push(ParameterCopy { name: parameter.clone(), parameter: name, local });
         }
 
         copies
@@ -1076,17 +1154,14 @@ impl Converter<'_, '_> {
         let copies = std::mem::take(&mut method.locals.copies);
         let statics = std::mem::take(&mut method.locals.statics);
         // Each changed parameter's copy is the body's first statement.
-        for copy in copies {
-            let Some(body) = body else {
-                self.refuse(
-                    copy.at,
-                    format!("`{}` is changed here, in a body written `=> …`, and PHP# copies a changed parameter into a `let` local first, which only a body in braces declares (spec section 2)", copy.parameter),
-                );
-                continue;
-            };
+        if let Some(body) = body
+            && !copies.is_empty()
+        {
             let first = self.skip_whitespace(body.start.offset + 1);
             let indentation = self.indentation(first);
-            self.edits.insert(first, format!("let {} = {};\n{indentation}", copy.local, copy.parameter));
+            for copy in &copies {
+                self.edits.insert(first, format!("{}\n{indentation}", copy.declaration()));
+            }
         }
         let is_static = |name: &[u8]| statics.iter().any(|kept| kept.name == name);
         // A PHP local lives for the whole function, so one read after the block that assigns it is declared first in
