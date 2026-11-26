@@ -863,7 +863,7 @@ fn throw_is_an_expression_in_the_slice() {
 #[test]
 fn try_with_catch_and_finally_is_in_the_slice() {
     let code = leak(method(
-        "        try {\n            extra += 1;\n        } catch (Missing | Broken failure) {\n            throw failure;\n        } catch (Throwable) {\n            extra = 0;\n        } finally {\n            extra -= 1;\n        }\n        return extra;\n",
+        "        let total = extra;\n        try {\n            total += 1;\n        } catch (Missing | Broken failure) {\n            throw failure;\n        } catch (Throwable) {\n            total = 0;\n        } finally {\n            total -= 1;\n        }\n        return total;\n",
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
@@ -872,7 +872,7 @@ fn try_with_catch_and_finally_is_in_the_slice() {
 #[test]
 fn a_catch_type_that_is_not_a_class_reports_only_the_php_error() {
     let code = leak(method(
-        "        try {\n            extra += 1;\n        } catch (int failure) {\n        } catch (Missing | string failure) {\n        }\n        return extra;\n",
+        "        try {\n            this.run(extra);\n        } catch (int failure) {\n        } catch (Missing | string failure) {\n        }\n        return extra;\n",
     ));
 
     assert_eq!(
@@ -915,15 +915,15 @@ fn every_body_is_written_in_braces() {
             "9:31",
             "{ return 2; }",
         ),
-        ("        if (extra > 1) extra = 1;\n", "7:24", "{ extra = 1; }"),
+        ("        let total = extra;\n        if (total > 1) total = 1;\n", "8:24", "{ total = 1; }"),
         ("        if (extra > 1) this.run(extra);\n", "7:24", "{ this.run(extra); }"),
         ("        if (extra > 10);\n", "7:24", "{ }"),
         ("        while (extra > 1) return 1;\n", "7:27", "{ return 1; }"),
         ("        while (extra > 1) {\n            if (extra > 2) break;\n        }\n", "8:28", "{ break; }"),
         ("        while (extra > 1) {\n            if (extra > 2) continue;\n        }\n", "8:28", "{ continue; }"),
-        ("        do extra += 1; while (extra < 3);\n", "7:12", "{ extra += 1; }"),
-        ("        for (let step = 0; step < 3; step++) extra++;\n", "7:46", "{ extra++; }"),
-        ("        for (const value of Store.values()) extra += value;\n", "7:45", "{ extra += value; }"),
+        ("        do this.run(extra); while (extra < 3);\n", "7:12", "{ this.run(extra); }"),
+        ("        for (let step = 0; step < 3; step++) this.run(step);\n", "7:46", "{ this.run(step); }"),
+        ("        for (const value of Store.values()) this.run(value);\n", "7:45", "{ this.run(value); }"),
     ];
 
     for (body, at, fix) in refused {
@@ -947,10 +947,10 @@ fn every_body_is_written_in_braces() {
 #[test]
 fn a_colon_delimited_body_fails_as_a_typo_does() {
     for (body, at) in [
-        ("        while (extra > 1):\n            extra -= 1;\n        endwhile;\n", "7:26"),
+        ("        while (extra > 1):\n            break;\n        endwhile;\n", "7:26"),
         ("        for (;;):\n            break;\n        endfor;\n", "7:17"),
         (
-            "        if (extra > 3):\n            extra = 3;\n        elseif (extra > 2):\n            extra = 2;\n        else:\n            extra = 1;\n        endif;\n",
+            "        if (extra > 3):\n            return 3;\n        elseif (extra > 2):\n            return 2;\n        else:\n            return 1;\n        endif;\n",
             "7:23",
         ),
         (
@@ -988,7 +988,7 @@ fn a_local_declared_in_an_if_branch_is_out_of_scope_after_it() {
 #[test]
 fn while_and_do_while_with_braces_are_in_the_slice() {
     let code = leak(method(
-        "        while (extra > 0) {\n            extra -= 1;\n        }\n        do {\n            extra += 1;\n        } while (extra < 3);\n        return extra;\n",
+        "        let total = extra;\n        while (total > 0) {\n            total -= 1;\n        }\n        do {\n            total += 1;\n        } while (total < 3);\n        return total;\n",
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
@@ -997,7 +997,7 @@ fn while_and_do_while_with_braces_are_in_the_slice() {
 #[test]
 fn a_local_declared_in_a_loop_body_is_out_of_scope_after_it() {
     let code = leak(method(
-        "        while (extra > 0) {\n            let step = 1;\n            extra -= step;\n        }\n        do {\n            let step = 2;\n        } while (extra < 0);\n        return step;\n",
+        "        while (extra > 0) {\n            let step = 1;\n            this.run(step);\n        }\n        do {\n            let step = 2;\n        } while (extra < 0);\n        return step;\n",
     ));
 
     assert_eq!(issues(code), ["14:16 `step` is used after the block that declares it closes."]);
@@ -1006,7 +1006,7 @@ fn a_local_declared_in_a_loop_body_is_out_of_scope_after_it() {
 #[test]
 fn break_and_continue_without_a_level_are_in_the_slice() {
     let code = leak(method(
-        "        while (extra > 0) {\n            extra -= 1;\n            if (extra > 5) {\n                continue;\n            }\n            break;\n        }\n        return extra;\n",
+        "        let total = extra;\n        while (total > 0) {\n            total -= 1;\n            if (total > 5) {\n                continue;\n            }\n            break;\n        }\n        return total;\n",
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
@@ -1038,7 +1038,7 @@ fn a_named_loop_is_left_or_continued_by_its_name_from_an_inner_loop() {
 #[test]
 fn a_loop_name_no_break_or_continue_names_is_an_error() {
     let code = leak(method(
-        "        unused: while (extra > 0) { extra -= 1; }\n        lambda: for (const value of [1]) {\n            const leave = () => { while (true) { break; } };\n        }\n        return extra;\n",
+        "        unused: while (extra > 0) { this.run(extra); }\n        lambda: for (const value of [1]) {\n            const leave = () => { while (true) { break; } };\n        }\n        return extra;\n",
     ));
 
     assert_eq!(
@@ -1082,7 +1082,7 @@ fn a_name_before_a_statement_that_is_no_loop_fails_as_a_typo_does() {
 #[test]
 fn a_named_jump_from_a_loop_in_a_finally_block_to_a_loop_outside_it_leaves_the_block() {
     let code = leak(method(
-        "        outer: while (extra > 0) {\n            try {\n                extra -= 1;\n            } finally {\n                inner: while (true) {\n                    if (extra > 3) { break inner; }\n                    break outer;\n                }\n            }\n        }\n        return extra;\n",
+        "        outer: while (extra > 0) {\n            try {\n                this.run(extra);\n            } finally {\n                inner: while (true) {\n                    if (extra > 3) { break inner; }\n                    break outer;\n                }\n            }\n        }\n        return extra;\n",
     ));
 
     assert_eq!(issues(code), ["13:21 `break` cannot leave a `finally` block."]);
@@ -1091,7 +1091,7 @@ fn a_named_jump_from_a_loop_in_a_finally_block_to_a_loop_outside_it_leaves_the_b
 #[test]
 fn a_for_loop_with_a_let_counter_or_expressions_is_in_the_slice() {
     let code = leak(method(
-        "        let total = 0;\n        for (let step = 0; step < extra; step++) {\n            total += step;\n        }\n        for (total = 0; total < 3; total++, extra--) {\n        }\n        for (;;) {\n            break;\n        }\n        return total;\n",
+        "        let total = 0;\n        for (let step = 0; step < extra; step++) {\n            total += step;\n        }\n        for (total = 0; total < 3; total++, this.run(extra)) {\n        }\n        for (;;) {\n            break;\n        }\n        return total;\n",
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
@@ -1113,7 +1113,7 @@ fn a_for_counter_is_out_of_scope_after_its_loop_and_const_when_declared_so() {
 #[test]
 fn for_of_over_values_or_keys_and_values_is_in_the_slice() {
     let code = leak(method(
-        "        for (const value of Store.values()) {\n            extra += value;\n        }\n        for (let [key, value] of Store.values()) {\n            value += key;\n            extra += value;\n        }\n        return extra;\n",
+        "        let total = extra;\n        for (const value of Store.values()) {\n            total += value;\n        }\n        for (let [key, value] of Store.values()) {\n            value += key;\n            total += value;\n        }\n        return total;\n",
     ));
 
     assert_eq!(issues(code), Vec::<String>::new());
@@ -1422,10 +1422,10 @@ fn a_function_called_by_its_bare_name_is_in_the_slice() {
 #[test]
 fn a_construct_outside_the_slice_is_an_error_in_a_catch_block_or_a_call_argument() {
     let code = leak(method(
-        "        try {\n        } catch (Missing failure) {\n            extra = extra <> 1;\n        }\n        return count(this.run(...));\n",
+        "        try {\n        } catch (Missing failure) {\n            return extra <> 1;\n        }\n        return count(this.run(...));\n",
     ));
 
-    assert_eq!(issues(code), ["9:27 Unexpected `<>`", "11:31 Unexpected `...`"]);
+    assert_eq!(issues(code), ["9:26 Unexpected `<>`", "11:31 Unexpected `...`"]);
 }
 
 /// Spec section 14.1: any expression that gives a function is called by writing its arguments after it, as `f?.(x)`
@@ -5311,9 +5311,9 @@ fn a_parameter_default_is_any_expression_that_reads_no_object_or_parameter() {
 }
 
 #[test]
-fn a_write_goes_only_to_a_local_a_parameter_or_a_member() {
+fn a_write_goes_only_to_a_local_or_a_member() {
     let code = leak(method(
-        "        1 = 2;\n        FOO = 1;\n        Calc = 1;\n        this = extra;\n        this++;\n        extra.total() = 3;\n        --FOO;\n        FOO *= 2;\n        this.count = 1;\n        extra = 2;\n        extra++;\n        return extra;\n",
+        "        1 = 2;\n        FOO = 1;\n        Calc = 1;\n        this = extra;\n        this++;\n        extra.total() = 3;\n        --FOO;\n        FOO *= 2;\n        this.count = 1;\n        let total = extra;\n        total = 2;\n        total++;\n        return total;\n",
     ));
 
     assert_eq!(
@@ -6744,16 +6744,16 @@ fn a_properties_pattern_without_a_type_takes_no_name() {
 #[test]
 fn break_and_continue_never_leave_a_finally_block() {
     let code = leak(method(
-        "        for (int i = 0; i < 3; i++) {\n            try {\n                extra += 1;\n            } finally {\n                if (extra > 5) {\n                    break;\n                }\n                extra = extra ?? continue;\n                if (extra > 7) {\n                    continue;\n                }\n                extra = extra ?? break;\n                while (extra > 9) {\n                    extra -= 1;\n                    continue;\n                }\n                const skip = (int? value) => {\n                    for (const step of [1]) {\n                        break;\n                    }\n                    return value ?? 0;\n                };\n            }\n        }\n        return extra;\n",
+        "        let total = extra;\n        for (int i = 0; i < 3; i++) {\n            try {\n                total += 1;\n            } finally {\n                if (total > 5) {\n                    break;\n                }\n                total = total ?? continue;\n                if (total > 7) {\n                    continue;\n                }\n                total = total ?? break;\n                while (total > 9) {\n                    total -= 1;\n                    continue;\n                }\n                const skip = (int? value) => {\n                    for (const step of [1]) {\n                        break;\n                    }\n                    return value ?? 0;\n                };\n            }\n        }\n        return total;\n",
     ));
 
     assert_eq!(
         issues(code),
         [
-            "12:21 `break` cannot leave a `finally` block.",
-            "14:34 `?? continue` cannot leave a `finally` block.",
-            "16:21 `continue` cannot leave a `finally` block.",
-            "18:34 `?? break` cannot leave a `finally` block.",
+            "13:21 `break` cannot leave a `finally` block.",
+            "15:34 `?? continue` cannot leave a `finally` block.",
+            "17:21 `continue` cannot leave a `finally` block.",
+            "19:34 `?? break` cannot leave a `finally` block.",
         ]
     );
 }
@@ -6998,7 +6998,7 @@ fn a_binary_operation_as_a_statement_has_no_effect() {
         issues(code),
         [
             "8:9 This statement has no effect: write `flags |= 4` to keep its result.",
-            "9:9 This statement has no effect: write `extra += 1` to keep its result.",
+            "9:9 This statement has no effect: use the result of `extra + 1`, or remove the statement.",
             "10:9 This statement has no effect: use the result of `extra == 1`, or remove the statement.",
             "11:9 This statement has no effect: use the result of `1 - extra`, or remove the statement.",
         ]

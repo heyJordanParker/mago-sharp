@@ -298,13 +298,14 @@ public class Report
             return inner();
         };
         const bump = () => count++;
-        while (extra > 0) {
-            let seen = extra;
+        let left = extra;
+        while (left > 0) {
+            let seen = left;
             const mark = () => {
                 seen += 1;
             };
             mark();
-            extra -= 1;
+            left -= 1;
         }
         count += twice(half(4)) + add(1, by: 2) + bump() + Lib.fold([1, 2], (int total, int x) => total + x * 2, 0);
         return n => check("n", n) ? n + count : n;

@@ -5214,7 +5214,7 @@ mod tests {
         let report =
             "namespace App;\n\npublic class Report\n{\n    public string text(string name) => name.shout();\n}\n";
         let plain = "namespace App;\n\npublic class Plain\n{\n    public string text(string name) => name;\n}\n";
-        let listed = "namespace App;\n\npublic class Listed\n{\n    public int size(List<int> ids)\n    {\n        ids.add(1);\n        return ids.count();\n    }\n}\n";
+        let listed = "namespace App;\n\npublic class Listed\n{\n    public int size(List<int> ids)\n    {\n        let grown = ids;\n        grown.add(1);\n        return grown.count();\n    }\n}\n";
         let packaged = "vendor/acme/shapes/src/Report.sharp";
         let database = project(&[
             (

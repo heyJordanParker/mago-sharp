@@ -6651,7 +6651,9 @@ fn a_map_member_runs_on_the_map_and_a_named_argument_runs_its_static_method() {
 }
 
 /// ```php
+/// $standings = $given;
 /// \Sharp\Internal\add($standings, $status);
+/// return $standings;
 /// ```
 ///
 /// `List.add` declares its parameter as the `List`'s element type, not a key type, so a case goes in as the case.
@@ -6659,12 +6661,17 @@ fn a_map_member_runs_on_the_map_and_a_named_argument_runs_its_static_method() {
 fn a_backed_enum_value_goes_into_list_add_as_its_case() {
     assert_eq!(
         body_in(
-            "void run(List<Calc> standings, Calc status)",
-            "        standings.add(status);\n",
+            "List<Calc> run(List<Calc> given, Calc status)",
+            "        let standings = given;\n        standings.add(status);\n        return standings;\n",
             &[("src/Lib/Calc.php", "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; }")]
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "standings"
+                VAR
+                  ZVAL "given"
               CALL
                 ZVAL "Sharp\\Internal\\add"
                 ARG_LIST
@@ -6672,6 +6679,9 @@ fn a_backed_enum_value_goes_into_list_add_as_its_case() {
                     ZVAL "standings"
                   VAR
                     ZVAL "status"
+              RETURN
+                VAR
+                  ZVAL "standings"
         "#}
     );
 }
@@ -6755,9 +6765,11 @@ fn a_set_literal_is_a_new_set_of_its_elements() {
 }
 
 /// ```php
-/// $named = …;
+/// $given = …;
+/// $named = $given;
 /// $sets = [new \Sharp\Set<int>([1, 1]), new \Sharp\Set<int>([2])];
 /// \Sharp\Internal\put($named, 'b', new \Sharp\Set<string>(['y']));
+/// return $named;
 /// ```
 ///
 /// A list literal inside a literal whose elements are declared `Set`s, or written into a `Map` entry declared a
@@ -6766,21 +6778,21 @@ fn a_set_literal_is_a_new_set_of_its_elements() {
 fn a_list_literal_inside_a_literal_of_sets_is_a_set() {
     assert_eq!(
         body_in(
-            "void run(Map<string, Set<string>> named)",
-            "        List<Set<int>> sets = [[1, 1], [2]];\n        named[\"b\"] = [\"y\"];\n",
+            "Map<string, Set<string>> run(Map<string, Set<string>> given)",
+            "        let named = given;\n        List<Set<int>> sets = [[1, 1], [2]];\n        named[\"b\"] = [\"y\"];\n        return named;\n",
             &[]
         ),
         indoc! {r#"
             STMT_LIST
               ASSIGN
                 VAR
-                  ZVAL "named"
+                  ZVAL "given"
                 CONDITIONAL
                   CALL
                     ZVAL "is_array"
                     ARG_LIST
                       VAR
-                        ZVAL "named"
+                        ZVAL "given"
                   SHARP_TYPE_ARGS
                     NEW
                       ZVAL "Sharp\\Map"
@@ -6826,7 +6838,7 @@ fn a_list_literal_inside_a_literal_of_sets_is_a_set() {
                                     ZVAL "array_keys"
                                     ARG_LIST
                                       VAR
-                                        ZVAL "named"
+                                        ZVAL "given"
                                   CALL
                                     ZVAL "array_map"
                                     ARG_LIST
@@ -6858,10 +6870,15 @@ fn a_list_literal_inside_a_literal_of_sets_is_a_set() {
                                         null
                                         null
                                       VAR
-                                        ZVAL "named"
+                                        ZVAL "given"
                     ZVAL "string, Set<string>"
                   VAR
-                    ZVAL "named"
+                    ZVAL "given"
+              ASSIGN
+                VAR
+                  ZVAL "named"
+                VAR
+                  ZVAL "given"
               ASSIGN
                 VAR
                   ZVAL "sets"
@@ -6906,6 +6923,9 @@ fn a_list_literal_inside_a_literal_of_sets_is_a_set() {
                             ZVAL "y"
                             null
                     ZVAL "string"
+              RETURN
+                VAR
+                  ZVAL "named"
         "#}
     );
 }
@@ -6913,13 +6933,18 @@ fn a_list_literal_inside_a_literal_of_sets_is_a_set() {
 /// ```php
 /// $tags = new \Sharp\Set<string>([]);
 /// $tags = new \Sharp\Set<string>(["b"]);
+/// return $tags;
 /// ```
 ///
 /// A list literal assigned to a local declared `Set`, as its initial value or later, is that `Set`.
 #[test]
 fn a_list_literal_assigned_to_a_set_local_is_a_set() {
     assert_eq!(
-        body_in("void run(bool flag)", "        Set<string> tags = [];\n        tags = [\"b\"];\n", &[]),
+        body_in(
+            "Set<string> run(bool flag)",
+            "        Set<string> tags = [];\n        tags = [\"b\"];\n        return tags;\n",
+            &[]
+        ),
         indoc! {r#"
             STMT_LIST
               ASSIGN
@@ -6943,6 +6968,9 @@ fn a_list_literal_assigned_to_a_set_local_is_a_set() {
                           ZVAL "b"
                           null
                   ZVAL "string"
+              RETURN
+                VAR
+                  ZVAL "tags"
         "#}
     );
 }
@@ -6950,6 +6978,7 @@ fn a_list_literal_assigned_to_a_set_local_is_a_set() {
 /// ```php
 /// $branch = new \Sharp\Set<string>([]);
 /// if ($flag) { $branch = new \Sharp\Set<string>(["d"]); } else { $branch = new \Sharp\Set<string>(["e"]); }
+/// return $branch;
 /// ```
 ///
 /// A list literal assigned in either branch of an `if` to a local declared `Set` is that `Set`.
@@ -6957,8 +6986,8 @@ fn a_list_literal_assigned_to_a_set_local_is_a_set() {
 fn a_list_literal_assigned_in_each_branch_of_an_if_to_a_set_local_is_a_set() {
     assert_eq!(
         body_in(
-            "void run(bool flag)",
-            "        Set<string> branch = [];\n        if (flag) {\n            branch = [\"d\"];\n        } else {\n            branch = [\"e\"];\n        }\n",
+            "Set<string> run(bool flag)",
+            "        Set<string> branch = [];\n        if (flag) {\n            branch = [\"d\"];\n        } else {\n            branch = [\"e\"];\n        }\n        return branch;\n",
             &[],
         ),
         indoc! {r#"
@@ -7004,40 +7033,54 @@ fn a_list_literal_assigned_in_each_branch_of_an_if_to_a_set_local_is_a_set() {
                                 ZVAL "e"
                                 null
                         ZVAL "string"
+              RETURN
+                VAR
+                  ZVAL "branch"
         "#}
     );
 }
 
 /// ```php
-/// $maybe = \is_array($maybe) ? new \Sharp\Set<string>($maybe) : $maybe;
+/// $given = \is_array($given) ? new \Sharp\Set<string>($given) : $given;
+/// $maybe = $given;
 /// $maybe ??= new \Sharp\Set<string>(["c"]);
+/// return $maybe;
 /// ```
 ///
 /// A list literal that `??=` assigns to a nullable `Set` is that `Set`.
 #[test]
 fn a_list_literal_that_coalescing_assigns_to_a_nullable_set_is_a_set() {
     assert_eq!(
-        body_in("void run(Set<string>? maybe)", "        maybe ??= [\"c\"];\n", &[]),
+        body_in(
+            "Set<string>? run(Set<string>? given)",
+            "        let maybe = given;\n        maybe ??= [\"c\"];\n        return maybe;\n",
+            &[]
+        ),
         indoc! {r#"
             STMT_LIST
               ASSIGN
                 VAR
-                  ZVAL "maybe"
+                  ZVAL "given"
                 CONDITIONAL
                   CALL
                     ZVAL "is_array"
                     ARG_LIST
                       VAR
-                        ZVAL "maybe"
+                        ZVAL "given"
                   SHARP_TYPE_ARGS
                     NEW
                       ZVAL "Sharp\\Set"
                       ARG_LIST
                         VAR
-                          ZVAL "maybe"
+                          ZVAL "given"
                     ZVAL "string"
                   VAR
-                    ZVAL "maybe"
+                    ZVAL "given"
+              ASSIGN
+                VAR
+                  ZVAL "maybe"
+                VAR
+                  ZVAL "given"
               ASSIGN_COALESCE
                 VAR
                   ZVAL "maybe"
@@ -7050,6 +7093,9 @@ fn a_list_literal_that_coalescing_assigns_to_a_nullable_set_is_a_set() {
                           ZVAL "c"
                           null
                   ZVAL "string"
+              RETURN
+                VAR
+                  ZVAL "maybe"
         "#}
     );
 }
@@ -7605,15 +7651,15 @@ fn a_list_literal_default_of_a_set_parameter_is_a_set() {
 }
 
 /// ```php
-/// $tags = \is_array($tags) ? new \Sharp\Set<string>($tags) : $tags;
-/// $states = \is_array($states) ? new \Sharp\Set<Lib.Calc>($states) : $states;
+/// $tags = new \Sharp\Set<string>([]);
+/// $states = new \Sharp\Set<Lib.Calc>([]);
 /// \Sharp\Internal\addKey($tags, $name);
 /// ${'argument#1'} = \Lib\Calc::upper($name);
 /// \Sharp\Internal\removeKey($tags, ${'argument#1'});
 /// \Sharp\Internal\addKey($states, $status);
 /// \Sharp\Internal\removeKey($states, \Lib\Calc::Closed);
 /// \Sharp\Internal\clear($tags);
-/// return \Sharp\Internal\containsKey($tags, $name);
+/// return \Sharp\Internal\containsKey($tags, $name) && \Sharp\Internal\containsKey($states, $status);
 /// ```
 ///
 /// A `Set`'s members are the standard library's, spec section 12, each the engine function of the set's table, which
@@ -7622,8 +7668,8 @@ fn a_list_literal_default_of_a_set_parameter_is_a_set() {
 fn set_methods_run_on_the_set() {
     assert_eq!(
         body_in(
-            "bool run(Set<string> tags, Set<Calc> states, Calc status, string name)",
-            "        tags.add(name);\n        tags.remove(Calc.upper(name));\n        states.add(status);\n        states.remove(Calc.Closed);\n        tags.clear();\n        return tags.contains(name);\n",
+            "bool run(Calc status, string name)",
+            "        Set<string> tags = [];\n        Set<Calc> states = [];\n        tags.add(name);\n        tags.remove(Calc.upper(name));\n        states.add(status);\n        states.remove(Calc.Closed);\n        tags.clear();\n        return tags.contains(name) && states.contains(status);\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; public static function upper(string $text): string { return strtoupper($text); } }"
@@ -7634,39 +7680,21 @@ fn set_methods_run_on_the_set() {
               ASSIGN
                 VAR
                   ZVAL "tags"
-                CONDITIONAL
-                  CALL
-                    ZVAL "is_array"
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
                     ARG_LIST
-                      VAR
-                        ZVAL "tags"
-                  SHARP_TYPE_ARGS
-                    NEW
-                      ZVAL "Sharp\\Set"
-                      ARG_LIST
-                        VAR
-                          ZVAL "tags"
-                    ZVAL "string"
-                  VAR
-                    ZVAL "tags"
+                      ARRAY [3]
+                  ZVAL "string"
               ASSIGN
                 VAR
                   ZVAL "states"
-                CONDITIONAL
-                  CALL
-                    ZVAL "is_array"
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
                     ARG_LIST
-                      VAR
-                        ZVAL "states"
-                  SHARP_TYPE_ARGS
-                    NEW
-                      ZVAL "Sharp\\Set"
-                      ARG_LIST
-                        VAR
-                          ZVAL "states"
-                    ZVAL "Lib.Calc"
-                  VAR
-                    ZVAL "states"
+                      ARRAY [3]
+                  ZVAL "Lib.Calc"
               CALL
                 ZVAL "Sharp\\Internal\\addKey"
                 ARG_LIST
@@ -7715,13 +7743,21 @@ fn set_methods_run_on_the_set() {
                   VAR
                     ZVAL "tags"
               RETURN
-                CALL
-                  ZVAL "Sharp\\Internal\\containsKey"
-                  ARG_LIST
-                    VAR
-                      ZVAL "tags"
-                    VAR
-                      ZVAL "name"
+                AND
+                  CALL
+                    ZVAL "Sharp\\Internal\\containsKey"
+                    ARG_LIST
+                      VAR
+                        ZVAL "tags"
+                      VAR
+                        ZVAL "name"
+                  CALL
+                    ZVAL "Sharp\\Internal\\containsKey"
+                    ARG_LIST
+                      VAR
+                        ZVAL "states"
+                      VAR
+                        ZVAL "status"
         "#}
     );
 }
@@ -8484,6 +8520,7 @@ fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_
 /// ```php
 /// $counts = new \Sharp\Map<string, int>();
 /// \Sharp\Internal\removeKey($counts, $key);
+/// return $counts;
 /// ```
 ///
 /// Spec section 12: the empty literal `[:]` a `Map` local holds leaves it a `Map`, so `remove` is the `Map`'s member,
@@ -8491,7 +8528,11 @@ fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_
 #[test]
 fn an_empty_map_local_runs_the_maps_remove() {
     assert_eq!(
-        body_in("void run(string key)", "        Map<string, int> counts = [:];\n        counts.remove(key);\n", &[]),
+        body_in(
+            "Map<string, int> run(string key)",
+            "        Map<string, int> counts = [:];\n        counts.remove(key);\n        return counts;\n",
+            &[]
+        ),
         indoc! {r#"
             STMT_LIST
               ASSIGN
@@ -8509,6 +8550,9 @@ fn an_empty_map_local_runs_the_maps_remove() {
                     ZVAL "counts"
                   VAR
                     ZVAL "key"
+              RETURN
+                VAR
+                  ZVAL "counts"
         "#}
     );
 }
@@ -9416,6 +9460,8 @@ fn max_and_min_are_the_largest_and_smallest_element_and_throw_on_an_empty_list()
 }
 
 /// ```php
+/// $tags = $names;
+/// $prices = $costs;
 /// \Sharp\Internal\insert($tags, 0, 'a');
 /// $removed = \Sharp\Internal\remove($tags, 'a');
 /// \Sharp\Internal\clear($tags);
@@ -9429,11 +9475,21 @@ fn max_and_min_are_the_largest_and_smallest_element_and_throw_on_an_empty_list()
 fn list_insert_remove_and_clear_change_the_list_where_it_lives() {
     assert_eq!(
         ledger_body(
-            "bool run(List<string> tags, List<Money> prices, Money price)",
-            "        tags.insert(0, \"a\");\n        const removed = tags.remove(\"a\");\n        tags.clear();\n        return removed && prices.remove(price);\n"
+            "bool run(List<string> names, List<Money> costs, Money price)",
+            "        let tags = names;\n        let prices = costs;\n        tags.insert(0, \"a\");\n        const removed = tags.remove(\"a\");\n        tags.clear();\n        return removed && prices.remove(price);\n"
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "tags"
+                VAR
+                  ZVAL "names"
+              ASSIGN
+                VAR
+                  ZVAL "prices"
+                VAR
+                  ZVAL "costs"
               CALL
                 ZVAL "Sharp\\Internal\\insert"
                 ARG_LIST
@@ -9471,16 +9527,14 @@ fn list_insert_remove_and_clear_change_the_list_where_it_lives() {
 }
 
 /// ```php
-/// $sets = \is_array($sets) ? \array_map(fn ($element#1) => \is_array($element#1) ? new \Sharp\Set($element#1) : $element#1, $sets) : $sets;
-/// $maps = …;
 /// $stock = …;
-/// (\array_key_exists(0, $grid) ? \Sharp\Internal\clear($grid[0]) : throw new \OutOfRangeException('Undefined array key ' . 0));
-/// (\array_key_exists(0, $sets) ? \Sharp\Internal\addKey($sets[0], 4) : throw …);
-/// (\array_key_exists(0, $maps) ? \Sharp\Internal\put($maps[0], 'c', 3) : throw …);
-/// (\array_key_exists(0, $maps) ? \Sharp\Internal\get($maps[0], 'd')
-///     ?? (\array_key_exists(0, $maps) ? \Sharp\Internal\put($maps[0], 'd', 4) : throw …) : throw …);
+/// (\array_key_exists(0, $this->grid) ? \Sharp\Internal\clear($this->grid[0]) : throw new \OutOfRangeException('Undefined array key ' . 0));
+/// (\array_key_exists(0, $this->sets) ? \Sharp\Internal\addKey($this->sets[0], 4) : throw …);
+/// (\array_key_exists(0, $this->maps) ? \Sharp\Internal\put($this->maps[0], 'c', 3) : throw …);
+/// (\array_key_exists(0, $this->maps) ? \Sharp\Internal\get($this->maps[0], 'd')
+///     ?? (\array_key_exists(0, $this->maps) ? \Sharp\Internal\put($this->maps[0], 'd', 4) : throw …) : throw …);
 /// ${'index#1'} = $this->next();
-/// (\array_key_exists(${'index#1'}, $grid) ? \Sharp\Internal\remove($grid[${'index#1'}], 2)
+/// (\array_key_exists(${'index#1'}, $this->grid) ? \Sharp\Internal\remove($this->grid[${'index#1'}], 2)
 ///     : throw new \OutOfRangeException('Undefined array key ' . ${'index#1'}));
 /// return ((${'nullsafe#1'} = $stock['a'] ?? null) === null) ? null : \count(${'nullsafe#1'});
 /// ```
@@ -9488,16 +9542,16 @@ fn list_insert_remove_and_clear_change_the_list_where_it_lives() {
 /// Spec section 12 makes a `List` index a place. A member that changes an element, of a `List` or a `Set`, takes the
 /// element by reference where it exists, since PHP's write to a missing one would add it, and a write into a `Map`
 /// element is the `Map`'s `set` there, whose `??=` writes only for a missing key. An index that runs something is held
-/// in a hidden variable, so it runs once. A null-safe call reads a missing `Map` key as null. Each parameter first
-/// makes each `Set` and `Map` plain PHP gave as an array the object, and renumbers each `List` a `Map` holds.
+/// in a hidden variable, so it runs once. A null-safe call reads a missing `Map` key as null. A parameter first
+/// renumbers each `List` a `Map` holds.
 #[test]
 fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
     assert_eq!(
-        body_in(
-            "int? run(List<List<int>> grid, List<Set<int>> sets, List<Map<string, int>> maps, Map<string, List<int>> stock)",
-            "        grid[0].clear();\n        sets[0].add(4);\n        maps[0][\"c\"] = 3;\n        maps[0][\"d\"] ??= 4;\n        grid[this.next()].remove(2);\n        return stock[\"a\"]?.count();\n    }\n\n    private int next()\n    {\n        return 0;\n",
+        Lowered::with(
+            "namespace App.Tenant;\n\npublic class Report\n{\n    private List<List<int>> grid = [[1, 2]];\n\n    private List<Set<int>> sets = [[1]];\n\n    private List<Map<string, int>> maps = [[\"c\": 1]];\n\n    public int? run(Map<string, List<int>> stock)\n    {\n        this.grid[0].clear();\n        this.sets[0].add(4);\n        this.maps[0][\"c\"] = 3;\n        this.maps[0][\"d\"] ??= 4;\n        this.grid[this.next()].remove(2);\n        return stock[\"a\"]?.count();\n    }\n\n    private int next()\n    {\n        return 0;\n    }\n}\n",
             &[]
-        ),
+        )
+        .body(),
         indoc! {r#"
             STMT_LIST
               ASSIGN
@@ -9886,7 +9940,7 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
 }
 
 /// ```php
-/// (\array_key_exists(0, $rows) ? (($rows[0] === null) ? null : \Sharp\Internal\add($rows[0], 5)) : throw …);
+/// $maybe = $given;
 /// (\array_key_exists(1, $maybe) ? (($maybe[1] === null) ? null : \Sharp\Internal\insert($maybe[1], 0, 6)) : throw …);
 /// ${'receiver#1'} = $this->held;
 /// ${'kept#2'} = ${'receiver#1'};
@@ -9898,49 +9952,24 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
 /// ```
 ///
 /// Spec section 12 makes a `List` index a place, so a change after `?.` on one runs on the index itself, as a change
-/// without `?.` does, and reaches the element the list stores, here a local's, a parameter's and a hooked property's,
-/// which PHP gives no reference to, so the change runs on its value and its `set` stores it back once it changed. A
-/// missing index throws, so `?.` skips only a null element. A read after `?.` tests the element it holds first.
+/// without `?.` does, and reaches the element the list stores, here a local's and a hooked property's, which PHP gives
+/// no reference to, so the change runs on its value and its `set` stores it back once it changed. A missing index
+/// throws, so `?.` skips only a null element. A read after `?.` tests the element it holds first.
 #[test]
 fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
     assert_eq!(
         child_body(
-            "bool? run(List<List<int>?> rows, List<List<int>?> maybe)",
-            "        rows[0]?.add(5);\n        maybe[1]?.insert(0, 6);\n        this.held[0]?.add(7);\n        maybe[0]?.entries();\n        maybe[2]?.clear();\n        return maybe[3]?.contains(4);\n",
+            "bool? run(List<List<int>?> given)",
+            "        let maybe = given;\n        maybe[1]?.insert(0, 6);\n        this.held[0]?.add(7);\n        maybe[0]?.entries();\n        maybe[2]?.clear();\n        return maybe[3]?.contains(4);\n",
             "<?php namespace App\\Tenant; class Base { /** @var list<list<int>|null> */ public array $held = [[1]] { set { $this->held = $value; } } }"
         ),
         indoc! {r#"
             STMT_LIST
-              CONDITIONAL [1]
-                CALL
-                  ZVAL "array_key_exists"
-                  ARG_LIST
-                    ZVAL 0
-                    VAR
-                      ZVAL "rows"
-                CONDITIONAL [1]
-                  BINARY_OP [16]
-                    DIM
-                      VAR
-                        ZVAL "rows"
-                      ZVAL 0
-                    ZVAL null
-                  ZVAL null
-                  CALL
-                    ZVAL "Sharp\\Internal\\add"
-                    ARG_LIST
-                      DIM
-                        VAR
-                          ZVAL "rows"
-                        ZVAL 0
-                      ZVAL 5
-                THROW
-                  NEW
-                    ZVAL "OutOfRangeException"
-                    ARG_LIST
-                      BINARY_OP [8]
-                        ZVAL "Undefined array key "
-                        ZVAL 0
+              ASSIGN
+                VAR
+                  ZVAL "maybe"
+                VAR
+                  ZVAL "given"
               CONDITIONAL [1]
                 CALL
                   ZVAL "array_key_exists"
@@ -10134,11 +10163,16 @@ fn a_change_after_a_null_safe_link_reaches_the_place_below_it() {
                       ARRAY_ELEM
                         ZVAL 1
                         null
+              ASSIGN
+                VAR
+                  ZVAL "rest"
+                VAR
+                  ZVAL "rows"
               RETURN
                 CONDITIONAL [1]
                   BINARY_OP [16]
                     VAR
-                      ZVAL "rows"
+                      ZVAL "rest"
                     ZVAL null
                   ZVAL null
                   CALL
@@ -10148,7 +10182,7 @@ fn a_change_after_a_null_safe_link_reaches_the_place_below_it() {
                         ZVAL "Sharp\\Internal\\removeLast"
                         ARG_LIST
                           VAR
-                            ZVAL "rows"
+                            ZVAL "rest"
         "#}
     );
 }
@@ -10355,9 +10389,12 @@ fn a_write_into_a_map_a_hooked_property_holds_runs_its_value_before_it_reads_the
 }
 
 /// ```php
+/// $sizes = $given;
+/// $grid = $rows;
 /// \Sharp\Internal\set($sizes, 0, $extra);
 /// (\array_key_exists($extra, $grid) ? \Sharp\Internal\set($grid[$extra], 1, 2)
 ///     : throw new \OutOfRangeException('Undefined array key ' . $extra));
+/// return \count($sizes) + \count($grid);
 /// ```
 ///
 /// Spec section 12: `x[i] = v` on a `List` replaces the element at `i`, and throws `OutOfRangeException` past the end,
@@ -10368,12 +10405,22 @@ fn a_write_into_a_map_a_hooked_property_holds_runs_its_value_before_it_reads_the
 fn a_list_index_write_replaces_the_element_through_set() {
     assert_eq!(
         body_in(
-            "void run(List<int> sizes, List<List<int>> grid, int extra)",
-            "        sizes[0] = extra;\n        grid[extra][1] = 2;\n",
+            "int run(List<int> given, List<List<int>> rows, int extra)",
+            "        let sizes = given;\n        let grid = rows;\n        sizes[0] = extra;\n        grid[extra][1] = 2;\n        return sizes.count() + grid.count();\n",
             &[]
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "sizes"
+                VAR
+                  ZVAL "given"
+              ASSIGN
+                VAR
+                  ZVAL "grid"
+                VAR
+                  ZVAL "rows"
               CALL
                 ZVAL "Sharp\\Internal\\set"
                 ARG_LIST
@@ -10461,8 +10508,8 @@ fn a_ref_member_makes_the_object_only_of_a_php_array_its_place_holds() {
 }
 
 /// ```php
-/// return (\Sharp\MapMembers::set($counts, 1, $stored#1 = $extra) ? $stored#1 : $stored#1);
-/// \Sharp\MapMembers::get($counts, 2) ?? \Sharp\MapMembers::set($counts, 2, 3);
+/// return (\Sharp\MapMembers::set($this->counts, 1, $stored#1 = $extra) ? $stored#1 : $stored#1);
+/// \Sharp\MapMembers::get($this->counts, 2) ?? \Sharp\MapMembers::set($this->counts, 2, 3);
 /// ```
 ///
 /// A file lowered without the members' inline forms, as a standard library file is, calls `set` and `get`. A write
@@ -10482,31 +10529,15 @@ fn a_map_index_write_without_inline_forms_calls_the_map_s_members() {
         lowered.body_of("stored"),
         indoc! {r#"
             STMT_LIST
-              ASSIGN
-                VAR
-                  ZVAL "counts"
-                CONDITIONAL
-                  CALL
-                    ZVAL "is_array"
-                    ARG_LIST
-                      VAR
-                        ZVAL "counts"
-                  STATIC_CALL
-                    ZVAL "Sharp\\Map"
-                    ZVAL "from"
-                    ARG_LIST
-                      VAR
-                        ZVAL "counts"
-                      ZVAL "int, int"
-                  VAR
-                    ZVAL "counts"
               RETURN
                 CONDITIONAL [1]
                   STATIC_CALL
                     ZVAL "Sharp\\MapMembers"
                     ZVAL "set"
                     ARG_LIST
-                      VAR
+                      PROP
+                        VAR
+                          ZVAL "this"
                         ZVAL "counts"
                       ZVAL 1
                       ASSIGN
@@ -10524,37 +10555,23 @@ fn a_map_index_write_without_inline_forms_calls_the_map_s_members() {
         lowered.body_of("kept"),
         indoc! {r#"
             STMT_LIST
-              ASSIGN
-                VAR
-                  ZVAL "counts"
-                CONDITIONAL
-                  CALL
-                    ZVAL "is_array"
-                    ARG_LIST
-                      VAR
-                        ZVAL "counts"
-                  STATIC_CALL
-                    ZVAL "Sharp\\Map"
-                    ZVAL "from"
-                    ARG_LIST
-                      VAR
-                        ZVAL "counts"
-                      ZVAL "int, int"
-                  VAR
-                    ZVAL "counts"
               COALESCE
                 STATIC_CALL
                   ZVAL "Sharp\\MapMembers"
                   ZVAL "get"
                   ARG_LIST
-                    VAR
+                    PROP
+                      VAR
+                        ZVAL "this"
                       ZVAL "counts"
                     ZVAL 2
                 STATIC_CALL
                   ZVAL "Sharp\\MapMembers"
                   ZVAL "set"
                   ARG_LIST
-                    VAR
+                    PROP
+                      VAR
+                        ZVAL "this"
                       ZVAL "counts"
                     ZVAL 2
                     ZVAL 3
@@ -10773,6 +10790,8 @@ fn a_list_index_write_runs_the_standard_library_s_set_member() {
 }
 
 /// ```php
+/// $sizes = $given;
+/// $names = $words;
 /// ${'index#1'} = $this->at();
 /// \Sharp\Internal\set($sizes, ${'index#1'}, $sizes[${'index#1'}] + $extra);
 /// \Sharp\Internal\set($sizes, 0, $sizes[0] + 1);
@@ -10788,12 +10807,22 @@ fn a_list_index_write_runs_the_standard_library_s_set_member() {
 fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
     assert_eq!(
         body_in(
-            "int run(List<int> sizes, int extra, List<string> names)",
-            "        sizes[this.at()] += extra;\n        ++sizes[0];\n        names[0] += \"s\";\n        return sizes[1]--;\n    }\n\n    private int at()\n    {\n        return 0;\n",
+            "int run(List<int> given, int extra, List<string> words)",
+            "        let sizes = given;\n        let names = words;\n        sizes[this.at()] += extra;\n        ++sizes[0];\n        names[0] += \"s\";\n        return sizes[1]--;\n    }\n\n    private int at()\n    {\n        return 0;\n",
             &[]
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "sizes"
+                VAR
+                  ZVAL "given"
+              ASSIGN
+                VAR
+                  ZVAL "names"
+                VAR
+                  ZVAL "words"
               STMT_LIST
                 ASSIGN
                   VAR
@@ -10860,7 +10889,7 @@ fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
 }
 
 /// ```php
-/// return \Sharp\Internal\set($sizes, 0, ${'stored#1'} = $extra) ? ${'stored#1'} : ${'stored#1'};
+/// return \Sharp\Internal\set($this->sizes, 0, ${'stored#1'} = $extra) ? ${'stored#1'} : ${'stored#1'};
 /// ```
 ///
 /// `set` gives the element it replaced, as Kotlin's does, so a write whose value code reads gives the value it stores
@@ -10869,7 +10898,11 @@ fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
 #[test]
 fn a_list_index_write_whose_value_is_read_gives_the_value_it_stores() {
     assert_eq!(
-        body_in("int run(List<int> sizes, int extra)", "        return sizes[0] = extra;\n", &[]),
+        Lowered::with(
+            "namespace App.Tenant;\n\npublic class Report\n{\n    private List<int> sizes = [0];\n\n    public int run(int extra)\n    {\n        return this.sizes[0] = extra;\n    }\n}\n",
+            &[]
+        )
+        .body(),
         indoc! {r#"
             STMT_LIST
               RETURN
@@ -10877,7 +10910,9 @@ fn a_list_index_write_whose_value_is_read_gives_the_value_it_stores() {
                   CALL
                     ZVAL "Sharp\\Internal\\set"
                     ARG_LIST
-                      VAR
+                      PROP
+                        VAR
+                          ZVAL "this"
                         ZVAL "sizes"
                       ZVAL 0
                       ASSIGN
@@ -10895,7 +10930,7 @@ fn a_list_index_write_whose_value_is_read_gives_the_value_it_stores() {
 
 /// ```php
 /// ${'index#1'} = $this->at();
-/// \Sharp\ListMembers::set($sizes, ${'index#1'}, $extra);
+/// \Sharp\ListMembers::set($this->sizes, ${'index#1'}, $extra);
 /// ```
 ///
 /// An index write lowers its index and its value before it runs `set`, so it copies only a form that reads its slots
@@ -10910,11 +10945,8 @@ fn a_list_index_write_calls_a_set_whose_form_calls_before_it_reads_every_slot() 
         .expect("the library file is checked")
         .into_iter()
         .collect();
-    let code = method_with(
-        "void run(List<int> sizes, int extra)",
-        "        sizes[this.at()] = extra;\n    }\n\n    private int at()\n    {\n        return 0;\n",
-    );
-    let lowered = Lowered(common::checked_inlining(&common::sharp_files::type_file(&code), &code, &[], &forms, lower));
+    let code = "namespace App.Tenant;\n\npublic class Report\n{\n    private List<int> sizes = [0];\n\n    public void run(int extra)\n    {\n        this.sizes[this.at()] = extra;\n    }\n\n    private int at()\n    {\n        return 0;\n    }\n}\n";
+    let lowered = Lowered(common::checked_inlining(&common::sharp_files::type_file(code), code, &[], &forms, lower));
 
     assert_eq!(
         lowered.body(),
@@ -10933,7 +10965,9 @@ fn a_list_index_write_calls_a_set_whose_form_calls_before_it_reads_every_slot() 
                   ZVAL "Sharp\\ListMembers"
                   ZVAL "set"
                   ARG_LIST
-                    VAR
+                    PROP
+                      VAR
+                        ZVAL "this"
                       ZVAL "sizes"
                     VAR
                       ZVAL "index#1"
@@ -11514,6 +11548,11 @@ fn a_change_runs_its_values_before_it_takes_its_place() {
                             ZVAL "value#1"
                       null
                   ZVAL 1
+              ASSIGN
+                VAR
+                  ZVAL "held"
+                VAR
+                  ZVAL "prices"
               STMT_LIST
                 ASSIGN
                   VAR
@@ -11534,7 +11573,7 @@ fn a_change_runs_its_values_before_it_takes_its_place() {
                       ARG_LIST
                         DIM
                           VAR
-                            ZVAL "prices"
+                            ZVAL "held"
                           VAR
                             ZVAL "index#1"
                         VAR
@@ -11543,7 +11582,7 @@ fn a_change_runs_its_values_before_it_takes_its_place() {
                     ZVAL "Sharp\\Internal\\set"
                     ARG_LIST
                       VAR
-                        ZVAL "prices"
+                        ZVAL "held"
                       VAR
                         ZVAL "index#1"
                       VAR
@@ -13224,6 +13263,7 @@ fn an_emptied_list_field_takes_add_as_the_list_method() {
 /// $standings = [$status];
 /// $standings = [];
 /// \Sharp\Internal\add($standings, $status);
+/// return $standings;
 /// ```
 ///
 /// `standings = []` leaves the local a `List<Calc>`, whose `add` takes an element, so a case goes in as the case.
@@ -13231,8 +13271,8 @@ fn an_emptied_list_field_takes_add_as_the_list_method() {
 fn a_backed_enum_value_goes_into_an_emptied_list_add_as_its_case() {
     assert_eq!(
         body_in(
-            "void run(Calc status)",
-            "        List<Calc> standings = [status];\n        standings = [];\n        standings.add(status);\n",
+            "List<Calc> run(Calc status)",
+            "        List<Calc> standings = [status];\n        standings = [];\n        standings.add(status);\n        return standings;\n",
             &[("src/Lib/Calc.php", "<?php namespace Lib; enum Calc: string { case Active = 'a'; case Closed = 'c'; }")]
         ),
         indoc! {r#"
@@ -13256,6 +13296,9 @@ fn a_backed_enum_value_goes_into_an_emptied_list_add_as_its_case() {
                     ZVAL "standings"
                   VAR
                     ZVAL "status"
+              RETURN
+                VAR
+                  ZVAL "standings"
         "#}
     );
 }
@@ -23222,7 +23265,7 @@ fn arithmetic_operators_are_binary_ops() {
 fn comparison_operators_are_the_kinds_php_gives_them() {
     let tree = body_in(
         "int run(Calc calc)",
-        "        let a = 1;\n        let b = a == a;\n        b = a != a;\n        b = calc === calc;\n        b = calc !== calc;\n        b = a < a;\n        b = a <= a;\n        b = a > a;\n        b = a >= a;\n        return a;\n",
+        "        let a = 1;\n        let b = a == a;\n        b = a != a;\n        b = calc === calc;\n        b = calc !== calc;\n        b = a < a;\n        b = a <= a;\n        b = a > a;\n        b = a >= a;\n        return b ? a : 0;\n",
         &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc {}")],
     );
 
@@ -23259,7 +23302,7 @@ fn assigned_values(tree: &str) -> Vec<&str> {
 fn equality_with_null_is_identity() {
     let tree = body_in(
         "int run(int? extra)",
-        "        let a = extra;\n        let b = a == null;\n        b = null != a;\n        b = a == a;\n        return 1;\n",
+        "        let a = extra;\n        let b = a == null;\n        b = null != a;\n        b = a == a;\n        return b ? 1 : 0;\n",
         &[],
     );
 
@@ -23285,7 +23328,7 @@ fn equality_of_strings_ints_and_enums_is_identity() {
 
 /// ```php
 /// $b = \Sharp\Internal\equals($either, $tags); $b = !\Sharp\Internal\equals($either, 1);
-/// return \Sharp\Internal\equals($tuple, 1);
+/// return $b && \Sharp\Internal\equals($tuple, 1);
 ///
 /// return \Sharp\Internal\contains($rows, $either);
 /// ```
@@ -23296,7 +23339,7 @@ fn equality_of_strings_ints_and_enums_is_identity() {
 fn equality_of_a_union_that_holds_a_collection_compares_by_what_it_holds() {
     let body = body_in(
         "bool run(Set<int>|int either, Set<int> tags, int|[int, string] tuple)",
-        "        let b = either == tags;\n        b = either != 1;\n        return tuple == 1;\n",
+        "        let b = either == tags;\n        b = either != 1;\n        return b && tuple == 1;\n",
         &[],
     );
     let comparisons = &body[body.find("  ASSIGN\n    VAR\n      ZVAL \"b\"").expect("the comparisons")..];
@@ -23326,12 +23369,15 @@ fn equality_of_a_union_that_holds_a_collection_compares_by_what_it_holds() {
                         ZVAL "either"
                       ZVAL 1
               RETURN
-                CALL
-                  ZVAL "Sharp\\Internal\\equals"
-                  ARG_LIST
-                    VAR
-                      ZVAL "tuple"
-                    ZVAL 1
+                AND
+                  VAR
+                    ZVAL "b"
+                  CALL
+                    ZVAL "Sharp\\Internal\\equals"
+                    ARG_LIST
+                      VAR
+                        ZVAL "tuple"
+                      ZVAL 1
         "#}
     );
     // A search is the engine's, which compares each element as `==` does, never with `\in_array`'s `===`.
@@ -23358,7 +23404,7 @@ fn equality_of_a_union_that_holds_a_collection_compares_by_what_it_holds() {
 
 /// ```php
 /// $b = \Sharp\Internal\equals($raw, $counts); $b = !\Sharp\Internal\equals($raw, 1.5); $b = $raw === "pro";
-/// return $raw === null;
+/// return $b && $raw === null;
 /// ```
 ///
 /// Spec section 24: an unchecked `Any?` compares by value with whatever it holds, so `==` on it runs the engine's
@@ -23369,7 +23415,7 @@ fn equality_of_a_union_that_holds_a_collection_compares_by_what_it_holds() {
 fn equality_of_an_unchecked_any_compares_by_value() {
     let body = body_in(
         "bool run(Any? raw, Map<string, int> counts)",
-        "        let b = raw == counts;\n        b = raw != 1.5;\n        b = raw == \"pro\";\n        return raw == null;\n",
+        "        let b = raw == counts;\n        b = raw != 1.5;\n        b = raw == \"pro\";\n        return b && raw == null;\n",
         &[],
     );
     let comparisons = &body[body.find("  ASSIGN\n    VAR\n      ZVAL \"b\"").expect("the comparisons")..];
@@ -23406,10 +23452,13 @@ fn equality_of_an_unchecked_any_compares_by_value() {
                     ZVAL "raw"
                   ZVAL "pro"
               RETURN
-                BINARY_OP [16]
+                AND
                   VAR
-                    ZVAL "raw"
-                  ZVAL null
+                    ZVAL "b"
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "raw"
+                    ZVAL null
         "#}
     );
 }
@@ -23946,7 +23995,7 @@ fn a_null_safe_call_and_a_map_of_floats_check_their_results() {
 
 /// ```php
 /// $b = \Sharp\Internal\equals($kind, $other); $b = !\Sharp\Internal\equals($kind, $other);
-/// return \Sharp\Internal\contains($kinds, $kind);
+/// return $b && \Sharp\Internal\contains($kinds, $kind);
 /// ```
 ///
 /// Spec section 25: `==` compares two class values by their whole type, type arguments included, as C# compares two
@@ -23957,7 +24006,7 @@ fn equality_of_class_values_compares_their_whole_types() {
     assert_eq!(
         body_in(
             "bool run(Class<Order> kind, Class<Order> other, List<Class<Order>> kinds)",
-            "        let b = kind == other;\n        b = kind != other;\n        return kinds.contains(kind);\n",
+            "        let b = kind == other;\n        b = kind != other;\n        return b && kinds.contains(kind);\n",
             &[("src/App/Tenant/Order.php", "<?php namespace App\\Tenant; final class Order {}")],
         ),
         indoc! {r#"
@@ -23984,13 +24033,16 @@ fn equality_of_class_values_compares_their_whole_types() {
                       VAR
                         ZVAL "other"
               RETURN
-                CALL
-                  ZVAL "Sharp\\Internal\\contains"
-                  ARG_LIST
-                    VAR
-                      ZVAL "kinds"
-                    VAR
-                      ZVAL "kind"
+                AND
+                  VAR
+                    ZVAL "b"
+                  CALL
+                    ZVAL "Sharp\\Internal\\contains"
+                    ARG_LIST
+                      VAR
+                        ZVAL "kinds"
+                      VAR
+                        ZVAL "kind"
         "#}
     );
 }
@@ -24140,7 +24192,7 @@ fn equality_of_an_int_and_a_float_compares_them_as_floats() {
     assert_eq!(
         body_in(
             "int run(int count, float ratio)",
-            "        let b = count == ratio;\n        b = ratio != count;\n        return 1;\n",
+            "        let b = count == ratio;\n        b = ratio != count;\n        return b ? 1 : 0;\n",
             &[]
         ),
         indoc! {r#"
@@ -24164,7 +24216,11 @@ fn equality_of_an_int_and_a_float_compares_them_as_floats() {
                     VAR
                       ZVAL "count"
               RETURN
-                ZVAL 1
+                CONDITIONAL
+                  VAR
+                    ZVAL "b"
+                  ZVAL 1
+                  ZVAL 0
         "#}
     );
 }
@@ -24213,7 +24269,7 @@ fn equality_of_a_nullable_int_and_a_float_compares_null_before_the_floats() {
     assert_eq!(
         body_in(
             "int run(int? count, float? ratio)",
-            "        let b = count == ratio;\n        b = count != 1.5;\n        return 1;\n",
+            "        let b = count == ratio;\n        b = count != 1.5;\n        return b ? 1 : 0;\n",
             &[]
         ),
         indoc! {r#"
@@ -24279,7 +24335,11 @@ fn equality_of_a_nullable_int_and_a_float_compares_null_before_the_floats() {
                         VAR
                           ZVAL "operand#2"
               RETURN
-                ZVAL 1
+                CONDITIONAL
+                  VAR
+                    ZVAL "b"
+                  ZVAL 1
+                  ZVAL 0
         "#}
     );
 }
@@ -24369,7 +24429,7 @@ fn string_ordering_is_strcmp_compared_with_zero() {
     assert_eq!(
         body_in(
             "int run(string text, string other, int total)",
-            "        let b = text < \"9\";\n        b = text >= other;\n        b = total < 9;\n        return 1;\n",
+            "        let b = text < \"9\";\n        b = text >= other;\n        b = total < 9;\n        return b ? 1 : 0;\n",
             &[],
         ),
         indoc! {r#"
@@ -24405,7 +24465,11 @@ fn string_ordering_is_strcmp_compared_with_zero() {
                     ZVAL "total"
                   ZVAL 9
               RETURN
-                ZVAL 1
+                CONDITIONAL
+                  VAR
+                    ZVAL "b"
+                  ZVAL 1
+                  ZVAL 0
         "#}
     );
 }
@@ -24794,18 +24858,23 @@ fn casts_between_numbers_are_casts_to_their_types() {
 }
 
 /// ```php
-/// $extra ??= 1; $this->count ??= $extra;
+/// $extra = $given; $extra ??= 1; $this->count ??= $extra;
 /// ```
 #[test]
 fn null_coalescing_assignment_is_assign_coalesce() {
     assert_eq!(
         child_body(
-            "int run(int? extra)",
-            "        extra ??= 1;\n        this.count ??= extra;\n        return extra;\n",
+            "int run(int? given)",
+            "        let extra = given;\n        extra ??= 1;\n        this.count ??= extra;\n        return extra;\n",
             "<?php namespace App\\Tenant; class Base { public ?int $count = null; }",
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "extra"
+                VAR
+                  ZVAL "given"
               ASSIGN_COALESCE
                 VAR
                   ZVAL "extra"
@@ -25275,6 +25344,7 @@ fn a_named_break_or_continue_has_the_depth_of_the_loop_it_names() {
 }
 
 /// ```php
+/// $extra = $given;
 /// for ($step = 0; $step < $extra; $step++, $extra--) {
 /// }
 /// for (;;) {
@@ -25287,11 +25357,18 @@ fn a_named_break_or_continue_has_the_depth_of_the_loop_it_names() {
 #[test]
 fn for_loops_are_for_nodes_with_an_expression_list_per_part() {
     assert_eq!(
-        body(
-            "        for (let step = 0; step < extra; step++, extra--) {\n        }\n        for (;;) {\n            break;\n        }\n        return extra;\n"
+        body_in(
+            "int run(int given)",
+            "        let extra = given;\n        for (let step = 0; step < extra; step++, extra--) {\n        }\n        for (;;) {\n            break;\n        }\n        return extra;\n",
+            &[]
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "extra"
+                VAR
+                  ZVAL "given"
               FOR
                 EXPR_LIST
                   ASSIGN
@@ -25360,6 +25437,7 @@ fn a_typed_for_counter_is_the_assignment_of_its_value() {
 }
 
 /// ```php
+/// $extra = $given;
 /// foreach (\Sharp\Internal\returned(\Lib\Calc::make(2), null, '', 'Map<int|string, int>', …) as $key#1 => $value#2) {
 ///     $entry = [$key#1, $value#2];
 ///     $extra += $entry[1];
@@ -25374,8 +25452,8 @@ fn a_typed_for_counter_is_the_assignment_of_its_value() {
 fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
     assert_eq!(
         body_in(
-            RUN,
-            "        for (const entry of Calc.make(2)) {\n            extra += entry[1];\n        }\n        for (let [key, value] of Calc.make(3)) {\n        }\n        return extra;\n",
+            "int run(int given)",
+            "        let extra = given;\n        for (const entry of Calc.make(2)) {\n            extra += entry[1];\n        }\n        for (let [key, value] of Calc.make(3)) {\n        }\n        return extra;\n",
             &[(
                 "src/Lib/Calc.php",
                 "<?php namespace Lib; final class Calc { /** @return array<int|string, int> */ public static function make(int $n): array { return [$n => $n]; } }",
@@ -25383,6 +25461,11 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "extra"
+                VAR
+                  ZVAL "given"
               FOREACH
                 CALL
                   ZVAL "Sharp\\Internal\\returned"
@@ -26105,6 +26188,7 @@ fn throw_is_a_throw_expression() {
 }
 
 /// ```php
+/// $extra = $given;
 /// try {
 ///     $extra += 1;
 /// } catch (\Lib\Calc | \App\Tenant\Missing $failure) {
@@ -26121,12 +26205,17 @@ fn throw_is_a_throw_expression() {
 fn try_is_a_try_node_with_a_catch_list_and_a_finally_block() {
     assert_eq!(
         body_in(
-            RUN,
-            "        try {\n            extra += 1;\n        } catch (Calc | Missing failure) {\n            throw failure;\n        } catch (Broken) {\n        } finally {\n            extra -= 1;\n        }\n        return extra;\n",
+            "int run(int given)",
+            "        let extra = given;\n        try {\n            extra += 1;\n        } catch (Calc | Missing failure) {\n            throw failure;\n        } catch (Broken) {\n        } finally {\n            extra -= 1;\n        }\n        return extra;\n",
             &[("src/Lib/Calc.php", "<?php namespace Lib; final class Calc extends \\Exception {}"), common::FAILURES]
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "extra"
+                VAR
+                  ZVAL "given"
               TRY
                 STMT_LIST
                   ASSIGN_OP [1]
@@ -26248,6 +26337,11 @@ fn a_try_with_a_generic_catch_clause_catches_throwable_and_tests_each_clause_in_
         lowered.body(),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "extra"
+                VAR
+                  ZVAL "given"
               TRY
                 STMT_LIST
                   ASSIGN_OP [1]
@@ -27490,6 +27584,7 @@ fn a_for_counter_a_lambda_captures_by_reference_is_fresh_in_each_pass() {
 }
 
 /// ```php
+/// $extra = $given;
 /// for ($step = 0; $step < $extra; $step++) {
 ///     do { while ($extra > 2) { if ($step == 1) { continue 2; } if ($step == 3) { break 3; } $extra -= 1; } $show = function () use (&$step) { return $step; }; } while (false);
 ///     $step#1 = $step; unset($step); $step = $step#1;
@@ -27502,12 +27597,17 @@ fn a_for_counter_a_lambda_captures_by_reference_is_fresh_in_each_pass() {
 fn a_named_jump_to_a_for_with_a_fresh_counter_reaches_the_counter_move() {
     assert_eq!(
         body_in(
-            "void run(int extra)",
-            "        steps: for (let step = 0; step < extra; step++) {\n            while (extra > 2) {\n                if (step == 1) { continue steps; }\n                if (step == 3) { break steps; }\n                extra -= 1;\n            }\n            const show = () => step;\n        }\n",
+            "void run(int given)",
+            "        let extra = given;\n        steps: for (let step = 0; step < extra; step++) {\n            while (extra > 2) {\n                if (step == 1) { continue steps; }\n                if (step == 3) { break steps; }\n                extra -= 1;\n            }\n            const show = () => step;\n        }\n",
             &[],
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "extra"
+                VAR
+                  ZVAL "given"
               FOR
                 EXPR_LIST
                   ASSIGN
@@ -27558,7 +27658,7 @@ fn a_named_jump_to_a_for_with_a_fresh_counter_reaches_the_counter_move() {
                       ASSIGN
                         VAR
                           ZVAL "show"
-                        CLOSURE "" @15-15
+                        CLOSURE "" @16-16
                           PARAM_LIST
                           CLOSURE_USES
                             ZVAL [1] "step"
@@ -27590,6 +27690,7 @@ fn a_named_jump_to_a_for_with_a_fresh_counter_reaches_the_counter_move() {
 }
 
 /// ```php
+/// $extra = $given;
 /// while ($extra > 0) {
 ///     $extra -= 1;
 ///     { unset($step); }
@@ -27607,12 +27708,17 @@ fn a_named_jump_to_a_for_with_a_fresh_counter_reaches_the_counter_move() {
 fn a_for_counter_a_lambda_captures_inside_a_loop_is_unset_before_the_for() {
     assert_eq!(
         body_in(
-            "void run(int extra)",
-            "        while (extra > 0) {\n            extra -= 1;\n            for (let step = 0; step < extra; step++) {\n                if (step == 1) { continue; }\n                if (step == 3) { break; }\n                const show = () => step;\n            }\n        }\n",
+            "void run(int given)",
+            "        let extra = given;\n        while (extra > 0) {\n            extra -= 1;\n            for (let step = 0; step < extra; step++) {\n                if (step == 1) { continue; }\n                if (step == 3) { break; }\n                const show = () => step;\n            }\n        }\n",
             &[],
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "extra"
+                VAR
+                  ZVAL "given"
               WHILE
                 GREATER
                   VAR
@@ -27668,7 +27774,7 @@ fn a_for_counter_a_lambda_captures_inside_a_loop_is_unset_before_the_for() {
                             ASSIGN
                               VAR
                                 ZVAL "show"
-                              CLOSURE "" @14-14
+                              CLOSURE "" @15-15
                                 PARAM_LIST
                                 CLOSURE_USES
                                   ZVAL [1] "step"
@@ -27700,6 +27806,7 @@ fn a_for_counter_a_lambda_captures_inside_a_loop_is_unset_before_the_for() {
 }
 
 /// ```php
+/// $extra = $given;
 /// while ($extra > 0) {
 ///     { unset($seen); $seen = $extra; }
 ///     $mark = function () use (&$seen) { $seen += 1; };
@@ -27715,11 +27822,18 @@ fn a_for_counter_a_lambda_captures_inside_a_loop_is_unset_before_the_for() {
 #[test]
 fn a_let_in_a_loop_captured_by_reference_is_unset_before_its_assignment() {
     assert_eq!(
-        body(
-            "        while (extra > 0) {\n            let seen = extra;\n            const mark = () => {\n                seen += 1;\n            };\n            mark();\n            extra -= 1;\n        }\n        return extra;\n"
+        body_in(
+            "int run(int given)",
+            "        let extra = given;\n        while (extra > 0) {\n            let seen = extra;\n            const mark = () => {\n                seen += 1;\n            };\n            mark();\n            extra -= 1;\n        }\n        return extra;\n",
+            &[]
         ),
         indoc! {r#"
             STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "extra"
+                VAR
+                  ZVAL "given"
               WHILE
                 GREATER
                   VAR
@@ -27739,7 +27853,7 @@ fn a_let_in_a_loop_captured_by_reference_is_unset_before_its_assignment() {
                   ASSIGN
                     VAR
                       ZVAL "mark"
-                    CLOSURE "" @11-13
+                    CLOSURE "" @12-14
                       PARAM_LIST
                       CLOSURE_USES
                         ZVAL [1] "seen"
@@ -27771,8 +27885,10 @@ fn a_let_in_a_loop_captured_by_reference_is_unset_before_its_assignment() {
 /// lambda sits in a loop.
 #[test]
 fn a_let_declared_inside_a_lambda_in_a_loop_is_not_unset() {
-    let tree = body(
-        "        while (extra > 0) {\n            const step = () => {\n                let inner = 1;\n                const again = () => {\n                    inner += 1;\n                };\n                again();\n            };\n            step();\n            extra -= 1;\n        }\n        return extra;\n",
+    let tree = body_in(
+        "int run(int given)",
+        "        let extra = given;\n        while (extra > 0) {\n            const step = () => {\n                let inner = 1;\n                const again = () => {\n                    inner += 1;\n                };\n                again();\n            };\n            step();\n            extra -= 1;\n        }\n        return extra;\n",
+        &[],
     );
 
     assert!(!tree.contains("UNSET"), "{tree}");

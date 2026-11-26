@@ -4757,25 +4757,41 @@ fn report_comparison_chain(span: Span, groupings: &[String], context: &mut Conte
 }
 
 /// Reports an expression statement whose top operator is a binary one other than `??`, without an assignment for an
-/// operand: its result is never used. An arithmetic or bitwise operator on a write target names its compound
-/// assignment.
+/// operand: its result is never used. An arithmetic or bitwise operator on a write target that can change names its
+/// compound assignment.
 fn report_no_effect(binary: &Binary, context: &mut Context<'_, '_, '_>) {
-    let fix =
-        if (binary.operator.is_arithmetic() || binary.operator.is_bitwise()) && is_slice_target(binary.lhs, context) {
-            format!(
-                "write `{} {}= {}` to keep its result",
-                BytesDisplay(context.get_code_snippet(binary.lhs)),
-                BytesDisplay(binary.operator.as_bytes()),
-                BytesDisplay(context.get_code_snippet(binary.rhs))
-            )
-        } else {
-            format!("use the result of `{}`, or remove the statement", BytesDisplay(context.get_code_snippet(binary)))
-        };
+    let fix = if (binary.operator.is_arithmetic() || binary.operator.is_bitwise())
+        && is_slice_target(binary.lhs, context)
+        && !never_changes(binary.lhs, context)
+    {
+        format!(
+            "write `{} {}= {}` to keep its result",
+            BytesDisplay(context.get_code_snippet(binary.lhs)),
+            BytesDisplay(binary.operator.as_bytes()),
+            BytesDisplay(context.get_code_snippet(binary.rhs))
+        )
+    } else {
+        format!("use the result of `{}`, or remove the statement", BytesDisplay(context.get_code_snippet(binary)))
+    };
 
     context.report(
         Issue::error(format!("This statement has no effect: {fix}."))
             .with_annotation(Annotation::primary(binary.span()).with_message("Its result is never used.")),
     );
+}
+
+/// Whether a write target is a `const` local or a parameter, or an index of one, which `check_const_write` and the
+/// analyzer refuse to change. An extension's `ref` receiver changes.
+fn never_changes(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
+    match target {
+        Expression::ConstantAccess(access) => matches!(
+            context.names.binding(&access.name),
+            Some(Binding::Local(local)) if local.kind == LocalKind::Const
+                || (local.kind == LocalKind::Parameter && !is_ref_receiver(&local, context))
+        ),
+        Expression::ArrayAccess(access) => never_changes(access.array, context),
+        _ => false,
+    }
 }
 
 /// The expression a node writes: the left side of an assignment, or the operand of `++` or `--`.
@@ -6540,7 +6556,8 @@ enum Written<'ast, 'arena> {
 }
 
 /// Reports a write, such as `assign to` or `increment`, to a local declared with `const`, or to a parameter, which
-/// never changes, spec section 2. An extension's `ref` receiver is written back to its caller, so it changes.
+/// never changes, spec section 2. An extension's `ref` receiver is written back to its caller, so it changes. A write
+/// of `willSet`'s `value` gets `check_will_set`'s error, which names the `set` body that can change the write.
 ///
 /// A write after the local's block closed reports only its scope error.
 fn check_const_write(target: &Expression, write: &str, written: Written<'_, '_>, context: &mut Context<'_, '_, '_>) {
@@ -6570,7 +6587,7 @@ fn check_const_write(target: &Expression, write: &str, written: Written<'_, '_>,
                 .with_annotation(Annotation::secondary(local.declaration).with_message("Declared with `const` here."))
                 .with_help(format!("Declare `{name}` with `let` to change it.")),
         ),
-        LocalKind::Parameter if !is_ref_receiver(&local, context) => {
+        LocalKind::Parameter if !is_ref_receiver(&local, context) && !is_will_set_value(&local, context) => {
             let snippet = |span: Span| String::from_utf8_lossy(context.get_code_snippet(span)).into_owned();
             let value = match written {
                 Written::Value(value) => snippet(value.span()),
@@ -6606,6 +6623,20 @@ fn is_ref_receiver(local: &Local, context: &Context<'_, '_, '_>) -> bool {
             }))
         })
     })
+}
+
+/// Whether `local` is the `value` a `willSet` declares at its name, whose write `check_will_set` reports.
+fn is_will_set_value(local: &Local, context: &Context<'_, '_, '_>) -> bool {
+    !Node::Program(context.program)
+        .filter_map(|node| match node {
+            Node::PropertyHook(accessor)
+                if accessor.name.value == b"willSet" && accessor.name.span == local.declaration =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+        .is_empty()
 }
 
 /// Checks a local's name, and reports an empty literal, or a `let` that starts as `null`, declared without a type,

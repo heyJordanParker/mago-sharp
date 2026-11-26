@@ -18,6 +18,7 @@ use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ExpressionStatement;
+use mago_syntax::cst::Identifier;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::Program;
@@ -180,17 +181,15 @@ impl<'ast, 'arena> Walker<'ast, 'arena, LocalUses<'_, 'arena>> for LocalUseWalke
         }
     }
 
-    fn walk_in_constant_access(&self, constant_access: &'ast ConstantAccess<'arena>, uses: &mut LocalUses<'_, 'arena>) {
-        let Some(Binding::Local(local @ Local { kind: LocalKind::Let, .. })) =
-            uses.names.binding(&constant_access.name)
-        else {
+    fn walk_in_identifier(&self, identifier: &'ast Identifier<'arena>, uses: &mut LocalUses<'_, 'arena>) {
+        let Some(Binding::Local(local @ Local { kind: LocalKind::Let, .. })) = uses.names.binding(identifier) else {
             return;
         };
-        if uses.caught.contains(&local.declaration) {
+        let span = identifier.span();
+        if span == local.declaration || uses.caught.contains(&local.declaration) {
             return;
         }
 
-        let span = constant_access.span();
         let declared = local.declaration.start.offset;
         let captured = uses.lambdas.iter().any(|&lambda| declared < lambda);
         let value_used = uses.called.contains(&span) && !uses.called_alone.contains(&span);
@@ -203,7 +202,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, LocalUses<'_, 'arena>> for LocalUseWalke
         if !changes {
             local_use.read = true;
         } else if local_use.last_change.as_ref().is_none_or(|(last, _)| last.start.offset < span.start.offset) {
-            local_use.last_change = Some((span, BytesDisplay(constant_access.name.value()).to_string()));
+            local_use.last_change = Some((span, BytesDisplay(identifier.value()).to_string()));
         }
     }
 }

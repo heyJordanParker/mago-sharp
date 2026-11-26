@@ -1990,7 +1990,7 @@ fn a_typed_local_takes_values_of_its_written_type_with_no_issues() {
 
 #[test]
 fn locals_of_sibling_blocks_keep_their_own_written_types() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void total(bool flag)\n    {\n        if (flag) {\n            int value = 1;\n            value = 2;\n        } else {\n            string value = \"one\";\n            value = \"two\";\n        }\n        {\n            float value = 1.5;\n            value = 2.5;\n        }\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string total(bool flag)\n    {\n        let text = \"\";\n        if (flag) {\n            int value = 1;\n            value = 2;\n            text = `${value}`;\n        } else {\n            string value = \"one\";\n            value = \"two\";\n            text = value;\n        }\n        {\n            float value = 1.5;\n            value = 2.5;\n            text = `${text} ${value}`;\n        }\n        return text;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -6241,7 +6241,7 @@ fn a_paradoxical_or_repeated_condition_names_its_php_sharp_types() {
 /// meant. A compound form is named as written. PHP turns both `bool`s into ints.
 #[test]
 fn a_bitwise_operator_on_two_bools_names_the_bool_operator_to_write() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool show(bool isAdmin, bool isOwner)\n    {\n        const either = isAdmin | isOwner;\n        const both = isAdmin & isOwner;\n        const one = isAdmin ^ isOwner;\n        isAdmin |= isOwner;\n        return either && both && one && isAdmin;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool show(bool isAdmin, bool isOwner)\n    {\n        const either = isAdmin | isOwner;\n        const both = isAdmin & isOwner;\n        const one = isAdmin ^ isOwner;\n        let admin = isAdmin;\n        admin |= isOwner;\n        return either && both && one && admin;\n    }\n}\n";
     let help = "`||`, `&&` and `!=` join two `bool` values.";
 
     assert_eq!(
@@ -6257,7 +6257,7 @@ fn a_bitwise_operator_on_two_bools_names_the_bool_operator_to_write() {
                 "9:21 invalid-operand `^` takes `int`, but both sides are `bool`: write `!=` for two `bool` values. | {help}"
             ),
             format!(
-                "10:9 invalid-operand `|=` takes `int`, but both sides are `bool`: write `||` for two `bool` values. | {help}"
+                "11:9 invalid-operand `|=` takes `int`, but both sides are `bool`: write `||` for two `bool` values. | {help}"
             ),
         ]
     );
@@ -8237,7 +8237,7 @@ fn a_void_call_through_null_safe_access_gives_no_value() {
         ("src/Demo/Counter.sharp", "namespace Demo;\n\nclass Counter\n{\n    public void count() { }\n}\n"),
         ("src/Demo/Holder.sharp", "namespace Demo;\n\nclass Holder\n{\n    public Box box { get; } = new Box();\n}\n"),
     ];
-    let sharp = "namespace Demo;\n\nimport Sharp.Scope;\n\nclass Report\n{\n    private Box box = new Box();\n\n    public Any? saved => this.box.save();\n\n    public Any? held { get { return this.box.save(); } }\n\n    public static void log(Any? value) { }\n\n    public Any? sure(Box box)\n    {\n        return box.save();\n    }\n\n    public Any? maybe(Box? maybe)\n    {\n        return maybe?.save();\n    }\n\n    public Any? sureArrow(Box box) => box.save();\n\n    public Any? maybeArrow(Box? maybe) => maybe?.save();\n\n    public Any? stops(Box box) => box.fail();\n\n    public Any? maybeStops(Box? maybe) => maybe?.fail();\n\n    public void lambdas(Box box, Box? maybe)\n    {\n        Function<void()> a = () => box.save();\n        Function<void()> b = () => maybe?.save();\n        Function<Any?()> c = () => box.save();\n        Function<Any?()> d = () => maybe?.save();\n        const e = () => box.save();\n        const f = () => maybe?.save();\n        Function<int()> g = () => box.save();\n        Function<int?()> h = () => maybe?.save();\n        Scope.run(() => box.save());\n        Scope.run(() => maybe?.save());\n        int i = Scope.run(() => box.save());\n    }\n\n    public void run(Box box, Box? maybe, Holder held, Holder? holder, Function<void()> done, Function<void()>? hook, List<int> kept, List<int>? seen, bool flag, (List<int>|Counter)? counted)\n    {\n        const a = box.save();\n        const b = maybe?.save();\n        Report.log(box.save());\n        Report.log(maybe?.save());\n        const c = box.save() ?? 1;\n        const d = maybe?.save() ?? 1;\n        const e = `${box.save()}`;\n        const f = `${maybe?.save()}`;\n        const g = held.box.save();\n        const h = holder?.box.save();\n        const i = done();\n        const j = hook?.();\n        const k = kept.clear();\n        const l = seen?.clear();\n        const m = Box.make();\n        const type = flag ? typeof(Box) : null;\n        const n = type?.make();\n        const o = counted?.count();\n        maybe?.save();\n        holder?.box.save();\n        hook?.();\n        seen?.clear();\n        type?.make();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Sharp.Scope;\n\nclass Report\n{\n    private Box box = new Box();\n\n    public Any? saved => this.box.save();\n\n    public Any? held { get { return this.box.save(); } }\n\n    public static void log(Any? value) { }\n\n    public Any? sure(Box box)\n    {\n        return box.save();\n    }\n\n    public Any? maybe(Box? maybe)\n    {\n        return maybe?.save();\n    }\n\n    public Any? sureArrow(Box box) => box.save();\n\n    public Any? maybeArrow(Box? maybe) => maybe?.save();\n\n    public Any? stops(Box box) => box.fail();\n\n    public Any? maybeStops(Box? maybe) => maybe?.fail();\n\n    public void lambdas(Box box, Box? maybe)\n    {\n        Function<void()> a = () => box.save();\n        Function<void()> b = () => maybe?.save();\n        Function<Any?()> c = () => box.save();\n        Function<Any?()> d = () => maybe?.save();\n        const e = () => box.save();\n        const f = () => maybe?.save();\n        Function<int()> g = () => box.save();\n        Function<int?()> h = () => maybe?.save();\n        Scope.run(() => box.save());\n        Scope.run(() => maybe?.save());\n        int i = Scope.run(() => box.save());\n    }\n\n    public void run(Box box, Box? maybe, Holder held, Holder? holder, Function<void()> done, Function<void()>? hook, bool flag, (List<int>|Counter)? counted)\n    {\n        List<int> kept = [1];\n        List<int>? seen = flag ? [2] : null;\n        const a = box.save();\n        const b = maybe?.save();\n        Report.log(box.save());\n        Report.log(maybe?.save());\n        const c = box.save() ?? 1;\n        const d = maybe?.save() ?? 1;\n        const e = `${box.save()}`;\n        const f = `${maybe?.save()}`;\n        const g = held.box.save();\n        const h = holder?.box.save();\n        const i = done();\n        const j = hook?.();\n        const k = kept.clear();\n        const l = seen?.clear();\n        const m = Box.make();\n        const type = flag ? typeof(Box) : null;\n        const n = type?.make();\n        const o = counted?.count();\n        maybe?.save();\n        holder?.box.save();\n        hook?.();\n        seen?.clear();\n        type?.make();\n    }\n}\n";
     let no_value = |at: &str, call: &str| {
         format!(
             "{at} no-value: `{call}` returns nothing, so it has no value to use: call it as a statement of its own."
@@ -8254,23 +8254,23 @@ fn a_void_call_through_null_safe_access_gives_no_value() {
         no_value("41:35", "box.save()"),
         no_value("42:36", "maybe?.save()"),
         no_value("45:33", "box.save()"),
-        no_value("50:19", "box.save()"),
-        no_value("51:19", "maybe?.save()"),
-        no_value("52:20", "box.save()"),
-        no_value("53:20", "maybe?.save()"),
-        no_value("54:19", "box.save()"),
-        no_value("55:19", "maybe?.save()"),
-        no_value("56:22", "box.save()"),
-        no_value("57:22", "maybe?.save()"),
-        no_value("58:19", "held.box.save()"),
-        no_value("59:19", "holder?.box.save()"),
-        no_value("60:19", "done()"),
-        no_value("61:19", "hook?.()"),
-        no_value("62:19", "kept.clear()"),
-        no_value("63:19", "seen?.clear()"),
-        no_value("64:19", "Box.make()"),
-        "66:19 invalid-class-string-expression: A class value reflects, and calls no static. Call `Box.make` by its class's name, or through a type parameter.".to_owned(),
-        "72:9 invalid-class-string-expression: A class value reflects, and calls no static. Call `Box.make` by its class's name, or through a type parameter.".to_owned(),
+        no_value("52:19", "box.save()"),
+        no_value("53:19", "maybe?.save()"),
+        no_value("54:20", "box.save()"),
+        no_value("55:20", "maybe?.save()"),
+        no_value("56:19", "box.save()"),
+        no_value("57:19", "maybe?.save()"),
+        no_value("58:22", "box.save()"),
+        no_value("59:22", "maybe?.save()"),
+        no_value("60:19", "held.box.save()"),
+        no_value("61:19", "holder?.box.save()"),
+        no_value("62:19", "done()"),
+        no_value("63:19", "hook?.()"),
+        no_value("64:19", "kept.clear()"),
+        no_value("65:19", "seen?.clear()"),
+        no_value("66:19", "Box.make()"),
+        "68:19 invalid-class-string-expression: A class value reflects, and calls no static. Call `Box.make` by its class's name, or through a type parameter.".to_owned(),
+        "74:9 invalid-class-string-expression: A class value reflects, and calls no static. Call `Box.make` by its class's name, or through a type parameter.".to_owned(),
     ];
     assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 3]);
     assert_messages(
@@ -18913,12 +18913,12 @@ fn a_list_literal_is_passed_where_a_set_is_expected_and_a_list_or_a_map_is_not()
 /// A plain PHP caller still passes a list to a PHP# method, which makes it a `Set` before its body runs.
 #[test]
 fn a_list_literal_argument_is_the_set_its_parameter_declares_and_a_list_variable_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public void take(Set<string> tags)\n    {\n    }\n\n    public void many(Set<string> ...tags)\n    {\n    }\n\n    public void run(List<string> names, List<Set<string>> all, Function<bool(Set<string>)> check)\n    {\n        this.take(names);\n        this.many(names, [\"vip\"]);\n        all.add([\"vip\"]);\n        all.add(names);\n        check([\"vip\"]);\n        const typed = (Set<string> tags) => tags.contains(\"vip\");\n        typed([\"vip\"]);\n        Function<bool(Set<string>)> inferred = tags => tags.contains(\"vip\");\n        inferred(names);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    private List<Set<string>> all = [];\n\n    public void take(Set<string> tags)\n    {\n    }\n\n    public void many(Set<string> ...tags)\n    {\n    }\n\n    public void run(List<string> names, Function<bool(Set<string>)> check)\n    {\n        this.take(names);\n        this.many(names, [\"vip\"]);\n        this.all.add([\"vip\"]);\n        this.all.add(names);\n        check([\"vip\"]);\n        const typed = (Set<string> tags) => tags.contains(\"vip\");\n        typed([\"vip\"]);\n        Function<bool(Set<string>)> inferred = tags => tags.contains(\"vip\");\n        inferred(names);\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function run(Tags $tags): void\n    {\n        $tags->take(['vip']);\n        $tags->many(['vip'], ['new']);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tags.sharp", sharp), &[]),
-        ["15:19 invalid-argument", "16:19 invalid-argument", "18:17 invalid-argument", "23:18 invalid-argument"]
+        ["17:19 invalid-argument", "18:19 invalid-argument", "20:22 invalid-argument", "25:18 invalid-argument"]
     );
     assert_eq!(issues(("src/Demo/Caller.php", php), &[("src/Demo/Tags.sharp", sharp)]), Vec::<String>::new());
 }
@@ -29345,7 +29345,7 @@ fn a_function_parameter_whose_type_states_no_effects_never_escapes() {
     );
     let keeper = (
         "app/Shop/Keeper.sharp",
-        "namespace App.Shop;\n\nimport Lib.Runner;\n\npublic class Keeper\n{\n    private Function<int()> kept = () => 0;\n\n    private Function<int() uses Http>? spare = null;\n\n    private Function<int(Function<int()>)> handler = (Function<int()> g) => g();\n\n    private static Function<int()>? cached = null;\n\n    public void store(Function<int()> f) { this.kept = f; }\n\n    public void spared(Function<int()> f) => this.spare = f;\n\n    public void cache(Function<int()> f) { Keeper.cached = f; }\n\n    public int local(Function<int()> f)\n    {\n        const g = f;\n        Function<int()> h = () => 0;\n        h = () => g();\n        this.kept = h;\n        return g();\n    }\n\n    public List<Function<int()>> listed(Function<int()> f) => [f];\n\n    public void indexed(Map<string, Function<int()>> all, Function<int()> f) { all[\"a\"] = f; }\n\n    public void added(List<Function<int()>> all, Function<int()> f) => all.add(f);\n\n    public Holder held(Function<int()> f) => new Holder(f);\n\n    public Function<int()> returned(Function<int()> f) => f;\n\n    public Function<int()> either(Function<int()>? f) => f ?? (() => 0);\n\n    public Function<int()> wrapped(Function<int()> f) => () => f() + 1;\n\n    public Function<int()> wrappedBlock(Function<int()> f) => () => { return f() + 2; };\n\n    public int capped(Function<int()> f) => Keeper.capping(f);\n\n    public static int capping(Function<int() uses Http> g) => g();\n\n    public int handled(Function<int()> f) => this.handler(f);\n\n    public int valued(Function<int(Function<int()>)> run, Function<int()> f) => run(f);\n\n    public int called(Function<int()> f) => f() + Keeper.passing(f) + Keeper.passing(() => f()) + Runner.call(f) + Runner.run(f);\n\n    public static int passing(Function<int()> g) => g();\n\n    public Keeper chained(Function<int()> f) => this;\n\n    public int lambda(Function<int()> f)\n    {\n        const r = (Function<int()> g) => g();\n        return r(f);\n    }\n\n    public int run() => this.kept() + (this.spare?.() ?? 0) + (Keeper.cached?.() ?? 0);\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Runner;\n\npublic class Keeper\n{\n    private Function<int()> kept = () => 0;\n\n    private Function<int() uses Http>? spare = null;\n\n    private Function<int(Function<int()>)> handler = (Function<int()> g) => g();\n\n    private static Function<int()>? cached = null;\n\n    public void store(Function<int()> f) { this.kept = f; }\n\n    public void spared(Function<int()> f) => this.spare = f;\n\n    public void cache(Function<int()> f) { Keeper.cached = f; }\n\n    public int local(Function<int()> f)\n    {\n        const g = f;\n        Function<int()> h = () => 0;\n        h = () => g();\n        this.kept = h;\n        return g();\n    }\n\n    public List<Function<int()>> listed(Function<int()> f) => [f];\n\n    public int indexed(Function<int()> f) { Map<string, Function<int()>> all = [:]; all[\"a\"] = f; return all.count(); }\n\n    public int added(Function<int()> f) { List<Function<int()>> all = []; all.add(f); return all.count(); }\n\n    public Holder held(Function<int()> f) => new Holder(f);\n\n    public Function<int()> returned(Function<int()> f) => f;\n\n    public Function<int()> either(Function<int()>? f) => f ?? (() => 0);\n\n    public Function<int()> wrapped(Function<int()> f) => () => f() + 1;\n\n    public Function<int()> wrappedBlock(Function<int()> f) => () => { return f() + 2; };\n\n    public int capped(Function<int()> f) => Keeper.capping(f);\n\n    public static int capping(Function<int() uses Http> g) => g();\n\n    public int handled(Function<int()> f) => this.handler(f);\n\n    public int valued(Function<int(Function<int()>)> run, Function<int()> f) => run(f);\n\n    public int called(Function<int()> f) => f() + Keeper.passing(f) + Keeper.passing(() => f()) + Runner.call(f) + Runner.run(f);\n\n    public static int passing(Function<int()> g) => g();\n\n    public Keeper chained(Function<int()> f) => this;\n\n    public int lambda(Function<int()> f)\n    {\n        const r = (Function<int()> g) => g();\n        return r(f);\n    }\n\n    public int run() => this.kept() + (this.spare?.() ?? 0) + (Keeper.cached?.() ?? 0);\n}\n",
     );
     let lib = (
         "src/Lib/Lib.php",
@@ -29373,8 +29373,8 @@ fn a_function_parameter_whose_type_states_no_effects_never_escapes() {
                 pure.to_owned(),
             ),
             ("30:64 invalid-array-element", "`f` can't be stored in a collection", "Stored", either.to_owned()),
-            ("32:91 invalid-array-element", "`f` can't be stored in a collection", "Stored", either.to_owned()),
-            ("34:80 invalid-argument", "`f` can't be passed to `List.add`, which may keep it", "Passed", either.to_owned()),
+            ("32:96 invalid-array-element", "`f` can't be stored in a collection", "Stored", either.to_owned()),
+            ("34:83 invalid-argument", "`f` can't be passed to `List.add`, which may keep it", "Passed", either.to_owned()),
             (
                 "36:57 invalid-argument",
                 "`f` can't be stored in a new object",
@@ -34136,7 +34136,7 @@ fn a_law_body_holds_only_conditions_matches_locals_returns_and_law_calls() {
     for (body, at) in [
         ("        for (const item of items) { Count.f(item, items); }", "7:9"),
         ("        return true;", "7:9"),
-        ("        int y = 0;\n        y = 1;", "8:9"),
+        ("        int y = 0;\n        y = x;\n        if (y > 0) { return; }", "8:9"),
         (
             "        match (items) {\n            [] => Count.f(x, items),\n            default => { return; },\n        }",
             "8:13",
@@ -37122,7 +37122,7 @@ fn plain_php_messages_show_a_readonly_type_as_its_php_type() {
 #[test]
 fn a_pattern_reads_no_local_and_names_the_when_that_compares_it() {
     let delivery = "namespace App;\n\nenum Delivery\n{\n    case Noted(string note);\n}\n";
-    let code = "namespace App;\n\nclass Post\n{\n    private int limit = 3;\n\n    public string run(Delivery delivery, Any? value, string code, int extra)\n    {\n        const top = 10.5;\n        let label = match (value) {\n            top => \"local\",\n            extra => \"parameter\",\n            default => \"other\",\n        };\n        let tested = value is this.limit;\n        tested = value is < top;\n        tested = value is 2 + extra;\n        tested = delivery is Delivery.Noted(code);\n        tested = delivery is Delivery.Noted { note: code };\n        match (value) {\n            extra => { },\n            default => { },\n        }\n        return label;\n    }\n}\n";
+    let code = "namespace App;\n\nclass Post\n{\n    private int limit = 3;\n\n    public string run(Delivery delivery, Any? value, string code, int extra)\n    {\n        const top = 10.5;\n        let label = match (value) {\n            top => \"local\",\n            extra => \"parameter\",\n            default => \"other\",\n        };\n        let tested = value is this.limit;\n        tested = value is < top;\n        tested = value is 2 + extra;\n        tested = delivery is Delivery.Noted(code);\n        tested = delivery is Delivery.Noted { note: code };\n        match (value) {\n            extra => { },\n            default => { },\n        }\n        return tested ? label : \"\";\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/App/Post.sharp", code), &[("src/App/Delivery.sharp", delivery)]),
