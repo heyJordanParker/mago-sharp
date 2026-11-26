@@ -58,7 +58,8 @@ pub struct HostFile {
     pub name: String,
     /// The PHP file that registers the host's worker.
     pub file: PathBuf,
-    /// The longest one unit of a request may run.
+    /// The CPU time one unit of a request may use with no progress. Ten times as much wall time with no progress ends
+    /// it too, however it spends it.
     pub deadline: Duration,
     /// The environment variables the host's worker reads.
     pub environment: BTreeMap<String, String>,
@@ -330,7 +331,7 @@ impl Hosts {
                 _ => Err(unanswered(file)),
             },
             Ok(_) => Err(unanswered(file)),
-            Err(EngineError::Deadline { duration, frames }) => {
+            Err(EngineError::Deadline { duration, clock, frames }) => {
                 let running = progressed.or_else(|| running.map(ToString::to_string));
                 let running = match (running, started_hook(&frames)) {
                     (Some(running), Some(hook)) => Some(format!("{running}, in the hook `{hook}`")),
@@ -338,7 +339,7 @@ impl Hosts {
                     (running, None) => running,
                 };
 
-                Err(WorkerError::Timeout { host: file.name.clone(), running, duration })
+                Err(WorkerError::Timeout { host: file.name.clone(), running, duration, clock })
             }
             Err(error) => Err(WorkerError::Failed { host: file.name.clone(), message: error.to_string() }),
         }

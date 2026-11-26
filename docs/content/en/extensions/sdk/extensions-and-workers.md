@@ -120,7 +120,7 @@ The numeric identifier uses `0xMMMMmmpp`: a 16-bit major version followed by 8-b
 
 ## Deadlines
 
-A unit of a request that runs past the host's `request-timeout-ms` is interrupted at its next PHP instruction, and the check fails with an error naming the host and the unit. The interpreter starts again before its next request. A callback needs no check of its own, so a long loop needs no code to stop at the deadline.
+A unit of a request that uses the host's `request-timeout-ms` of CPU time with no progress, or goes ten times as long in wall time with no progress, is interrupted at its next PHP instruction, and the check fails with an error naming the host, the limit that ran out and the unit. The interpreter starts again before its next request. A callback needs no check of its own, so a long loop needs no code to stop at the deadline.
 
 ## Exceptions
 

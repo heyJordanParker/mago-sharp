@@ -7,6 +7,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use mago_engine::Answer;
+use mago_engine::Clock;
 use mago_engine::Engine;
 use mago_engine::EngineError;
 use mago_engine::Frame;
@@ -179,8 +180,10 @@ fn a_call_past_its_deadline_stops_and_resets_the_interpreter() {
 
     let stopped = engine.call("Mago\\Tests\\Engine\\spin", &[], deadline, &mut no_questions);
 
-    let Err(EngineError::Deadline { duration, frames }) = stopped else { panic!("the call ran on: {stopped:?}") };
-    assert_eq!(duration, deadline);
+    let Err(EngineError::Deadline { duration, clock, frames }) = stopped else {
+        panic!("the call ran on: {stopped:?}")
+    };
+    assert_eq!((duration, clock), (deadline, Clock::Cpu));
     assert_eq!(frames.first(), Some(&Frame { class: String::new(), function: "Mago\\Tests\\Engine\\spin".to_owned() }));
     assert!(start.elapsed() < Duration::from_secs(5), "the call stopped {:?} after it started", start.elapsed());
     assert_eq!(call(&engine, "count_call"), Ok(Value::Int(1)), "the interpreter starts again");
@@ -213,7 +216,7 @@ fn a_call_past_its_deadline_stops_while_another_threads_calls_end_in_time() {
         let spun = engine.call("Mago\\Tests\\Engine\\spin", &[], deadline, &mut no_questions);
         stopped.store(true, Ordering::SeqCst);
 
-        assert!(matches!(spun, Err(EngineError::Deadline { duration, .. }) if duration == deadline), "{spun:?}");
+        assert!(matches!(spun, Err(EngineError::Deadline { .. })), "{spun:?}");
         assert!(start.elapsed() < Duration::from_secs(5), "the call stopped {:?} after it started", start.elapsed());
         assert!(other.join().unwrap() > 1, "the other thread's calls kept ending in time");
     });
@@ -415,7 +418,7 @@ fn an_answer_that_restarts_the_deadline_keeps_a_call_that_progresses_running() {
     });
 
     assert_eq!(progressed, Ok(Value::Int(5)));
-    assert!(matches!(stalled, Err(EngineError::Deadline { duration, .. }) if duration == deadline), "{stalled:?}");
+    assert!(matches!(stalled, Err(EngineError::Deadline { .. })), "{stalled:?}");
 }
 
 #[test]
@@ -438,9 +441,28 @@ fn a_call_stops_once_its_thread_has_used_its_deadline_of_cpu_time() {
     let stopped =
         engine.call("Mago\\Tests\\Engine\\nap_then_spin", &[Value::Int(300_000)], deadline, &mut no_questions);
 
-    assert!(matches!(stopped, Err(EngineError::Deadline { duration, .. }) if duration == deadline), "{stopped:?}");
+    assert!(
+        matches!(stopped, Err(EngineError::Deadline { duration, clock: Clock::Cpu, .. }) if duration == deadline),
+        "{stopped:?}"
+    );
     assert!(cpu_time() - cpu >= deadline, "the call stopped after {:?} of CPU time", cpu_time() - cpu);
     assert!(start.elapsed() >= nap + deadline, "the call stopped {:?} after it started", start.elapsed());
+}
+
+#[test]
+fn a_call_that_sleeps_past_ten_times_its_deadline_stops_on_wall_time() {
+    let engine = engine();
+    let deadline = Duration::from_millis(20);
+    let start = Instant::now();
+
+    let stopped = engine.call("Mago\\Tests\\Engine\\nap", &[Value::Int(400_000)], deadline, &mut no_questions);
+
+    let backstop = Duration::from_millis(200);
+    assert!(
+        matches!(stopped, Err(EngineError::Deadline { duration, clock: Clock::Wall, .. }) if duration == backstop),
+        "{stopped:?}"
+    );
+    assert!(start.elapsed() >= backstop, "the call stopped {:?} after it started", start.elapsed());
 }
 
 /// The CPU time the calling thread has used.
