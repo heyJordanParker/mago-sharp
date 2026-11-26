@@ -51,9 +51,10 @@ thread_local! {
     static PREPARED: RefCell<HashMap<u64, Prepared>> = RefCell::default();
 }
 
-/// The backstop of a host whose `request-timeout-ms` is `deadline`: ten times as much wall time, which ends a unit of a
-/// request that makes no progress however it spends its time, as one that sleeps or waits on a lock uses no CPU time,
-/// and lets a thread a loaded machine starves of CPU run ten times its deadline first.
+/// The backstop of a host whose `request-timeout-ms` is `deadline`: ten times as much wall time.
+///
+/// It ends a unit of a request that makes no progress however it spends its time, as one that sleeps or waits on a lock
+/// uses no CPU time, and lets a thread a loaded machine starves of CPU run ten times its deadline first.
 #[must_use]
 pub fn backstop(deadline: Duration) -> Duration {
     deadline.saturating_mul(10)
