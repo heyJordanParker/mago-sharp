@@ -14,8 +14,8 @@ declare(strict_types=1);
 
 // Raised when compiled code means something else to the engine while the kinds, the tokens and the layouts stay, as
 // when a class the lowering names moves, so the engine refuses a file an older checker compiled. 2: `emit` names the
-// dispatcher.
-const REVISION = 2;
+// dispatcher. 3: a generic call's `SHARP_TYPE_ARGS` may hold its written order as its first child.
+const REVISION = 3;
 
 $path = $argv[1] ?? throw new InvalidArgumentException('Pass the path to php-src\'s `Zend/zend_ast.h`.');
 $header = file_get_contents($path);

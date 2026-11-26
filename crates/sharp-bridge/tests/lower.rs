@@ -37527,3 +37527,47 @@ fn a_null_safe_read_of_a_named_tuple_element_tests_its_receiver_and_reads_the_in
         "#}
     );
 }
+
+/// Spec section 10: a value read into a union tries its members in the order the type writes them. A call whose type
+/// arguments hold a union written in an order other than its sorted type text gives that order as the first child of
+/// its `SHARP_TYPE_ARGS`, each type argument's split by `; `. A call with no such union lowers as before, with none,
+/// and so does a wrapper's call that passes its own type parameter on, whose order the engine reads from its caller.
+#[test]
+fn a_call_whose_type_arguments_write_a_union_out_of_order_gives_the_written_order() {
+    let lowered = Lowered::with(
+        indoc! {"
+        namespace App;
+
+        public class Reads
+        {
+            public static List<T> all<T>(List<T> items) => items;
+
+            public static List<B> pair<A, B>(List<A> first, List<B> second) => second;
+
+            public List<(string|int|float|bool)?> written() => Reads.all<(string|int|float|bool)?>([]);
+
+            public List<(float|int)?> sorted() => Reads.all<(float|int)?>([]);
+
+            public List<List<T>> wrapper<T>() => Reads.all<List<T>>([]);
+
+            public List<(int|float)?> second() => Reads.pair<string, (int|float)?>([], []);
+        }
+    "},
+        &[],
+    );
+    // The two children of the call's SHARP_TYPE_ARGS: its written order, or null, and its type text.
+    let children = |name: &str| {
+        let body = lowered.body_of(name);
+        let lines: Vec<&str> = body.lines().map(str::trim).collect();
+        let at = lines.iter().position(|line| *line == "SHARP_TYPE_ARGS").unwrap_or_else(|| panic!("{body}"));
+
+        (lines[at + 1].to_owned(), lines[at + 2].to_owned())
+    };
+
+    assert_eq!(children("written").0, r#"ZVAL "string, int, float, bool""#);
+    assert_eq!(children("sorted").0, "null");
+    assert_eq!(children("wrapper").0, "null");
+    assert_eq!(children("second").0, r#"ZVAL "; int, float""#);
+    // The type text stays sorted, so `int|float` and `float|int` stay one type.
+    assert!(children("written").1.contains("bool|float|int|string"), "{}", children("written").1);
+}

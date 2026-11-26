@@ -53,6 +53,7 @@ use mago_codex::metadata::r#extern::extern_namespace_classes;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::populator::populate_codebase;
 use mago_codex::populator::populate_codebase_targeted;
+use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
 use mago_codex::scanner::var_tag_class_likes;
@@ -102,6 +103,10 @@ use crate::service::telemetry::SlowestFiles;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod compile;
 
+/// A file's scan in a recheck, with the names it would resolve to a class of its namespace, and the class-likes it
+/// reached.
+type IncrementalScan<Snapshot> = ((FileId, CodebaseMetadata, Snapshot, Vec<mago_word::Word>), WordSet);
+
 /// Per-file cached state for incremental analysis.
 #[derive(Debug, Clone)]
 struct FileState {
@@ -128,6 +133,7 @@ struct FileState {
     lowering_input: Option<LoweringInput>,
     /// Whether the code of the file `lowering_input` holds the analysis of reaches a PHP# extension member.
     reaches_extension: bool,
+    named_namespace_classes: Vec<mago_word::Word>,
 }
 
 /// What one file's analysis read from the codebase.
@@ -234,7 +240,7 @@ pub struct IncrementalAnalysisService {
     class_logs: ClassLogs,
     /// The files the last analysis analyzed, which the fanout tests compare with the inputs.
     #[cfg(test)]
-    analyzed_files: HashSet<FileId>,
+    pub(crate) analyzed_files: HashSet<FileId>,
     /// The files a compile analyzed again to lower them, which the tests of what the lowering reads count.
     #[cfg(test)]
     analyzed_to_lower: std::sync::Mutex<HashSet<FileId>>,
@@ -447,38 +453,43 @@ impl IncrementalAnalysisService {
 
     /// Takes in that the compiled files of `classes`, each a lowercase class name, changed: starts again each extension
     /// interpreter that loaded one or failed to, since PHP declares a class once, and gives up what the last analysis found
-    /// in each file whose extension callbacks read one, so the next
-    /// [`analyze_incremental()`](Self::analyze_incremental) given the returned files analyzes them again. A callback
-    /// reads every class its worker loaded before it ran. Returns `None` when the before-analysis hooks read one, which
-    /// every file reads, so only an analysis from scratch is exact.
+    /// in each file whose extension callbacks read one, and in each file that declares one when the before-analysis
+    /// hooks read one, so the next [`analyze_incremental()`](Self::analyze_incremental) given the returned files
+    /// analyzes them again. A callback reads every class its worker loaded before it ran.
     ///
     /// # Errors
     ///
     /// Returns an error when the external analyzer failed to start.
-    pub fn reload_classes(&mut self, classes: &HashSet<Word>) -> Result<Option<Vec<FileId>>, OrchestratorError> {
+    pub fn reload_classes(&mut self, classes: &HashSet<Word>) -> Result<Vec<FileId>, OrchestratorError> {
         if classes.is_empty() {
-            return Ok(Some(Vec::new()));
+            return Ok(Vec::new());
         }
 
         let names: Vec<&[u8]> = classes.iter().map(Word::as_bytes).collect();
         self.plugin_registry
             .reload_external_workers_holding(&names)
             .map_err(mago_analyzer::error::AnalysisError::from)?;
-        if self.class_logs.read_any(&self.before_analysis_reads, classes) {
-            return Ok(None);
-        }
+        let declaring: HashSet<FileId> = if self.class_logs.read_any(&self.before_analysis_reads, classes) {
+            self.codebase
+                .class_likes
+                .values()
+                .filter(|class| classes.contains(&mago_word::ascii_lowercase_word(class.original_name.as_bytes())))
+                .map(|class| class.span.file_id)
+                .collect()
+        } else {
+            HashSet::default()
+        };
 
         let logs = &self.class_logs;
-        Ok(Some(
-            self.file_states
-                .iter_mut()
-                .filter(|(_, state)| logs.read_any(&state.reads.extension, classes))
-                .map(|(file_id, state)| {
-                    state.content_hash = 0;
-                    *file_id
-                })
-                .collect(),
-        ))
+        Ok(self
+            .file_states
+            .iter_mut()
+            .filter(|(file_id, state)| declaring.contains(file_id) || logs.read_any(&state.reads.extension, classes))
+            .map(|(file_id, state)| {
+                state.content_hash = 0;
+                *file_id
+            })
+            .collect())
     }
 
     /// Analyzes with the extension hosts of `plugin_registry` from the last analysis, which ran with none and recorded
@@ -501,6 +512,8 @@ impl IncrementalAnalysisService {
         self.keeps_lowering_inputs = false;
         self.keeps_scans = false;
         if self.plugin_registry.external_hosts_reach_every_file().map_err(mago_analyzer::error::AnalysisError::from)? {
+            tracing::debug!("The extension hosts reach every file, so each file is analyzed with them from scratch.");
+
             return self.analyze();
         }
         self.codebase_scan_plan = self
@@ -978,12 +991,12 @@ impl IncrementalAnalysisService {
         scan.end();
 
         let populate = Phase::start("populate");
-        let staged: Vec<(FileId, u64, CodebaseEntryKeys)> = per_file_results
+        let staged: Vec<(FileId, u64, CodebaseEntryKeys, Vec<mago_word::Word>)> = per_file_results
             .into_iter()
-            .map(|(file, content_hash, metadata, _, _)| {
+            .map(|(file, content_hash, metadata, _, named)| {
                 let declared_keys = metadata.extract_owned_keys(&metadata);
                 merged_codebase.extend(metadata);
-                (file.id, content_hash, declared_keys)
+                (file.id, content_hash, declared_keys, named)
             })
             .collect();
         merged_codebase.apply_patches_pass();
@@ -992,7 +1005,7 @@ impl IncrementalAnalysisService {
         let merged_aliases =
             merged_codebase.class_like_alias_declarations().map(|(alias, _, span)| (alias, span.file_id)).collect();
         let mut file_states: HashMap<FileId, FileState> = HashMap::default();
-        for (file_id, content_hash, mut entry_keys) in staged {
+        for (file_id, content_hash, mut entry_keys, named_namespace_classes) in staged {
             retain_owned_keys(&mut entry_keys, file_id, &merged_codebase, &merged_aliases);
             file_states.insert(
                 file_id,
@@ -1009,6 +1022,7 @@ impl IncrementalAnalysisService {
                     package_errors: IssueCollection::default(),
                     lowering_input: None,
                     reaches_extension: false,
+                    named_namespace_classes,
                 },
             );
         }
@@ -1129,27 +1143,10 @@ impl IncrementalAnalysisService {
         let mut file_hashes: HashMap<FileId, u64> = HashMap::default();
 
         // Detect deleted files (present in cache but no longer in database)
-        let current_file_ids: HashSet<FileId> = source_files.iter().map(|f| f.id).collect();
+        let mut current_file_ids: HashSet<FileId> = source_files.iter().map(|f| f.id).collect();
         let deleted_count = self.file_states.keys().filter(|id| !current_file_ids.contains(id)).count();
         if deleted_count > 0 {
             tracing::debug!("{} file(s) deleted since last run", deleted_count);
-
-            // A deleted patch leaves its refinements already folded into the vendor / built-in
-            // baseline with nothing left to undo them: the apply pass only runs for patches present
-            // in the new scans, and the vendor file it targeted is untouched. Fall back to a full
-            // reanalyze so the affected baselines are rebuilt without the patch — the same policy the
-            // patch-content-change path below uses.
-            let patch_deleted = self
-                .codebase
-                .patch_class_likes
-                .values()
-                .map(|meta| meta.span.file_id)
-                .chain(self.codebase.patch_function_likes.values().map(|meta| meta.span.file_id))
-                .chain(self.codebase.patch_constants.values().map(|meta| meta.span.file_id))
-                .any(|file_id| !current_file_ids.contains(&file_id));
-            if patch_deleted {
-                return self.analyze();
-            }
         }
 
         if let Some(hint) = changed_hint {
@@ -1243,68 +1240,223 @@ impl IncrementalAnalysisService {
         let parser_settings = self.parser_settings;
         let php_version = self.settings.version;
         let codebase_scan_plan = self.codebase_scan_plan.clone();
-        let namespace_classes = &self.namespace_classes;
-        let extern_namespaces = &self.extern_namespaces;
         let reach = self.autoloader.is_some();
-        let scan = |files: Vec<&Arc<File>>| {
-            files
-                .into_par_iter()
-                .map_init(LocalArena::new, |arena, file| {
-                    let (metadata, codebase_scan, _, reached) = scan_file(
-                        arena,
-                        file,
-                        parser_settings,
-                        php_version,
-                        codebase_scan_plan.as_deref(),
-                        namespace_classes,
-                        extern_namespaces,
-                        reach,
-                    )?;
+        let scan =
+            |files: Vec<&Arc<File>>, namespace_classes: &NamespaceClasses, extern_namespaces: &ExternNamespaces| {
+                files
+                    .into_par_iter()
+                    .map_init(LocalArena::new, |arena, file| {
+                        let (metadata, codebase_scan, named, reached) = scan_file(
+                            arena,
+                            file,
+                            parser_settings,
+                            php_version,
+                            codebase_scan_plan.as_deref(),
+                            namespace_classes,
+                            extern_namespaces,
+                            reach,
+                        )?;
 
-                    arena.reset();
+                        arena.reset();
 
-                    Ok(((file.id, metadata, codebase_scan), reached))
-                })
-                .collect::<Result<Vec<_>, mago_analyzer::external::ExternalAnalyzerError>>()
-                .map_err(mago_analyzer::error::AnalysisError::from)
-        };
-        let mut scans = scan(changed_files)?;
-        let (removed_class_likes, naming_removed) = self.removed_class_likes(
-            scans.iter().map(|((file_id, metadata, _), _)| (*file_id, metadata)),
+                        Ok(((file.id, metadata, codebase_scan, named), reached))
+                    })
+                    .collect::<Result<Vec<_>, mago_analyzer::external::ExternalAnalyzerError>>()
+                    .map_err(mago_analyzer::error::AnalysisError::from)
+            };
+        let mut scans = scan(changed_files, &self.namespace_classes, &self.extern_namespaces)?;
+        let (removed_class_likes, mut naming_removed) = self.removed_class_likes(
+            scans.iter().map(|((file_id, metadata, _, _), _)| (*file_id, metadata)),
             &current_file_ids,
             &unchanged_file_ids,
         );
-        if !naming_removed.is_empty() {
-            unchanged_file_ids.retain(|file_id| !naming_removed.contains(file_id));
-            scans.extend(scan(source_files.iter().filter(|file| naming_removed.contains(&file.id)).collect())?);
-        }
-        let (scanned_files, reached): (Vec<_>, Vec<WordSet>) = scans.into_iter().unzip();
-
-        // A changed file that reaches a class-like no file declares, whose file the autoloader serves, needs the
-        // rounds of an analysis from scratch.
-        if let Some(autoloader) = &self.autoloader {
-            for name in reached.iter().flatten() {
-                if !self.codebase.class_like_exists(*name)
-                    && autoloader
-                        .load(name.as_bytes(), |_| None)?
-                        .is_some_and(|file| self.database.get(&file.id).is_err())
-                {
-                    return self.analyze();
-                }
+        // An alias or an `extern` changes what each file that names its target means, which the signature diff can't
+        // see, so each unchanged file that references a changed alias or the target of a changed `extern`, as the last
+        // analysis recorded it, is scanned again, as an edit of it is, and so is each file that declares an `extern` of
+        // the same target, since the second declaration of a target is an error in its own file.
+        let mut renamed: HashSet<(mago_word::Word, mago_word::Word)> = HashSet::default();
+        for ((file_id, metadata, _, _), _) in &scans {
+            let current: HashSet<_> =
+                metadata.class_like_alias_declarations().map(|(alias, target, _)| (alias, target)).collect();
+            let previous: HashSet<_> = self
+                .file_states
+                .get(file_id)
+                .into_iter()
+                .flat_map(|state| &state.entry_keys.class_like_aliases)
+                .map(|(alias, target, _)| (*alias, *target))
+                .collect();
+            renamed.extend(current.symmetric_difference(&previous).map(|(alias, _)| (*alias, mago_word::empty_word())));
+            let (externs_now, externs_before) = (externs_in(metadata, *file_id), externs_in(&self.codebase, *file_id));
+            if externs_now != externs_before {
+                renamed.extend(
+                    externs_now
+                        .iter()
+                        .chain(&externs_before)
+                        .filter_map(|declaration| extern_symbol(&self.codebase, declaration)),
+                );
             }
         }
-
-        // A patch whose content actually changed requires rebuilding the merged codebase from
-        // scratch. Patches that were force-rescanned due to a vendor change (same hash) go
-        // through the normal incremental path: `apply_patches_pass` re-applies them to the
-        // freshly-updated vendor entries and generates the correct diagnostics.
-        let any_patch_content_changed = scanned_files.iter().any(|(fid, _, _)| {
-            self.database.get(fid).is_ok_and(|f| f.file_type.is_patch())
-                && self.file_states.get(fid).is_none_or(|s| s.content_hash != file_hashes[fid])
-        });
-        if any_patch_content_changed {
-            return self.analyze();
+        for (file_id, state) in self.file_states.iter().filter(|(file_id, _)| !current_file_ids.contains(file_id)) {
+            renamed.extend(
+                state.entry_keys.class_like_aliases.iter().map(|(alias, _, _)| (*alias, mago_word::empty_word())),
+            );
+            renamed.extend(
+                externs_in(&self.codebase, *file_id)
+                    .iter()
+                    .filter_map(|declaration| extern_symbol(&self.codebase, declaration)),
+            );
         }
+        // A patch's refinements are folded into the declarations it patches, so a patch whose content changed, or that
+        // is gone, scans again the files that declare or name what it patched, before or after, and every patch file,
+        // whose refinements the patches pass then folds into the fresh declarations again. A patch scanned again for a
+        // vendor change alone holds what it held.
+        let changed_patches: HashSet<FileId> = scans
+            .iter()
+            .map(|((file_id, _, _, _), _)| *file_id)
+            .filter(|file_id| {
+                self.database.get(file_id).is_ok_and(|file| file.file_type.is_patch())
+                    && self.file_states.get(file_id).is_none_or(|state| state.content_hash != file_hashes[file_id])
+            })
+            .chain(self.file_states.keys().filter(|file_id| !current_file_ids.contains(file_id)).copied())
+            .collect();
+        let patched_in = |codebase: &CodebaseMetadata| -> Vec<(mago_word::Word, mago_word::Word)> {
+            let patches = |file_id: FileId| changed_patches.contains(&file_id);
+            codebase
+                .patch_class_likes
+                .iter()
+                .filter(|(_, metadata)| patches(metadata.span.file_id))
+                .map(|(name, _)| (*name, mago_word::empty_word()))
+                .chain(
+                    codebase
+                        .patch_function_likes
+                        .iter()
+                        .filter(|(_, metadata)| patches(metadata.span.file_id))
+                        .map(|(key, _)| reference_symbol(*key)),
+                )
+                .chain(
+                    codebase
+                        .patch_constants
+                        .iter()
+                        .filter(|(_, metadata)| patches(metadata.span.file_id))
+                        .map(|(name, _)| (*name, mago_word::empty_word())),
+                )
+                .collect()
+        };
+        let mut patched: HashSet<(mago_word::Word, mago_word::Word)> = patched_in(&self.codebase).into_iter().collect();
+        for ((_, metadata, _, _), _) in &scans {
+            patched.extend(patched_in(metadata));
+        }
+        if !patched.is_empty() {
+            let patching = self.files_naming(&patched);
+            naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| {
+                patching.contains(file_id) || self.database.get(file_id).is_ok_and(|file| file.file_type.is_patch())
+            }));
+        }
+        if !renamed.is_empty() {
+            let mut renaming = self.files_naming(&renamed);
+            renaming.extend(
+                self.codebase
+                    .externs
+                    .values()
+                    .flatten()
+                    .filter(|declaration| {
+                        extern_symbol(&self.codebase, declaration).is_some_and(|symbol| renamed.contains(&symbol))
+                    })
+                    .map(|declaration| declaration.span.file_id),
+            );
+            naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| renaming.contains(file_id)));
+        }
+        // Population refuses a PHP# bound that names a missing type, and only a scan reads the bound again, so each
+        // unchanged file with a bound that names a class-like a changed file now declares is scanned again too.
+        let declared_class_likes: WordSet = scans
+            .iter()
+            .flat_map(|((_, metadata, _, _), _)| metadata.class_likes.keys())
+            .map(|name| mago_word::ascii_lowercase_word(name.as_bytes()))
+            .collect();
+        let bounding = files_with_a_refused_bound(&self.codebase, &declared_class_likes);
+        naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| bounding.contains(file_id)));
+        let namespace_classes = self.namespace_classes_after(&scans, &current_file_ids);
+        if namespace_classes != self.namespace_classes {
+            let resolves_otherwise = |named: &[mago_word::Word]| {
+                named.iter().any(|name| {
+                    namespace_classes.contains(name.as_bytes()) != self.namespace_classes.contains(name.as_bytes())
+                })
+            };
+            naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| {
+                self.file_states.get(file_id).is_some_and(|state| resolves_otherwise(&state.named_namespace_classes))
+            }));
+            let (renaming, kept): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut scans).into_iter().partition(|((_, _, _, named), _)| resolves_otherwise(named));
+            scans = kept;
+            naming_removed.extend(renaming.into_iter().map(|((file_id, _, _, _), _)| file_id));
+            self.namespace_classes = namespace_classes;
+        }
+        if self.extern_namespaces_changed(&scans, &current_file_ids) {
+            self.extern_namespaces =
+                ExternNamespaces::new(extern_namespace_classes(&[&self.codebase_after(&scans, &current_file_ids)]));
+            let sharp: HashSet<FileId> =
+                source_files.iter().filter(|file| file.name.ends_with(b".sharp")).map(|file| file.id).collect();
+            naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| sharp.contains(file_id)));
+            let (renaming, kept): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut scans).into_iter().partition(|((file_id, _, _, _), _)| sharp.contains(file_id));
+            scans = kept;
+            naming_removed.extend(renaming.into_iter().map(|((file_id, _, _, _), _)| file_id));
+        }
+        let extensions = self.changed_extensions(&scans, &current_file_ids);
+        if !extensions.is_empty() {
+            self.changing_members =
+                ChangingMembers::new(receiver_changing_members(&self.codebase_after(&scans, &current_file_ids)));
+            naming_removed.extend(self.files_calling(&extensions, &unchanged_file_ids));
+        }
+        if !naming_removed.is_empty() {
+            unchanged_file_ids.retain(|file_id| !naming_removed.contains(file_id));
+            scans.extend(scan(
+                source_files.iter().filter(|file| naming_removed.contains(&file.id)).collect(),
+                &self.namespace_classes,
+                &self.extern_namespaces,
+            )?);
+        }
+        if let Some(autoloader) = self.autoloader.clone() {
+            let mut tried = WordSet::default();
+            let mut reached: Vec<mago_word::Word> =
+                scans.iter().flat_map(|(_, reached)| reached.iter().copied()).collect();
+            loop {
+                let mut served = Vec::new();
+                for name in reached {
+                    let declared = self.codebase.class_like_exists(name)
+                        || scans.iter().any(|((_, metadata, _, _), _)| metadata.class_like_exists(name));
+                    if !declared
+                        && tried.insert(mago_word::ascii_lowercase_word(name.as_bytes()))
+                        && let Some(file) = autoloader.load(name.as_bytes(), |_| None)?
+                        && self.database.get(&file.id).is_err()
+                    {
+                        served.push(file);
+                    }
+                }
+                if served.is_empty() {
+                    break;
+                }
+
+                for file in &served {
+                    file_hashes.insert(file.id, xxhash_rust::xxh3::xxh3_64(file.contents.as_ref()));
+                    current_file_ids.insert(file.id);
+                }
+                self.database.extend(served.iter().cloned());
+                self.autoloaded.extend(served.iter().cloned());
+                let round = scan(served.iter().collect(), &self.namespace_classes, &self.extern_namespaces)?;
+                reached = round.iter().flat_map(|(_, reached)| reached.iter().copied()).collect();
+                scans.extend(round);
+            }
+        }
+        let mut named_by_file: HashMap<FileId, Vec<mago_word::Word>> = HashMap::default();
+        let scans: Vec<_> = scans
+            .into_iter()
+            .map(|((file_id, metadata, codebase_scan, named), reached)| {
+                named_by_file.insert(file_id, named);
+                ((file_id, metadata, codebase_scan), reached)
+            })
+            .collect();
+        let scanned_files: Vec<_> = scans.into_iter().map(|(scan, _)| scan).collect();
 
         let scan_state_changed = self.codebase_scan_files.keys().any(|file_id| !current_file_ids.contains(file_id))
             || scanned_files
@@ -1440,120 +1592,26 @@ impl IncrementalAnalysisService {
             diff
         };
 
-        let aliases_changed = new_file_scans.iter().any(|(file_id, metadata)| {
-            let current: HashSet<_> =
-                metadata.class_like_alias_declarations().map(|(alias, target, _)| (alias, target)).collect();
-            let previous: HashSet<_> = self
-                .file_states
-                .get(file_id)
-                .map(|state| {
-                    state.entry_keys.class_like_aliases.iter().map(|(alias, target, _)| (*alias, *target)).collect()
-                })
-                .unwrap_or_default();
-
-            current != previous
-        }) || self.file_states.iter().any(|(file_id, state)| {
-            !current_file_ids.contains(file_id) && !state.entry_keys.class_like_aliases.is_empty()
-        });
-
-        if aliases_changed {
-            return self.analyze();
-        }
-
-        let externs_changed = new_file_scans
+        // A module serves the files of its namespace and of each namespace below it, and the analyzer reads every module
+        // beside each module, spec section 32, so a module that changed, before or after, re-analyzes those files.
+        let changed_module_namespaces: WordSet = new_file_scans
             .iter()
-            .any(|(file_id, metadata)| externs_in(metadata, *file_id) != externs_in(&self.codebase, *file_id))
-            || self
-                .file_states
-                .keys()
-                .any(|file_id| !current_file_ids.contains(file_id) && !externs_in(&self.codebase, *file_id).is_empty());
+            .flat_map(|(file_id, metadata)| {
+                let before = self.file_states.get(file_id).map_or(&[][..], |state| &state.entry_keys.modules);
+                let changed = before != metadata.modules;
 
-        if externs_changed {
-            return self.analyze();
-        }
-
-        let modules_changed = new_file_scans.iter().any(|(file_id, metadata)| {
-            self.file_states.get(file_id).map_or(&[][..], |state| &state.entry_keys.modules) != metadata.modules
-        }) || self
-            .file_states
-            .iter()
-            .any(|(file_id, state)| !current_file_ids.contains(file_id) && !state.entry_keys.modules.is_empty());
-
-        if modules_changed {
-            return self.analyze();
-        }
-
-        let extensions_changed = new_file_scans
-            .iter()
-            .any(|(file_id, metadata)| extensions_in(metadata, *file_id) != extensions_in(&self.codebase, *file_id))
-            || self.file_states.keys().any(|file_id| {
-                !current_file_ids.contains(file_id) && !extensions_in(&self.codebase, *file_id).is_empty()
-            });
-
-        if extensions_changed {
-            return self.analyze();
-        }
-
-        // A class-like that wins over a default class-like changes what a bare name means in every file of its
-        // namespace, and the unchanged files keep scans made without it.
-        let rescanned: HashSet<FileId> = new_file_scans
-            .iter()
-            .map(|(file_id, _)| *file_id)
-            .chain(self.file_states.keys().filter(|file_id| !current_file_ids.contains(file_id)).copied())
+                before.iter().chain(&metadata.modules).filter(move |_| changed)
+            })
+            .chain(
+                self.file_states
+                    .iter()
+                    .filter(|(file_id, _)| !current_file_ids.contains(file_id))
+                    .flat_map(|(_, state)| &state.entry_keys.modules),
+            )
+            .map(|module| mago_word::ascii_lowercase_word(module.namespace.as_bytes()))
             .collect();
-        let namespace_classes_before = NamespaceClasses::new(
-            self.codebase
-                .class_likes
-                .values()
-                .filter(|class_like| rescanned.contains(&class_like.span.file_id))
-                .map(|class_like| (class_like.original_name, class_like.flags.is_sharp())),
-        );
-        let namespace_classes_after = NamespaceClasses::new(new_file_scans.iter().flat_map(|(_, metadata)| {
-            metadata.class_likes.values().map(|class_like| (class_like.original_name, class_like.flags.is_sharp()))
-        }));
 
-        if namespace_classes_before != namespace_classes_after {
-            return self.analyze();
-        }
-
-        // An `extern namespace` changes what a name means in every PHP# file, spec section 23, and so does each root
-        // class, function and constant of the folder it gives the namespace, which a rescanned file of that folder may
-        // declare or delete, and so does the name it names, which a rescanned file may declare anywhere.
-        let extern_namespaces = |declarations: &mut dyn Iterator<Item = &ExternNamespaceMetadata>| {
-            declarations.map(|declaration| (declaration.namespace, declaration.name)).collect::<HashSet<_>>()
-        };
-        let extern_namespaces_before = extern_namespaces(
-            &mut self
-                .codebase
-                .extern_namespaces
-                .iter()
-                .filter(|declaration| rescanned.contains(&declaration.span.file_id)),
-        );
-        let extern_namespaces_after =
-            extern_namespaces(&mut new_file_scans.iter().flat_map(|(_, metadata)| metadata.extern_namespaces.iter()));
-        let given: HashSet<mago_word::Word> = self
-            .codebase
-            .extern_namespaces
-            .iter()
-            .filter_map(|declaration| self.codebase.extern_namespace_folder(declaration))
-            .collect();
-        let given_folder_rescanned = rescanned
-            .iter()
-            .any(|file_id| self.codebase.folder(*file_id).is_some_and(|folder| given.contains(&folder)))
-            || new_file_scans.iter().any(|(file_id, metadata)| {
-                metadata.folder(*file_id).is_some_and(|folder| given.contains(&folder))
-                    || self
-                        .codebase
-                        .extern_namespaces
-                        .iter()
-                        .any(|declaration| metadata.extern_namespace_folder(declaration).is_some())
-            });
-
-        if extern_namespaces_before != extern_namespaces_after || given_folder_rescanned {
-            return self.analyze();
-        }
-
-        let body_only = diff.get_changed().is_empty() && deleted_count == 0;
+        let body_only = diff.get_changed().is_empty() && deleted_count == 0 && changed_module_namespaces.is_empty();
 
         if !body_only {
             for &file_id in &unchanged_file_ids {
@@ -1727,6 +1785,7 @@ impl IncrementalAnalysisService {
                         package_errors: IssueCollection::default(),
                         lowering_input: None,
                         reaches_extension: false,
+                        named_namespace_classes: named_by_file.remove(&file_id).unwrap_or_default(),
                     },
                 );
             }
@@ -1798,22 +1857,11 @@ impl IncrementalAnalysisService {
         }
         self.apply_scan_results(&mut merged_codebase, &new_file_scans);
 
-        // Population refuses a PHP# bound that names a missing type, and only a scan reads the bound again, so a
-        // class-like declared under a name such a bound writes runs a full analysis too.
-        if names_a_refused_bound_type(&merged_codebase, &scanned_class_likes) {
-            return self.analyze();
-        }
-
         merged_codebase.safe_symbols.clear();
         merged_codebase.safe_symbol_members.clear();
 
-        let Some((mut invalid_files, extension_symbol_changed)) =
-            merged_codebase.mark_safe_symbols(&diff, &self.native_symbol_references, &extension_reads.symbols)
-        else {
-            tracing::warn!("Invalidation cascade too expensive (>5000 steps), falling back to full analysis");
-
-            return self.analyze();
-        };
+        let (mut invalid_files, extension_symbol_changed) =
+            merged_codebase.mark_safe_symbols(&diff, &self.native_symbol_references, &extension_reads.symbols);
 
         let safe_symbols = std::mem::take(&mut merged_codebase.safe_symbols);
         let safe_symbol_members = std::mem::take(&mut merged_codebase.safe_symbol_members);
@@ -1840,10 +1888,29 @@ impl IncrementalAnalysisService {
         // Every file counts the extension callbacks' reads as its own, so a change to one runs every file again.
         let extension_read_changed = extension_symbol_changed
             || extension_reads.listings.iter().any(|listing| changed_listings.contains(listing));
+        let in_changed_module_namespace = |name: &mago_word::Word| {
+            changed_module_namespaces.contains(&mago_word::empty_word())
+                || namespaces_of(name).iter().any(|namespace| changed_module_namespaces.contains(namespace))
+        };
         for file_id in &unchanged_file_ids {
             if self.file_states.get(file_id).is_some_and(|state| {
                 extension_read_changed
                     || state.reads.listings.iter().any(|listing| changed_listings.contains(listing))
+                    || !changed_module_namespaces.is_empty()
+                        && (!state.entry_keys.modules.is_empty()
+                            || state
+                                .entry_keys
+                                .class_like_names
+                                .iter()
+                                .chain(&state.entry_keys.constant_names)
+                                .chain(
+                                    state
+                                        .entry_keys
+                                        .function_like_keys
+                                        .iter()
+                                        .map(|(class, function)| if class.is_empty() { function } else { class }),
+                                )
+                                .any(in_changed_module_namespace))
                     || state.entry_keys.class_like_names.iter().any(|name| {
                         scanned_namespaces.contains(&mago_word::ascii_lowercase_word(name.as_bytes()))
                             || namespaces_of(name)
@@ -2012,6 +2079,7 @@ impl IncrementalAnalysisService {
                     package_errors: IssueCollection::default(),
                     lowering_input: None,
                     reaches_extension: false,
+                    named_namespace_classes: named_by_file.remove(&file_id).unwrap_or_default(),
                 },
             );
         }
@@ -2033,6 +2101,124 @@ impl IncrementalAnalysisService {
     /// Whether a read of the extension callbacks that some file held before this warm run is held by no file after it,
     /// as when the file a rule read for stops reading. The rule may have answered other files from what it kept, with
     /// no read of their own, so only an analysis of every file finds what each file read again, as a cold run does.
+    fn namespace_classes_after<Snapshot>(
+        &self,
+        scans: &[IncrementalScan<Snapshot>],
+        current_file_ids: &HashSet<FileId>,
+    ) -> NamespaceClasses {
+        let scanned: HashSet<FileId> = scans.iter().map(|((file_id, _, _, _), _)| *file_id).collect();
+        let kept = |file_id: &FileId| {
+            !scanned.contains(file_id) && current_file_ids.contains(file_id) && self.file_states.contains_key(file_id)
+        };
+
+        NamespaceClasses::new(
+            self.codebase
+                .class_likes
+                .values()
+                .filter(|class_like| kept(&class_like.span.file_id))
+                .chain(scans.iter().flat_map(|((_, metadata, _, _), _)| metadata.class_likes.values()))
+                .map(|class_like| (class_like.original_name, class_like.flags.is_sharp())),
+        )
+    }
+
+    fn extern_namespaces_changed<Snapshot>(
+        &self,
+        scans: &[IncrementalScan<Snapshot>],
+        current_file_ids: &HashSet<FileId>,
+    ) -> bool {
+        let rescanned: HashSet<FileId> = scans
+            .iter()
+            .map(|((file_id, _, _, _), _)| *file_id)
+            .chain(self.file_states.keys().filter(|file_id| !current_file_ids.contains(file_id)).copied())
+            .collect();
+        let declarations = |declarations: &mut dyn Iterator<Item = &ExternNamespaceMetadata>| {
+            declarations.map(|declaration| (declaration.namespace, declaration.name)).collect::<HashSet<_>>()
+        };
+        let before = declarations(
+            &mut self
+                .codebase
+                .extern_namespaces
+                .iter()
+                .filter(|declaration| rescanned.contains(&declaration.span.file_id)),
+        );
+        let after =
+            declarations(&mut scans.iter().flat_map(|((_, metadata, _, _), _)| metadata.extern_namespaces.iter()));
+        let given: HashSet<mago_word::Word> = self
+            .codebase
+            .extern_namespaces
+            .iter()
+            .filter_map(|declaration| self.codebase.extern_namespace_folder(declaration))
+            .collect();
+
+        before != after
+            || rescanned
+                .iter()
+                .any(|file_id| self.codebase.folder(*file_id).is_some_and(|folder| given.contains(&folder)))
+            || scans.iter().any(|((file_id, metadata, _, _), _)| {
+                metadata.folder(*file_id).is_some_and(|folder| given.contains(&folder))
+                    || self
+                        .codebase
+                        .extern_namespaces
+                        .iter()
+                        .any(|declaration| metadata.extern_namespace_folder(declaration).is_some())
+            })
+    }
+
+    fn codebase_after<Snapshot>(
+        &self,
+        scans: &[IncrementalScan<Snapshot>],
+        current_file_ids: &HashSet<FileId>,
+    ) -> CodebaseMetadata {
+        let scanned: HashSet<FileId> = scans.iter().map(|((file_id, _, _, _), _)| *file_id).collect();
+        let mut codebase = self.codebase.clone();
+        for (file_id, state) in &self.file_states {
+            if scanned.contains(file_id) || !current_file_ids.contains(file_id) {
+                codebase.remove_entries_by_keys(&state.entry_keys);
+            }
+        }
+        for ((_, metadata, _, _), _) in scans {
+            codebase.extend(metadata.clone());
+        }
+
+        codebase
+    }
+
+    fn changed_extensions<Snapshot>(
+        &self,
+        scans: &[IncrementalScan<Snapshot>],
+        current_file_ids: &HashSet<FileId>,
+    ) -> HashSet<mago_word::Word> {
+        let names =
+            |extensions: Vec<(Word, MethodIdentifier, Option<Word>)>| extensions.into_iter().map(|(name, _, _)| name);
+        let mut changed = HashSet::default();
+        for ((file_id, metadata, _, _), _) in scans {
+            let (after, before) = (extensions_in(metadata, *file_id), extensions_in(&self.codebase, *file_id));
+            if after != before {
+                changed.extend(names(after).chain(names(before)));
+            }
+        }
+        for file_id in self.file_states.keys().filter(|file_id| !current_file_ids.contains(file_id)) {
+            changed.extend(names(extensions_in(&self.codebase, *file_id)));
+        }
+
+        changed.into_iter().map(|name| mago_word::ascii_lowercase_word(name.as_bytes())).collect()
+    }
+
+    fn files_calling(&self, members: &HashSet<mago_word::Word>, among: &[FileId]) -> HashSet<FileId> {
+        among
+            .iter()
+            .copied()
+            .filter(|file_id| {
+                self.database.get(file_id).is_ok_and(|file| {
+                    members.iter().any(|member| {
+                        let member = member.as_bytes();
+                        file.contents.windows(member.len()).any(|word| word.eq_ignore_ascii_case(member))
+                    })
+                })
+            })
+            .collect()
+    }
+
     fn dropped_a_read(&self, held: &FileReads) -> bool {
         !extension_reads(&self.file_states, &self.before_analysis_reads).includes(held)
     }
@@ -2234,6 +2420,29 @@ impl IncrementalAnalysisService {
         }
 
         analyzer
+    }
+
+    /// The files that declare one of `symbols` or whose code or declarations reference one, as the last analysis
+    /// recorded it: the file of each declaration that is one or whose signature, body or attributes reference one, and
+    /// each file whose top-level code does.
+    fn files_naming(&self, symbols: &HashSet<(mago_word::Word, mago_word::Word)>) -> HashSet<FileId> {
+        let mut declared_in: HashMap<mago_word::Word, Vec<FileId>> = HashMap::default();
+        for (file_id, signature) in &self.codebase.file_signatures {
+            for node in &signature.ast_nodes {
+                declared_in.entry(node.name).or_default().push(*file_id);
+            }
+        }
+        symbols
+            .iter()
+            .flat_map(|symbol| self.native_symbol_references.referrers_of(symbol))
+            .chain(symbols.iter().map(|symbol| ReferenceOrigin::Symbol(*symbol)))
+            .flat_map(|origin| match origin {
+                ReferenceOrigin::File(name) => vec![FileId::new(name.as_bytes())],
+                ReferenceOrigin::Symbol((symbol, member)) => {
+                    declared_in.get(if symbol.is_empty() { &member } else { &symbol }).cloned().unwrap_or_default()
+                }
+            })
+            .collect()
     }
 
     /// The `unchanged` files that need no new analysis once [`CodebaseMetadata::mark_safe_symbols`] marked `codebase`'s
@@ -2784,39 +2993,39 @@ fn reaches_extension(codebase: &CodebaseMetadata, references: &SymbolReferences)
     reaches_extension
 }
 
-/// Whether a PHP# bound of a populated declaration in `codebase` names a type that population left missing and that
-/// `declared`, the keys of the class-likes a scan just declared, now holds: such a bound was refused, spec
-/// section 11. A declaration the scan just read is unpopulated, and reads its bounds afresh.
-fn names_a_refused_bound_type(codebase: &CodebaseMetadata, declared: &WordSet) -> bool {
-    let class_templates = codebase
+/// The file of each populated PHP# declaration in `codebase` whose bound names a type that population left missing and
+/// that `declared`, the lowercase names of the class-likes a scan just declared, now holds: such a bound was refused,
+/// spec section 11, and only a scan of its file reads the bound again. The names compare in lowercase, since the type
+/// is missing from `codebase`, which keys it as a plain PHP class-like.
+fn files_with_a_refused_bound(codebase: &CodebaseMetadata, declared: &WordSet) -> HashSet<FileId> {
+    // A bound population refused for a missing type is the refused type, and a bound the checker refuses stays refused.
+    let names_a_declared_type = |template: &GenericTemplate| {
+        !template.bound_refused
+            && template.constraint.types.iter().all(|atomic| matches!(atomic, TAtomic::Error))
+            && template.written_bound.as_ref().is_some_and(|bound| {
+                bound.type_union.get_all_child_nodes().into_iter().any(|node| {
+                    matches!(
+                        node,
+                        TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. }))
+                            if declared.contains(&mago_word::ascii_lowercase_word(name.as_bytes()))
+                    )
+                })
+            })
+    };
+    let classes = codebase
         .class_likes
         .values()
         .filter(|class| class.flags.is_sharp() && class.flags.is_populated())
-        .flat_map(|class| class.template_types.values());
-    let function_templates = codebase
+        .filter(|class| class.template_types.values().any(names_a_declared_type))
+        .map(|class| class.span.file_id);
+    let functions = codebase
         .function_likes
         .values()
         .filter(|function| function.flags.is_sharp() && function.flags.is_populated())
-        .flat_map(|function| function.template_types.values());
+        .filter(|function| function.template_types.values().any(names_a_declared_type))
+        .map(|function| function.span.file_id);
 
-    // A bound population refused for a missing type is the refused type, and a bound the checker refuses stays refused.
-    let refused_for_missing_type = |template: &&GenericTemplate| {
-        !template.bound_refused && template.constraint.types.iter().all(|atomic| matches!(atomic, TAtomic::Error))
-    };
-
-    class_templates
-        .chain(function_templates)
-        .filter(refused_for_missing_type)
-        .filter_map(|template| template.written_bound.as_ref())
-        .any(|bound| {
-            bound.type_union.get_all_child_nodes().into_iter().any(|node| {
-                matches!(
-                    node,
-                    TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. }))
-                        if declared.contains(&codebase.class_key(*name))
-                )
-            })
-        })
+    classes.chain(functions).collect()
 }
 
 /// A file's scan: the file, the hash of its contents, the metadata it declares, what the codebase scan plan captures of
@@ -3005,6 +3214,21 @@ pub(crate) fn receiver_changing_members(metadata: &CodebaseMetadata) -> impl Ite
                 && member.parameters.first().is_some_and(|receiver| receiver.flags.is_by_reference())
         })
         .map(|member| member.original_name)
+}
+
+/// The symbol `declaration` declares in `codebase`, as the reference graph keys it: a function by its name, and a class
+/// or a member by the class and the member.
+fn extern_symbol(
+    codebase: &CodebaseMetadata,
+    declaration: &ExternMetadata,
+) -> Option<(mago_word::Word, mago_word::Word)> {
+    codebase.extern_declaration(declaration).map(reference_symbol)
+}
+
+/// The symbol a key of [`CodebaseMetadata::function_likes`] names, as the reference graph keys it: a function by its
+/// name, and a method by its class and its name.
+fn reference_symbol((class, member): (mago_word::Word, mago_word::Word)) -> (mago_word::Word, mago_word::Word) {
+    if class.is_empty() { (member, mago_word::empty_word()) } else { (class, member) }
 }
 
 /// The `extern` declarations in `file_id`, in the codebase's order. A body's summary records the effects of the
@@ -4358,6 +4582,8 @@ mod tests {
         );
     }
 
+    /// A class alias whose target changes, that is removed, or that is added again re-analyzes the file that declares
+    /// it and each file that names it, and leaves the other files as they were.
     #[test]
     fn test_watch_class_alias_target_changes() {
         let real = concat!(
@@ -4365,31 +4591,37 @@ mod tests {
             "class First { public function value(): int { return 1; } }\n",
             "class Second { public function value(): string { return ''; } }\n",
         );
-        let alias = "<?php\nclass_alias(First::class, Alias::class);\n";
+        let alias = |target: &str| format!("<?php\nclass_alias({target}::class, Alias::class);\n");
         let consumer = concat!(
             "<?php\n",
             "function consume(Alias $value): int { return $value->value(); }\n",
             "consume(new First());\n",
         );
+        let other = "<?php\nfunction other(): int { return 1; }\n";
+        let alias_id = FileId::new(b"src/Alias.php");
+        let rechecked = HashSet::from_iter([alias_id, FileId::new(b"src/Consumer.php")]);
 
-        let mut db =
-            make_database(vec![("src/Real.php", real), ("src/Alias.php", alias), ("src/Consumer.php", consumer)]);
+        let mut db = make_database(vec![
+            ("src/Real.php", real),
+            ("src/Alias.php", alias("First").as_str()),
+            ("src/Consumer.php", consumer),
+            ("src/Other.php", other),
+        ]);
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
         assert_matches_full(&service, &db, "initial class alias");
 
-        db.update(
-            FileId::new(b"src/Alias.php"),
-            Cow::Owned(b"<?php\nclass_alias(Second::class, Alias::class);\n".to_vec()),
-        );
-        service.update_database(db.read_only());
-        service.analyze_incremental(None).expect("Incremental failed.");
-        assert_matches_full(&service, &db, "changed class alias target");
-
-        db.update(FileId::new(b"src/Alias.php"), Cow::Owned(b"<?php\n".to_vec()));
-        service.update_database(db.read_only());
-        service.analyze_incremental(None).expect("Incremental failed.");
-        assert_matches_full(&service, &db, "removed class alias");
+        for (contents, context) in [
+            (alias("Second"), "changed class alias target"),
+            ("<?php\n".to_owned(), "removed class alias"),
+            (alias("First"), "the class alias is added again"),
+        ] {
+            db.update(alias_id, Cow::Owned(contents.into_bytes()));
+            service.update_database(db.read_only());
+            service.analyze_incremental(None).expect("Incremental failed.");
+            assert_eq!(service.analyzed_files, rechecked, "{context}");
+            assert_matches_full(&service, &db, context);
+        }
     }
 
     /// A body edit changes what every caller's body reaches, so the warm run re-analyzes only the edited file and
@@ -4521,7 +4753,8 @@ mod tests {
     }
 
     /// A body records the effects its `extern` declarations list, so an edit of a declaration changes the summaries
-    /// of every file that calls what it declares.
+    /// of every file that calls what it declares: the watch analyzes again the file of the declaration, the file of
+    /// what it declares and each file that calls it, and leaves the other files as they were.
     #[test]
     fn test_watch_extern_edit_reaches_every_caller() {
         let clock = |uses: &str| format!("namespace App.Stubs;\n\nimport Acme.Chrono;\n\nextern Chrono.now{uses};\n");
@@ -4532,7 +4765,10 @@ mod tests {
             ("src/Clock.sharp", clock("").as_str()),
             ("src/Report.sharp", report),
             ("src/Acme/Chrono/now.php", now),
+            ("src/Other.sharp", "namespace App;\n\npublic class Other\n{\n}\n"),
         ]);
+        let rechecked =
+            HashSet::from_iter([clock_id, FileId::new(b"src/Report.sharp"), FileId::new(b"src/Acme/Chrono/now.php")]);
         let impure_laws = |service: &IncrementalAnalysisService| {
             service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-law")).count()
         };
@@ -4545,12 +4781,14 @@ mod tests {
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[clock_id])).expect("Incremental analysis failed.");
         assert_eq!(impure_laws(&service), 1);
+        assert_eq!(service.analyzed_files, rechecked, "now uses Clock");
         assert_matches_full(&service, &db, "now uses Clock");
 
         db.update(clock_id, Cow::Owned(clock("").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[clock_id])).expect("Incremental analysis failed.");
         assert_eq!(impure_laws(&service), 0);
+        assert_eq!(service.analyzed_files, rechecked, "now is pure again");
         assert_matches_full(&service, &db, "now is pure again");
     }
 
@@ -4637,6 +4875,83 @@ mod tests {
         service.analyze_incremental(Some(&[shop_id])).expect("Incremental analysis failed.");
         assert_eq!(service.analyzed_files, HashSet::from_iter([shop_id]));
         assert_matches_full(&service, &db, "a newline is appended to the Shop module");
+    }
+
+    /// An imports line added to a module re-analyzes the files of the module's namespace and every module file, and
+    /// leaves the other namespaces' files as they were.
+    #[test]
+    fn test_watch_an_imports_line_added_to_a_module_rechecks_its_namespace_and_the_module_files() {
+        let mailer = "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n";
+        let smtp = "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n";
+        let panel = "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic class Panel\n{\n    public Panel(private Mailer mailer) { }\n}\n";
+        let shop = |imports: &str| {
+            format!(
+                "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule\n{{\n{imports}    scoped Mailer = SmtpMailer;\n}}\n"
+            )
+        };
+        let mail = "namespace App.Mail;\n\nmodule\n{\n}\n";
+        let shop_id = FileId::new(b"app/Shop/Module.sharp");
+        let mut db = make_database(vec![
+            ("app/Mail/Mailer.sharp", mailer),
+            ("app/Mail/SmtpMailer.sharp", smtp),
+            ("app/Mail/Module.sharp", mail),
+            ("app/Shop/Panel.sharp", panel),
+            ("app/Shop/Module.sharp", shop("").as_str()),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        let before = service.collect_all_issues();
+
+        db.update(shop_id, Cow::Owned(shop("    imports App.Billing;\n").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[shop_id])).expect("Incremental analysis failed.");
+
+        assert_ne!(
+            diff_issues(&service.collect_all_issues(), &before),
+            (Vec::new(), Vec::new()),
+            "the edit changes what Panel reports"
+        );
+        assert_eq!(
+            service.analyzed_files,
+            HashSet::from_iter([shop_id, FileId::new(b"app/Shop/Panel.sharp"), FileId::new(b"app/Mail/Module.sharp")])
+        );
+        assert_matches_full(&service, &db, "the Shop module gains an imports line");
+    }
+
+    /// A binding whose lifetime changes re-analyzes the files of its module's namespace and every module file.
+    #[test]
+    fn test_watch_a_binding_s_new_lifetime_rechecks_its_module_s_namespace_and_the_module_files() {
+        let mailer = "namespace App.Mail;\n\npublic interface Mailer\n{\n}\n";
+        let smtp = "namespace App.Mail;\n\npublic class SmtpMailer : Mailer\n{\n}\n";
+        let panel = "namespace App.Shop;\n\nimport App.Mail.Mailer;\n\npublic class Panel\n{\n    public Panel(private Mailer mailer) { }\n}\n";
+        let shop = |lifetime: &str| {
+            format!(
+                "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\n\nmodule\n{{\n    {lifetime} Mailer = SmtpMailer;\n}}\n"
+            )
+        };
+        let mail = "namespace App.Mail;\n\nmodule\n{\n}\n";
+        let shop_id = FileId::new(b"app/Shop/Module.sharp");
+        let mut db = make_database(vec![
+            ("app/Mail/Mailer.sharp", mailer),
+            ("app/Mail/SmtpMailer.sharp", smtp),
+            ("app/Mail/Module.sharp", mail),
+            ("app/Shop/Panel.sharp", panel),
+            ("app/Shop/Module.sharp", shop("scoped").as_str()),
+        ]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(shop_id, Cow::Owned(shop("transient").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[shop_id])).expect("Incremental analysis failed.");
+
+        assert_eq!(
+            service.analyzed_files,
+            HashSet::from_iter([shop_id, FileId::new(b"app/Shop/Panel.sharp"), FileId::new(b"app/Mail/Module.sharp")])
+        );
+        assert_matches_full(&service, &db, "the Shop module's binding becomes transient");
     }
 
     /// A signature edit re-analyzes its file in watch mode, and the methods it did not touch keep what they do.
@@ -4862,6 +5177,11 @@ mod tests {
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental analysis failed.");
         assert_eq!(errors(&service), 0, "the line gives abort the namespace Vendor.Foundation");
+        assert_eq!(
+            service.analyzed_files,
+            HashSet::from_iter([externs_id, FileId::new(b"src/Page.sharp")]),
+            "the extern namespace line is added"
+        );
         assert_matches_full(&service, &db, "the extern namespace line is added");
 
         db.delete(externs_id);
@@ -4869,6 +5189,82 @@ mod tests {
         service.analyze_incremental(None).expect("Incremental analysis failed.");
         assert_ne!(errors(&service), 0, "abort loses its namespace again");
         assert_matches_full(&service, &db, "the extern namespace line is deleted");
+    }
+
+    /// Spec section 23: a class-like of a file's namespace wins over the default class-like of its short name, so
+    /// declaring `App\Math` changes what `Math` means in each file of `App` that names it, and deleting it changes it
+    /// back. The test database holds no standard library, so `Math` names no class without `App\Math`. Only the files
+    /// that name `Math` are scanned and analyzed again.
+    #[test]
+    fn test_watch_a_class_that_wins_over_a_default_class_rechecks_the_files_that_name_it() {
+        let page = "namespace App;\n\npublic class Page\n{\n    public int top() => Math.max(1, 2);\n}\n";
+        let other = "namespace App;\n\npublic class Other\n{\n    public int one() => 1;\n}\n";
+        let math = "namespace App;\n\npublic static class Math\n{\n    public static int max(int a, int b) => a;\n}\n";
+        let (page_id, math_id) = (FileId::new(b"src/Page.sharp"), FileId::new(b"src/Math.sharp"));
+        let mut db = make_database(vec![("src/Page.sharp", page), ("src/Other.sharp", other)]);
+        let errors = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.level == mago_reporting::Level::Error).count()
+        };
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(errors(&service), 1, "`Math` names no class");
+
+        db.add(File::new(Cow::Borrowed(&b"src/Math.sharp"[..]), FileType::Host, None, Cow::Borrowed(math.as_bytes())));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(errors(&service), 0, "`Math` names `App.Math`");
+        assert_eq!(service.analyzed_files, HashSet::from_iter([page_id, math_id]), "App.Math is declared");
+        assert_matches_full(&service, &db, "App.Math is declared");
+
+        db.delete(math_id);
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(errors(&service), 1, "`Math` names no class again");
+        assert_eq!(service.analyzed_files, HashSet::from_iter([page_id]), "App.Math is deleted");
+        assert_matches_full(&service, &db, "App.Math is deleted");
+    }
+
+    /// An extension member changes what a call of a member of its name means in any file, so adding or deleting one
+    /// rechecks the files that call a member of that name, and no other.
+    #[test]
+    fn test_watch_an_extension_member_added_or_deleted_rechecks_the_files_that_call_its_name() {
+        let boxed = "namespace App;\n\npublic class Box\n{\n    public int size() => 1;\n}\n";
+        let usage = "namespace App;\n\npublic class Use\n{\n    public int run(Box box) => box.doubled();\n}\n";
+        let other = "namespace App;\n\npublic class Other\n{\n    public int one() => 1;\n}\n";
+        let without = "namespace App;\n\npublic static class Extras\n{\n    public static int one() => 1;\n}\n";
+        let with = "namespace App;\n\npublic static class Extras\n{\n    public static int one() => 1;\n\n    extension(Box box)\n    {\n        public int doubled() => box.size() * 2;\n    }\n}\n";
+        let (extras_id, use_id) = (FileId::new(b"src/Extras.sharp"), FileId::new(b"src/Use.sharp"));
+        let mut db = make_database(vec![
+            ("src/Box.sharp", boxed),
+            ("src/Use.sharp", usage),
+            ("src/Other.sharp", other),
+            ("src/Extras.sharp", without),
+        ]);
+        let errors = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.level == mago_reporting::Level::Error).count()
+        };
+        let edit = |db: &mut Database<'_>, contents: &'static str| {
+            db.update(extras_id, Cow::Borrowed(contents.as_bytes()));
+        };
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(errors(&service), 1, "Box has no member doubled");
+
+        edit(&mut db, with);
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(errors(&service), 0, "the extension gives Box doubled");
+        assert_eq!(service.analyzed_files, HashSet::from_iter([extras_id, use_id]), "the extension is added");
+        assert_matches_full(&service, &db, "the extension is added");
+
+        edit(&mut db, without);
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(errors(&service), 1, "Box has no member doubled again");
+        assert_eq!(service.analyzed_files, HashSet::from_iter([extras_id, use_id]), "the extension is deleted");
+        assert_matches_full(&service, &db, "the extension is deleted");
     }
 
     /// Spec section 11: a bound that names a type no file declares is the refused type only while the type is missing.
@@ -4879,7 +5275,10 @@ mod tests {
     fn test_watch_a_bound_whose_missing_type_is_declared_later_bounds_again() {
         let bounded = "namespace App;\n\npublic static class Bounded\n{\n    public static T held<T : Holder<TOther>, TOther>(T value, TOther other) => value;\n\n    public static Any? written() => Bounded.held<int, int>(1, 2);\n\n    public static void touch<TBox : Holder<int>>(readonly TBox box)\n    {\n        box.size = 1;\n    }\n}\n";
         let holder = "namespace App;\n\npublic interface Holder<TItem>\n{\n    int size { get; }\n}\n";
-        let mut db = make_database(vec![("src/Bounded.sharp", bounded)]);
+        let mut db = make_database(vec![
+            ("src/Bounded.sharp", bounded),
+            ("src/Other.sharp", "namespace App;\n\npublic class Other\n{\n}\n"),
+        ]);
         let errors = |service: &IncrementalAnalysisService| {
             service
                 .collect_all_issues()
@@ -4924,11 +5323,15 @@ mod tests {
             ]
         );
         assert_eq!(bounds(&service), (false, false), "the bound is Holder<TOther> again");
+        assert_eq!(
+            service.analyzed_files,
+            HashSet::from_iter([FileId::new(b"src/Holder.sharp"), FileId::new(b"src/Bounded.sharp")])
+        );
         assert_matches_full(&service, &db, "Holder is declared");
     }
 
-    /// Only a bound population refused for a missing type runs a full analysis once a file declares that type, so an
-    /// edit of a class-like that an accepted bound names stays incremental.
+    /// Only a bound population refused for a missing type scans its file again once a file declares that type, so an
+    /// edit of a class-like that an accepted bound names rechecks what its signature reaches alone.
     #[test]
     fn test_watch_an_edit_of_a_type_an_accepted_bound_names_stays_incremental() {
         let bounded = "namespace App;\n\npublic static class Bounded\n{\n    public static T held<T : Holder<int>>(T value) => value;\n}\n";
@@ -7092,7 +7495,9 @@ mod tests {
             (b"vendor/VendorBase.php", FileType::Vendored, vendor),
             (b"patches/VendorBase.php", FileType::Patch, patch_v1),
             (b"src/MyImpl.php", FileType::Host, host),
+            (b"src/Other.php", FileType::Host, b"<?php\nfunction other(): int { return 1; }\n"),
         ]);
+        let rechecked = HashSet::from_iter([FileId::new(b"src/MyImpl.php")]);
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
@@ -7108,12 +7513,14 @@ mod tests {
             let full = fresh.analyze().expect("Full analysis failed.");
             assert!(!full.issues.is_empty(), "Expected at least one issue after patch changes return type to int");
         }
+        assert_eq!(service.analyzed_files, rechecked, "patch changed return type to int");
         assert_matches_full(&service, &db, "patch changed return type to int");
 
         // Revert patch.
         db.update(FileId::new(b"patches/VendorBase.php"), Cow::Owned(patch_v1.to_vec()));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
+        assert_eq!(service.analyzed_files, rechecked, "patch reverted to string");
         assert_matches_full(&service, &db, "patch reverted to string");
     }
 
@@ -7172,6 +7579,7 @@ mod tests {
             (b"vendor/VendorBase.php", FileType::Vendored, vendor),
             (b"patches/VendorBase.php", FileType::Patch, patch),
             (b"src/MyImpl.php", FileType::Host, host),
+            (b"src/Other.php", FileType::Host, b"<?php\nfunction other(): int { return 1; }\n"),
         ]);
 
         let mut service = make_watch_service(&db);
@@ -7191,6 +7599,7 @@ mod tests {
         db.delete(FileId::new(b"patches/VendorBase.php"));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
+        assert_eq!(service.analyzed_files, HashSet::from_iter([FileId::new(b"src/MyImpl.php")]));
         assert_matches_full(&service, &db, "patch deleted, return-type error must clear");
     }
 

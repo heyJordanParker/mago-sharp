@@ -665,6 +665,40 @@ final class LooksUpARoute implements Plugin, AfterFileAnalysisHook
 (new Worker(new Extension('acme/routes', 'Routes', '1.0.0', analyzerPlugins: [new LooksUpARoute()])))->run();
 "#;
 
+/// An extension host whose before-analysis hook looks up the class `Route`, which every file's analysis then reads.
+const HOST_LOOKING_UP_A_CLASS_BEFORE_ANALYSIS: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\BeforeAnalysisContext;
+use Mago\Sdk\Analyzer\BeforeAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+final class LooksUpTheRouteFirst implements Plugin, BeforeAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('routes', 'Routes', 'Looks up the route class before the analysis.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerBeforeAnalysisHook($this);
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        class_exists('Route');
+    }
+}
+
+(new Worker(new Extension('acme/routes', 'Routes', '1.0.0', analyzerPlugins: [new LooksUpTheRouteFirst()])))->run();
+"#;
+
 /// The plugin registry of an extension host `acme` whose worker `source` registers, a PHP file written into
 /// `directory`, with `DEADLINE` and `backstop`.
 fn deadline_registry(source: &str, directory: &Path, backstop: Duration) -> PluginRegistry {
@@ -855,8 +889,34 @@ fn a_file_whose_hook_looked_up_a_class_is_analyzed_again_when_the_class_changes(
     let ordered = service.reload_classes(&[word(b"app\\order")].into_iter().collect()).expect("the worker reloads");
     let route = service.reload_classes(&[word(b"app\\route")].into_iter().collect()).expect("no worker holds it now");
 
-    assert_eq!(other, Some(Vec::new()));
-    assert_eq!(ordered, Some(vec![order]), "only the hook that looked it up read the later class");
-    let route: HashSet<FileId> = route.expect("no before-analysis hook read it").into_iter().collect();
+    assert_eq!(other, Vec::new());
+    assert_eq!(ordered, vec![order], "only the hook that looked it up read the later class");
+    let route: HashSet<FileId> = route.into_iter().collect();
     assert_eq!(route, HashSet::from([order, FileId::new(b"src/Route.php")]), "the later hook read the earlier class");
+}
+
+/// A class a before-analysis hook looked up, which every file reads, is analyzed again in the file that declares it,
+/// and the worker that looked it up starts again.
+#[test]
+fn a_class_a_before_analysis_hook_looked_up_rechecks_the_file_that_declares_it() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the before-analysis class reload test") {
+        return;
+    }
+
+    let temporary = tempfile::tempdir().expect("temporary host directory should be created");
+    let registry = deadline_registry(HOST_LOOKING_UP_A_CLASS_BEFORE_ANALYSIS, temporary.path(), UNREACHED_BACKSTOP);
+    let database = deadline_database();
+    let mut service = IncrementalAnalysisService::new(
+        database.read_only(),
+        Default::default,
+        Settings::new(PHPVersion::PHP85),
+        ParserSettings::default(),
+        Arc::new(registry),
+    );
+    service.analyze().expect("the analysis should succeed");
+
+    let route = service.reload_classes(&[word(b"route")].into_iter().collect()).expect("the worker reloads");
+
+    assert_eq!(route, vec![FileId::new(b"src/Route.php")]);
 }
