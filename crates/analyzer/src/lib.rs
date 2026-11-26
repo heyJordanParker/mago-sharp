@@ -537,8 +537,3 @@ final class Test
         };
     }
 }
-
-/// A throwaway lint for #977's check, which the next commit removes.
-pub fn lint_probe_977() {
-    let unused = 1;
-}
