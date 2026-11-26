@@ -1236,9 +1236,8 @@ impl IncrementalAnalysisService {
         let parser_settings = self.parser_settings;
         let php_version = self.settings.version;
         let codebase_scan_plan = self.codebase_scan_plan.clone();
-        let extern_namespaces = &self.extern_namespaces;
         let reach = self.autoloader.is_some();
-        let scan = |files: Vec<&Arc<File>>, namespace_classes: &NamespaceClasses| {
+        let scan = |files: Vec<&Arc<File>>, namespace_classes: &NamespaceClasses, extern_namespaces: &ExternNamespaces| {
             files
                 .into_par_iter()
                 .map_init(LocalArena::new, |arena, file| {
@@ -1260,7 +1259,7 @@ impl IncrementalAnalysisService {
                 .collect::<Result<Vec<_>, mago_analyzer::external::ExternalAnalyzerError>>()
                 .map_err(mago_analyzer::error::AnalysisError::from)
         };
-        let mut scans = scan(changed_files, &self.namespace_classes)?;
+        let mut scans = scan(changed_files, &self.namespace_classes, &self.extern_namespaces)?;
         let (removed_class_likes, mut naming_removed) = self.removed_class_likes(
             scans.iter().map(|((file_id, metadata, _, _), _)| (*file_id, metadata)),
             &current_file_ids,
@@ -1387,11 +1386,22 @@ impl IncrementalAnalysisService {
             naming_removed.extend(renaming.into_iter().map(|((file_id, _, _, _), _)| file_id));
             self.namespace_classes = namespace_classes;
         }
+        if self.extern_namespaces_changed(&scans, &current_file_ids) {
+            self.extern_namespaces = self.extern_namespaces_after(&scans, &current_file_ids);
+            let sharp: HashSet<FileId> =
+                source_files.iter().filter(|file| file.name.ends_with(b".sharp")).map(|file| file.id).collect();
+            naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| sharp.contains(file_id)));
+            let (renaming, kept): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut scans).into_iter().partition(|((file_id, _, _, _), _)| sharp.contains(file_id));
+            scans = kept;
+            naming_removed.extend(renaming.into_iter().map(|((file_id, _, _, _), _)| file_id));
+        }
         if !naming_removed.is_empty() {
             unchanged_file_ids.retain(|file_id| !naming_removed.contains(file_id));
             scans.extend(scan(
                 source_files.iter().filter(|file| naming_removed.contains(&file.id)).collect(),
                 &self.namespace_classes,
+                &self.extern_namespaces,
             )?);
         }
         let mut named_by_file: HashMap<FileId, Vec<mago_word::Word>> = HashMap::default();
@@ -1579,49 +1589,6 @@ impl IncrementalAnalysisService {
             });
 
         if extensions_changed {
-            return self.analyze();
-        }
-
-        let rescanned: HashSet<FileId> = new_file_scans
-            .iter()
-            .map(|(file_id, _)| *file_id)
-            .chain(self.file_states.keys().filter(|file_id| !current_file_ids.contains(file_id)).copied())
-            .collect();
-
-        // An `extern namespace` changes what a name means in every PHP# file, spec section 23, and so does each root
-        // class, function and constant of the folder it gives the namespace, which a rescanned file of that folder may
-        // declare or delete, and so does the name it names, which a rescanned file may declare anywhere.
-        let extern_namespaces = |declarations: &mut dyn Iterator<Item = &ExternNamespaceMetadata>| {
-            declarations.map(|declaration| (declaration.namespace, declaration.name)).collect::<HashSet<_>>()
-        };
-        let extern_namespaces_before = extern_namespaces(
-            &mut self
-                .codebase
-                .extern_namespaces
-                .iter()
-                .filter(|declaration| rescanned.contains(&declaration.span.file_id)),
-        );
-        let extern_namespaces_after =
-            extern_namespaces(&mut new_file_scans.iter().flat_map(|(_, metadata)| metadata.extern_namespaces.iter()));
-        let given: HashSet<mago_word::Word> = self
-            .codebase
-            .extern_namespaces
-            .iter()
-            .filter_map(|declaration| self.codebase.extern_namespace_folder(declaration))
-            .collect();
-        let given_folder_rescanned = rescanned
-            .iter()
-            .any(|file_id| self.codebase.folder(*file_id).is_some_and(|folder| given.contains(&folder)))
-            || new_file_scans.iter().any(|(file_id, metadata)| {
-                metadata.folder(*file_id).is_some_and(|folder| given.contains(&folder))
-                    || self
-                        .codebase
-                        .extern_namespaces
-                        .iter()
-                        .any(|declaration| metadata.extern_namespace_folder(declaration).is_some())
-            });
-
-        if extern_namespaces_before != extern_namespaces_after || given_folder_rescanned {
             return self.analyze();
         }
 
@@ -2133,6 +2100,66 @@ impl IncrementalAnalysisService {
                 .chain(scans.iter().flat_map(|((_, metadata, _, _), _)| metadata.class_likes.values()))
                 .map(|class_like| (class_like.original_name, class_like.flags.is_sharp())),
         )
+    }
+
+    fn extern_namespaces_changed<Snapshot>(
+        &self,
+        scans: &[((FileId, CodebaseMetadata, Snapshot, Vec<mago_word::Word>), WordSet)],
+        current_file_ids: &HashSet<FileId>,
+    ) -> bool {
+        let rescanned: HashSet<FileId> = scans
+            .iter()
+            .map(|((file_id, _, _, _), _)| *file_id)
+            .chain(self.file_states.keys().filter(|file_id| !current_file_ids.contains(file_id)).copied())
+            .collect();
+        let declarations = |declarations: &mut dyn Iterator<Item = &ExternNamespaceMetadata>| {
+            declarations.map(|declaration| (declaration.namespace, declaration.name)).collect::<HashSet<_>>()
+        };
+        let before = declarations(
+            &mut self
+                .codebase
+                .extern_namespaces
+                .iter()
+                .filter(|declaration| rescanned.contains(&declaration.span.file_id)),
+        );
+        let after =
+            declarations(&mut scans.iter().flat_map(|((_, metadata, _, _), _)| metadata.extern_namespaces.iter()));
+        let given: HashSet<mago_word::Word> = self
+            .codebase
+            .extern_namespaces
+            .iter()
+            .filter_map(|declaration| self.codebase.extern_namespace_folder(declaration))
+            .collect();
+
+        before != after
+            || rescanned.iter().any(|file_id| self.codebase.folder(*file_id).is_some_and(|folder| given.contains(&folder)))
+            || scans.iter().any(|((file_id, metadata, _, _), _)| {
+                metadata.folder(*file_id).is_some_and(|folder| given.contains(&folder))
+                    || self
+                        .codebase
+                        .extern_namespaces
+                        .iter()
+                        .any(|declaration| metadata.extern_namespace_folder(declaration).is_some())
+            })
+    }
+
+    fn extern_namespaces_after<Snapshot>(
+        &self,
+        scans: &[((FileId, CodebaseMetadata, Snapshot, Vec<mago_word::Word>), WordSet)],
+        current_file_ids: &HashSet<FileId>,
+    ) -> ExternNamespaces {
+        let scanned: HashSet<FileId> = scans.iter().map(|((file_id, _, _, _), _)| *file_id).collect();
+        let mut codebase = self.codebase.clone();
+        for (file_id, state) in &self.file_states {
+            if scanned.contains(file_id) || !current_file_ids.contains(file_id) {
+                codebase.remove_entries_by_keys(&state.entry_keys);
+            }
+        }
+        for ((_, metadata, _, _), _) in scans {
+            codebase.extend(metadata.clone());
+        }
+
+        ExternNamespaces::new(extern_namespace_classes(&[&codebase]))
     }
 
     fn dropped_a_read(&self, held: &FileReads) -> bool {
@@ -5093,6 +5120,11 @@ mod tests {
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental analysis failed.");
         assert_eq!(errors(&service), 0, "the line gives abort the namespace Vendor.Foundation");
+        assert_eq!(
+            service.analyzed_files,
+            HashSet::from_iter([externs_id, FileId::new(b"src/Page.sharp")]),
+            "the extern namespace line is added"
+        );
         assert_matches_full(&service, &db, "the extern namespace line is added");
 
         db.delete(externs_id);
