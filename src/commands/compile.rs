@@ -2489,6 +2489,14 @@ impl Record {
         }
     }
 
+    /// Keeps the file at `path`, which the compile kept unread, as an output with `output`, the status and hash the last
+    /// compile recorded for it, which [`is_unchanged`] found it still has.
+    fn unchanged_output(&mut self, path: &Path, output: (Status, [u8; 16])) {
+        let name = source_name(&self.root, path);
+        self.files.remove(&name);
+        self.outputs.insert(name, output);
+    }
+
     /// Writes the record to `path` once the compile is done with `outcome`: hashes each source file's bytes as
     /// `database` read them, or as the file holds them when the database didn't read it, and adds `inputs`, the stamps
     /// the compile took. A compile whose output changed since it wrote or kept it, as a file someone swapped in or a

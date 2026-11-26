@@ -34,8 +34,10 @@ pub const SHARP_UNIT_MAGIC: [u8; 8] = *b"SHARPC\0\0";
 /// The folder at the workspace root, and at each package root, that holds every compiled file.
 pub const COMPILED_FOLDER: &str = ".sharp";
 
-/// The link in [`COMPILED_FOLDER`] that names the generation every reader reads the compiled files of, a folder each
-/// compile writes anew beside it and switches the link to, so a running process keeps the one it started on.
+/// The link in [`COMPILED_FOLDER`] that names the generation every reader reads the compiled files of.
+///
+/// Each compile writes a generation anew beside it and switches the link to it, so a running process keeps the one it
+/// started on.
 pub const CURRENT_GENERATION: &str = "current";
 
 /// The first part of the name of each generation's folder in [`COMPILED_FOLDER`].
