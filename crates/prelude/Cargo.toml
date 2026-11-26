@@ -24,8 +24,6 @@ mago-syntax = { workspace = true, optional = true }
 mago-names = { workspace = true, optional = true }
 mago-php-version = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
-# Named only by `build`, so its build script's mago-reporting has the normal build's features.
-mago-reporting = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -34,20 +32,7 @@ serde = [
     "dep:bincode",
     "mago-codex/serde",
 ]
-# A build script's dependencies have their features apart from the normal build's, and a crate builds once for each
-# feature set, so `build` gives the crates it reaches the features the normal build gives them, and each builds once.
-build = [
-    "serde",
-    "mago-allocator",
-    "rust-embed",
-    "mago-syntax",
-    "mago-names",
-    "mago-php-version",
-    "rayon",
-    "mago-database/default",
-    "mago-syntax/serde",
-    "mago-reporting/default",
-]
+build = ["serde", "mago-allocator", "rust-embed", "mago-syntax", "mago-names", "mago-php-version", "rayon"]
 
 [dev-dependencies]
 criterion = { workspace = true }
