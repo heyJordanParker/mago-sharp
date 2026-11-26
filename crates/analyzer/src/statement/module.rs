@@ -69,6 +69,7 @@ use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::template::explain_blocked_substitution;
 use crate::visibility::display_namespace;
 use crate::visibility::dotted;
 use crate::visibility::list_refusing;
@@ -735,12 +736,19 @@ where
     let value = get_named_object(metadata.name, None);
     let mut comparison = ComparisonResult::for_dialect(Dialect::Sharp);
     if !union_comparator::is_contained_by(context.codebase, &value, service, false, false, false, &mut comparison) {
-        context.collector.report_with_code(
+        // A class that implements the service's class with another type argument is refused as spec section 11.1 words
+        // an invariant substitution.
+        let issue = Issue::error(format!("`{class_name}` is not a `{service_name}`."))
+            .with_annotation(Annotation::primary(span).with_message("Bound here."))
+            .with_help(format!("Bind `{service_name}` to a class that implements it."));
+        let (code, issue) = explain_blocked_substitution(
+            context,
+            &value,
+            service,
             IssueCode::InvalidBinding,
-            Issue::error(format!("`{class_name}` is not a `{service_name}`."))
-                .with_annotation(Annotation::primary(span).with_message("Bound here."))
-                .with_help(format!("Bind `{service_name}` to a class that implements it.")),
+            (IssueCode::InvalidBinding, issue),
         );
+        context.collector.report_with_code(code, issue);
         return None;
     }
 

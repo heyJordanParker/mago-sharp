@@ -59,9 +59,13 @@ pub(crate) fn is_contained_by(
             return false;
         };
 
-        // When the input has no explicit type parameters, the specialized type
-        // is the template's default or bound, not an explicit invariant argument.
-        if input_type_parameters.is_none() {
+        // When the input declares type parameters and this use omits them, as plain PHP may, the specialized type is
+        // the template's default or bound, not an explicit invariant argument. An argument a PHP# class's own
+        // `implements` or `extends` names is explicit, so invariance holds for it, spec section 11.1. Plain PHP keeps
+        // its docblock generics' wildcards.
+        if input_type_parameters.is_none()
+            && (!input_metadata.template_types.is_empty() || !input_metadata.flags.is_sharp())
+        {
             specialized_template_type.set_from_unspecified_template(true);
         }
 

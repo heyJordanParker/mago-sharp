@@ -577,22 +577,24 @@ pub(crate) fn build_in(builds: &Path, lake: &Lake, checker: &[u8]) -> io::Result
     Ok(library)
 }
 
-/// Builds the law checker with the Lean a law runs on, in a folder of its own, and writes the zstd archive of its
-/// `.lake/build` to `archive`, which the release build embeds in Mago as its checker.
+/// Writes the zstd archive of the law checker's `.lake/build` to `archive`, which the release build embeds in Mago as
+/// its checker.
+///
+/// It archives the build in `lean/` in Mago's cache folder, as `build_in` gives it, so a job whose tests built the
+/// checker there archives that build and runs no `lake`, and any other job builds it there first.
 ///
 /// `environment` names Mago's cache folder and elan's, where it finds Lean.
 ///
 /// # Errors
 ///
-/// Returns the error of finding Lean, of the build, or of writing the archive.
+/// Returns the error of naming Mago's cache folder, of finding Lean, of the build, or of writing the archive.
 pub fn write_checker(archive: &Path, environment: &BTreeMap<OsString, OsString>) -> io::Result<()> {
     let lake = match toolchain(environment) {
         Toolchain::Ready(lake) => lake,
         Toolchain::Unsupported => return Err(io::Error::other("Mago pins no Lean for this platform")),
         Toolchain::Failed(failure) => return Err(io::Error::other(failure)),
     };
-    let builds = tempfile::tempdir()?;
-    let library = build_in(builds.path(), &lake, &[])?;
+    let library = build_in(&cache_root(environment)?.join("lean"), &lake, &[])?;
     let file = fs::File::create(archive).map_err(|error| DatabaseError::io(IOAction::WriteFile, archive, error))?;
     let mut tarball = tar::Builder::new(zstd::Encoder::new(file, 19)?);
     tarball.append_dir_all(".lake/build/bin", library.join(".lake/build/bin"))?;
