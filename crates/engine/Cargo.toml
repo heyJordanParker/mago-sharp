@@ -13,6 +13,10 @@ links = "php"
 [lints]
 workspace = true
 
+[lib]
+# No unit test lives in src, so no lib test binary builds. A unit test added there removes this line.
+test = false
+
 [dependencies]
 sharp = { workspace = true }
 

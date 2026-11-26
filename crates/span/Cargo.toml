@@ -12,6 +12,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[lib]
+# No unit test lives in src, so no lib test binary builds. A unit test added there removes this line.
+test = false
+
 [dependencies]
 mago-database = { workspace = true }
 serde = { workspace = true, optional = true }
