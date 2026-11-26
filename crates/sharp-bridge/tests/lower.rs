@@ -28783,24 +28783,54 @@ fn an_extern_property_reaches_get_and_set_under_its_key() {
         indoc! {r#"
             STMT_LIST
               RETURN
-                VERIFY_TYPE_ARGS
-                  METHOD_CALL
-                    VAR
-                      ZVAL "this"
-                    ZVAL "__get"
-                    ARG_LIST
-                      ZVAL "total_cents"
-                  ZVAL "int"
-                  ZVAL "App.Tenant.Row.totalCents"
+                CALL
+                  ZVAL "Sharp\\Internal\\returned"
+                  ARG_LIST
+                    METHOD_CALL
+                      VAR
+                        ZVAL "this"
+                      ZVAL "__get"
+                      ARG_LIST
+                        ZVAL "total_cents"
+                    ZVAL null
+                    ZVAL ""
+                    ZVAL "int"
+                    ZVAL "App.Tenant.Row.totalCents"
         "#}
     );
+}
+
+/// ```php
+/// $this->__set('total_cents', $value#1 = \Sharp\Internal\returned($this->__get('total_cents'), null, '', 'int', 'App.Tenant.Row.totalCents') + 1) ?? $value#1;
+/// return \Sharp\Internal\returned($row?->__get('total_cents'), null, '', 'int?', 'App.Tenant.Row.totalCents');
+/// ```
+///
+/// Every read of an `extern` property crosses in through `\Sharp\Internal\returned` as its declared type, spec section
+/// 14.3: the read a compound assignment makes before it writes through `__set`, and a read through `?.`, whose type
+/// holds the `null` an absent receiver gives.
+#[test]
+fn an_extern_property_read_through_a_compound_assignment_or_a_null_safe_access_crosses_in() {
+    let model = (
+        "src/Lib/Model.php",
+        "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    /** @var array<string, mixed> */\n    private array $attributes = [];\n\n    public function __get(string $key): mixed\n    {\n        return $this->attributes[$key] ?? null;\n    }\n\n    public function __set(string $key, mixed $value): void\n    {\n        $this->attributes[$key] = $value;\n    }\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Row : Model\n{\n    [Key(\"total_cents\")]\n    public extern int totalCents { get; set; }\n\n    public Row() : super() { }\n\n    public void run()\n    {\n        this.totalCents += 1;\n    }\n\n    public static int? total(Row? row) => row?.totalCents;\n}\n";
+    let lowered = Lowered::with(code, &[model, KEY]);
+    let returned = "ZVAL \"Sharp\\\\Internal\\\\returned\"";
+
+    for (body, read) in [(lowered.body(), "ZVAL \"int\""), (lowered.body_of("total"), "ZVAL \"int?\"")] {
+        assert_eq!(body.matches(returned).count(), 1, "{body}");
+        assert_eq!(body.matches("ZVAL \"__get\"").count(), 1, "{body}");
+        assert!(body.contains(read), "{body}");
+    }
+    assert!(lowered.body().contains("ZVAL \"__set\""), "{}", lowered.body());
 }
 
 /// An `extern` property of a PHP# class whose plain PHP parent defines `__get` is the property `__get` gives, spec
 /// section 14.3: the class declares no PHP property of its name, only the hidden static `owner#extern` that holds its key
 /// and its access, beside its line `$owner extern: string`, by which reflection lists it. The read calls `__get` with
-/// the key, and the engine checks the value against the declared type where it enters PHP#, beside the method of its
-/// name.
+/// the key inside `\Sharp\Internal\returned`, so the value crosses in as the declared type and is checked against it
+/// where it enters PHP#, as a plain PHP call's result is, beside the method of its name.
 #[test]
 fn an_extern_property_is_a_hidden_static_and_its_read_calls_get_checked_where_it_enters() {
     let model = (
@@ -28844,15 +28874,19 @@ fn an_extern_property_is_a_hidden_static_and_its_read_calls_get_checked_where_it
                 null
                 STMT_LIST
                   RETURN
-                    VERIFY_TYPE_ARGS
-                      METHOD_CALL
-                        VAR
-                          ZVAL "this"
-                        ZVAL "__get"
-                        ARG_LIST
-                          ZVAL "owner"
-                      ZVAL "string"
-                      ZVAL "App.Tenant.Row.owner"
+                    CALL
+                      ZVAL "Sharp\\Internal\\returned"
+                      ARG_LIST
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "__get"
+                          ARG_LIST
+                            ZVAL "owner"
+                        ZVAL null
+                        ZVAL ""
+                        ZVAL "string"
+                        ZVAL "App.Tenant.Row.owner"
                 SHARP_TYPE_ARGS
                   ZVAL [1] "string"
                   ZVAL "Function<string()>"
