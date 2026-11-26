@@ -1141,23 +1141,6 @@ impl IncrementalAnalysisService {
         let deleted_count = self.file_states.keys().filter(|id| !current_file_ids.contains(id)).count();
         if deleted_count > 0 {
             tracing::debug!("{} file(s) deleted since last run", deleted_count);
-
-            // A deleted patch leaves its refinements already folded into the vendor / built-in
-            // baseline with nothing left to undo them: the apply pass only runs for patches present
-            // in the new scans, and the vendor file it targeted is untouched. Fall back to a full
-            // reanalyze so the affected baselines are rebuilt without the patch — the same policy the
-            // patch-content-change path below uses.
-            let patch_deleted = self
-                .codebase
-                .patch_class_likes
-                .values()
-                .map(|meta| meta.span.file_id)
-                .chain(self.codebase.patch_function_likes.values().map(|meta| meta.span.file_id))
-                .chain(self.codebase.patch_constants.values().map(|meta| meta.span.file_id))
-                .any(|file_id| !current_file_ids.contains(&file_id));
-            if patch_deleted {
-                return self.analyze();
-            }
         }
 
         if let Some(hint) = changed_hint {
@@ -1318,6 +1301,52 @@ impl IncrementalAnalysisService {
                     .filter_map(|declaration| extern_symbol(&self.codebase, declaration)),
             );
         }
+        // A patch's refinements are folded into the declarations it patches, so a patch whose content changed, or that
+        // is gone, scans again the files that declare or name what it patched, before or after, and every patch file,
+        // whose refinements the patches pass then folds into the fresh declarations again. A patch scanned again for a
+        // vendor change alone holds what it held.
+        let changed_patches: HashSet<FileId> = scans
+            .iter()
+            .map(|((file_id, _, _), _)| *file_id)
+            .filter(|file_id| {
+                self.database.get(file_id).is_ok_and(|file| file.file_type.is_patch())
+                    && self.file_states.get(file_id).is_none_or(|state| state.content_hash != file_hashes[file_id])
+            })
+            .chain(self.file_states.keys().filter(|file_id| !current_file_ids.contains(file_id)).copied())
+            .collect();
+        let patched_in = |codebase: &CodebaseMetadata| -> Vec<(mago_word::Word, mago_word::Word)> {
+            let patches = |file_id: FileId| changed_patches.contains(&file_id);
+            codebase
+                .patch_class_likes
+                .iter()
+                .filter(|(_, metadata)| patches(metadata.span.file_id))
+                .map(|(name, _)| (*name, mago_word::empty_word()))
+                .chain(
+                    codebase
+                        .patch_function_likes
+                        .iter()
+                        .filter(|(_, metadata)| patches(metadata.span.file_id))
+                        .map(|(key, _)| reference_symbol(*key)),
+                )
+                .chain(
+                    codebase
+                        .patch_constants
+                        .iter()
+                        .filter(|(_, metadata)| patches(metadata.span.file_id))
+                        .map(|(name, _)| (*name, mago_word::empty_word())),
+                )
+                .collect()
+        };
+        let mut patched: HashSet<(mago_word::Word, mago_word::Word)> = patched_in(&self.codebase).into_iter().collect();
+        for ((_, metadata, _), _) in &scans {
+            patched.extend(patched_in(metadata));
+        }
+        if !patched.is_empty() {
+            let patching = self.files_naming(&patched);
+            naming_removed.extend(unchanged_file_ids.iter().copied().filter(|file_id| {
+                patching.contains(file_id) || self.database.get(file_id).is_ok_and(|file| file.file_type.is_patch())
+            }));
+        }
         if !renamed.is_empty() {
             let mut renaming = self.files_naming(&renamed);
             renaming.extend(
@@ -1359,18 +1388,6 @@ impl IncrementalAnalysisService {
                     return self.analyze();
                 }
             }
-        }
-
-        // A patch whose content actually changed requires rebuilding the merged codebase from
-        // scratch. Patches that were force-rescanned due to a vendor change (same hash) go
-        // through the normal incremental path: `apply_patches_pass` re-applies them to the
-        // freshly-updated vendor entries and generates the correct diagnostics.
-        let any_patch_content_changed = scanned_files.iter().any(|(fid, _, _)| {
-            self.database.get(fid).is_ok_and(|f| f.file_type.is_patch())
-                && self.file_states.get(fid).is_none_or(|s| s.content_hash != file_hashes[fid])
-        });
-        if any_patch_content_changed {
-            return self.analyze();
         }
 
         let scan_state_changed = self.codebase_scan_files.keys().any(|file_id| !current_file_ids.contains(file_id))
@@ -2291,20 +2308,20 @@ impl IncrementalAnalysisService {
     /// recorded it: the file of each declaration that is one or whose signature, body or attributes reference one, and
     /// each file whose top-level code does.
     fn files_naming(&self, symbols: &HashSet<(mago_word::Word, mago_word::Word)>) -> HashSet<FileId> {
-        let declared_in: HashMap<mago_word::Word, FileId> = self
-            .codebase
-            .file_signatures
-            .iter()
-            .flat_map(|(file_id, signature)| signature.ast_nodes.iter().map(move |node| (node.name, *file_id)))
-            .collect();
+        let mut declared_in: HashMap<mago_word::Word, Vec<FileId>> = HashMap::default();
+        for (file_id, signature) in &self.codebase.file_signatures {
+            for node in &signature.ast_nodes {
+                declared_in.entry(node.name).or_default().push(*file_id);
+            }
+        }
         symbols
             .iter()
             .flat_map(|symbol| self.native_symbol_references.referrers_of(symbol))
             .chain(symbols.iter().map(|symbol| ReferenceOrigin::Symbol(*symbol)))
-            .filter_map(|origin| match origin {
-                ReferenceOrigin::File(name) => Some(FileId::new(name.as_bytes())),
+            .flat_map(|origin| match origin {
+                ReferenceOrigin::File(name) => vec![FileId::new(name.as_bytes())],
                 ReferenceOrigin::Symbol((symbol, member)) => {
-                    declared_in.get(if symbol.is_empty() { &member } else { &symbol }).copied()
+                    declared_in.get(if symbol.is_empty() { &member } else { &symbol }).cloned().unwrap_or_default()
                 }
             })
             .collect()
@@ -3087,9 +3104,13 @@ fn extern_symbol(
     codebase: &CodebaseMetadata,
     declaration: &ExternMetadata,
 ) -> Option<(mago_word::Word, mago_word::Word)> {
-    codebase
-        .extern_declaration(declaration)
-        .map(|(class, member)| if class.is_empty() { (member, mago_word::empty_word()) } else { (class, member) })
+    codebase.extern_declaration(declaration).map(reference_symbol)
+}
+
+/// The symbol a key of [`CodebaseMetadata::function_likes`] names, as the reference graph keys it: a function by its
+/// name, and a method by its class and its name.
+fn reference_symbol((class, member): (mago_word::Word, mago_word::Word)) -> (mago_word::Word, mago_word::Word) {
+    if class.is_empty() { (member, mago_word::empty_word()) } else { (class, member) }
 }
 
 /// The `extern` declarations in `file_id`, in the codebase's order. A body's summary records the effects of the
@@ -7275,7 +7296,9 @@ mod tests {
             (b"vendor/VendorBase.php", FileType::Vendored, vendor),
             (b"patches/VendorBase.php", FileType::Patch, patch_v1),
             (b"src/MyImpl.php", FileType::Host, host),
+            (b"src/Other.php", FileType::Host, b"<?php\nfunction other(): int { return 1; }\n"),
         ]);
+        let rechecked = HashSet::from_iter([FileId::new(b"src/MyImpl.php")]);
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
@@ -7291,12 +7314,14 @@ mod tests {
             let full = fresh.analyze().expect("Full analysis failed.");
             assert!(!full.issues.is_empty(), "Expected at least one issue after patch changes return type to int");
         }
+        assert_eq!(service.analyzed_files, rechecked, "patch changed return type to int");
         assert_matches_full(&service, &db, "patch changed return type to int");
 
         // Revert patch.
         db.update(FileId::new(b"patches/VendorBase.php"), Cow::Owned(patch_v1.to_vec()));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
+        assert_eq!(service.analyzed_files, rechecked, "patch reverted to string");
         assert_matches_full(&service, &db, "patch reverted to string");
     }
 
@@ -7355,6 +7380,7 @@ mod tests {
             (b"vendor/VendorBase.php", FileType::Vendored, vendor),
             (b"patches/VendorBase.php", FileType::Patch, patch),
             (b"src/MyImpl.php", FileType::Host, host),
+            (b"src/Other.php", FileType::Host, b"<?php\nfunction other(): int { return 1; }\n"),
         ]);
 
         let mut service = make_watch_service(&db);
@@ -7374,6 +7400,7 @@ mod tests {
         db.delete(FileId::new(b"patches/VendorBase.php"));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
+        assert_eq!(service.analyzed_files, HashSet::from_iter([FileId::new(b"src/MyImpl.php")]));
         assert_matches_full(&service, &db, "patch deleted, return-type error must clear");
     }
 
