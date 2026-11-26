@@ -14406,11 +14406,11 @@ fn a_plain_php_int_keyed_shape_or_field_arrives_as_a_list() {
 
 /// Spec section 12: plain PHP's `array<V>` holds a list as often as a map, so PHP# reads it as a `List<V>` or a
 /// `Map<int|string, V>`. A `Map` method called on it is one error that names both and the test to make first, with no
-/// error for its arguments beside it.
+/// error for its arguments beside it. Tested `is Map<int|string, V>`, it is the `Map` alone, which the method reads.
 #[test]
 fn a_map_method_on_a_list_or_map_from_plain_php_is_one_error() {
     let bag = "<?php\n\nnamespace App;\n\nfinal class Bag\n{\n    /** @return array<string, array<string>> */\n    public function messages(): array { return []; }\n}\n";
-    let sharp = "namespace App;\n\nclass Reader\n{\n    public string? first(Bag bag)\n    {\n        for (const lines of bag.messages().values()) {\n            return lines.get(0);\n        }\n        return null;\n    }\n}\n";
+    let sharp = "namespace App;\n\nclass Reader\n{\n    public string? first(Bag bag)\n    {\n        for (const lines of bag.messages().values()) {\n            return lines.get(0);\n        }\n        return null;\n    }\n\n    public string? tested(Bag bag)\n    {\n        for (const lines of bag.messages().values()) {\n            if (lines is Map<int|string, string> map) {\n                return map.get(0);\n            }\n        }\n        return null;\n    }\n}\n";
 
     assert_eq!(
         worded(("src/App/Reader.sharp", sharp), &[("src/App/Bag.php", bag)]),
