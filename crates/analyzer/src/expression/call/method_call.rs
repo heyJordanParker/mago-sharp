@@ -1,6 +1,8 @@
 use mago_allocator::Arena;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use mago_bytes::BytesDisplay;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::word;
@@ -12,6 +14,8 @@ use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
@@ -29,6 +33,7 @@ use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::TypeArgumentList;
@@ -75,6 +80,7 @@ use crate::invocation::template_result::populate_template_result_from_invocation
 use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
+use crate::resolver::extension::has_extension_method;
 use crate::resolver::extension::own_member_classes;
 use crate::resolver::method::CalledProperty;
 use crate::resolver::method::UndocumentedMethod;
@@ -89,6 +95,7 @@ use crate::resolver::static_property::StaticPropertyName;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_member;
+use crate::utils::names::display_sharp_type;
 use crate::visibility::check_method_visibility;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for MethodCall<'arena> {
@@ -376,7 +383,9 @@ where
         && let ClassLikeMemberSelector::Identifier(name) = selector
     {
         context.collector.extend(receiver_issues);
-        refuse_static_through_class_value(context, artifacts, object, name, "call", span);
+        if !refuse_member_of_nullable_class_value(context, artifacts, object, name, span) {
+            refuse_static_through_class_value(context, artifacts, object, name, "call", span);
+        }
 
         return argument_list.analyze(context, block_context, artifacts);
     }
@@ -764,6 +773,50 @@ pub(crate) fn with_receiver_type<T>(
     artifacts.set_rc_expression_type(object, written_type);
 
     analyzed
+}
+
+/// Refuses the call of `name` on `object`, a class value of a type with `?`, when a class value of the type without it
+/// has the member, spec section 25: `typeof(Box<Label>?).properties()` names the `?` and `nonNullable()`, which gives
+/// the type without it, under the code of a static called through a class value. Whether it refused the call.
+fn refuse_member_of_nullable_class_value<A>(
+    context: &mut Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    object: &Expression<'_>,
+    name: &LocalIdentifier<'_>,
+    span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    let Some([TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { kind, constraint }))]) =
+        artifacts.get_expression_type(object).map(|object_type| object_type.types.as_ref())
+    else {
+        return false;
+    };
+    if !constraint.is_nullable() {
+        return false;
+    }
+    let held = constraint.as_ref().clone();
+    let without = TUnion::from_atomic(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType {
+        kind: *kind,
+        constraint: Arc::new(held.to_non_nullable()),
+    })));
+    if !has_extension_method(context, &without, name.value) {
+        return false;
+    }
+
+    context.collector.report_with_code(
+        IssueCode::InvalidClassStringExpression,
+        Issue::error(format!(
+            "{} holds null, so it has no `{}`: call `nonNullable()` first.",
+            display_sharp_type(context, &held),
+            BytesDisplay(name.value)
+        ))
+        .with_annotation(Annotation::primary(object.span()).with_message("A class value here.")),
+    );
+    artifacts.set_expression_type(&span, TUnion::from_atomic(TAtomic::Error));
+
+    true
 }
 
 /// Reports the issues the receiver's analysis found, but the read of the `Map` index at `copy`, which the change through
