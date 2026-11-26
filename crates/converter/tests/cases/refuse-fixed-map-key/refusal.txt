@@ -1,2 +1,3 @@
+at line 9 of its PHP#: error parameter-change: `sizes` is a parameter, so it never changes, and its caller never sees this write.
 at line 9 of its PHP#: error invalid-array-index: `'large'` is a string fixed at compile time, so it names a field of a fixed shape, not a key of a `Map`.
 at line 11 of its PHP#: error invalid-array-index: `'small'` is a string fixed at compile time, so it names a field of a fixed shape, not a key of a `Map`.

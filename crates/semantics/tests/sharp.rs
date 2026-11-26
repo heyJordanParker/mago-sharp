@@ -1385,7 +1385,7 @@ fn declare_of_another_setting_fails_as_a_typo_does() {
     for body in [
         "        declare(ticks=1);\n",
         "        declare(encoding=\"UTF-8\");\n",
-        "        declare(ticks=1) { extra = 2; }\n",
+        "        declare(ticks=1) { return 2; }\n",
         "        declare(strict_types=1, ticks=1);\n",
     ] {
         let code = leak(method(&format!("{body}        return extra;\n")));
