@@ -709,7 +709,7 @@ impl Converter<'_, '_> {
     /// new name keeps PHP's meaning where no other variable or parameter of the method, its lambdas' included, has it.
     /// Keeps every such variable and parameter, which a name the conversion adds must be none of. Gives the copy of
     /// each of `parameters` the body changes, whose local the body names in its place.
-    pub(crate) fn rename_locals<'ast, 'arena>(
+    pub(crate) fn rename_locals<'ast, 'arena: 'ast>(
         &mut self,
         parameters: &[Vec<u8>],
         walk: impl FnOnce(&mut Names<'ast, 'arena>),
@@ -745,7 +745,7 @@ impl Converter<'_, '_> {
 
     /// The copy of each of `parameters`, a lambda's, its body `walk` visits changes. Its local names the parameter in
     /// the body ahead of any name the method around gives it, until [`Self::forget_copies`].
-    pub(super) fn lambda_copies<'ast, 'arena>(
+    pub(super) fn lambda_copies<'ast, 'arena: 'ast>(
         &mut self,
         parameters: &[Vec<u8>],
         walk: impl FnOnce(&mut Names<'ast, 'arena>),
