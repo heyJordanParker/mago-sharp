@@ -9271,7 +9271,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         arguments: &ArgumentList,
         position: usize,
     ) -> u32 {
-        let line = self.line(&site);
+        let line = self.line(site);
 
         self.call(Some(site), arguments, None, None, None, |this, arguments| {
             let tuple = this.expression(object);
