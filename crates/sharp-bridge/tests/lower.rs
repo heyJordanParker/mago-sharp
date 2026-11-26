@@ -10686,6 +10686,18 @@ fn a_map_index_write_runs_the_map_s_set_member() {
                       BINARY_OP [8]
                         ZVAL "Undefined array key "
                         ZVAL 0
+              RETURN
+                BINARY_OP [1]
+                  CALL
+                    ZVAL "Sharp\\Internal\\size"
+                    ARG_LIST
+                      VAR
+                        ZVAL "counts"
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      VAR
+                        ZVAL "rows"
         "#}
     );
 }
@@ -13919,7 +13931,7 @@ fn a_generic_class_type_is_its_class_and_a_class_value_type_is_string() {
 /// ${'value#1'} = $numbers[0];
 /// \Sharp\Internal\put($named, 'b', ${'value#1'});
 /// $this->sizes['a'] = ($this->sizes['a'] ?? 0) + 1;
-/// return $numbers[1] + \count($named);
+/// return $numbers[1] + \Sharp\Internal\size($named);
 /// ```
 ///
 /// A list literal is an `ARRAY` with `ZEND_ARRAY_SYNTAX_SHORT`, which is 3, of `ARRAY_ELEM`s. A map literal is a new
@@ -14014,10 +14026,16 @@ fn literals_are_short_arrays_and_an_index_is_a_dim() {
                     ZVAL 0
                   ZVAL 1
               RETURN
-                DIM
-                  VAR
-                    ZVAL "numbers"
-                  ZVAL 1
+                BINARY_OP [1]
+                  DIM
+                    VAR
+                      ZVAL "numbers"
+                    ZVAL 1
+                  CALL
+                    ZVAL "Sharp\\Internal\\size"
+                    ARG_LIST
+                      VAR
+                        ZVAL "named"
         "#}
     );
 }
