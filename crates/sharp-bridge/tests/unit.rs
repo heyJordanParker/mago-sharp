@@ -501,14 +501,14 @@ fn a_source_listing_stamps_the_names_of_the_sharp_files_and_namespace_folders_of
 }
 
 #[test]
-fn compiled_path_mirrors_the_real_source_path_under_the_sharp_folder() {
+fn compiled_path_mirrors_the_real_source_path_under_the_current_generation() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     write(&root, "app/Shared/Money.sharp", SOURCE);
 
     assert_eq!(
         compiled_path(&root, &root.join("app/Shared/Money.sharp")).unwrap(),
-        Some(root.join(".sharp/app/Shared/Money.sharpc"))
+        Some(root.join(".sharp/current/app/Shared/Money.sharpc"))
     );
 }
 
@@ -533,7 +533,10 @@ fn compiled_path_of_a_source_gone_since_its_read_is_at_its_own_path() {
     let root = directory.path().canonicalize().unwrap();
     write(&root, "app/Money.sharp", SOURCE);
 
-    assert_eq!(compiled_path(&root, &root.join("app/Gone.sharp")).unwrap(), Some(root.join(".sharp/app/Gone.sharpc")));
+    assert_eq!(
+        compiled_path(&root, &root.join("app/Gone.sharp")).unwrap(),
+        Some(root.join(".sharp/current/app/Gone.sharpc"))
+    );
     let under_a_file = root.join("app/Money.sharp/Gone.sharp");
     let Err(DatabaseError::IOError { action: IOAction::ResolvePath, path, .. }) = compiled_path(&root, &under_a_file)
     else {
@@ -597,7 +600,7 @@ fn a_declaration_input_is_current_while_the_compiled_file_of_its_import_names_it
     write(&root, "app/Report.sharp", SOURCE);
     write(&root, "app/Money.sharp", money);
     let declarations = |hash: [u8; 16]| {
-        let compiled = root.join(".sharp/app/Money.sharpc");
+        let compiled = root.join(".sharp/current/app/Money.sharpc");
         fs::create_dir_all(compiled.parent().unwrap()).unwrap();
         fs::write(compiled, encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, hash, &[], CHECKER, &library())).unwrap();
     };
@@ -615,7 +618,7 @@ fn a_declaration_input_is_current_while_the_compiled_file_of_its_import_names_it
     declarations([6; 16]);
     assert!(inputs_changed(&root, &bytes).unwrap(), "the import's compiled file names other declarations");
 
-    fs::remove_file(root.join(".sharp/app/Money.sharpc")).unwrap();
+    fs::remove_file(root.join(".sharp/current/app/Money.sharpc")).unwrap();
     assert!(inputs_changed(&root, &bytes).unwrap(), "an import with no compiled file is no current import");
 
     declarations([5; 16]);
