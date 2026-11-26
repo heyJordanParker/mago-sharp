@@ -209,7 +209,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, LocalUses<'_, 'arena>> for LocalUseWalke
 }
 
 /// The local name at the root of `target`, through any index, as `counts` in `counts[key]`.
-fn indexed_name<'arena>(target: &Expression<'arena>) -> Option<&ConstantAccess<'arena>> {
+fn indexed_name<'ast, 'arena>(target: &'ast Expression<'arena>) -> Option<&'ast ConstantAccess<'arena>> {
     let mut target = target.unparenthesized();
     while let Expression::ArrayAccess(access) = target {
         target = access.array.unparenthesized();
