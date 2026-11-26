@@ -242,7 +242,6 @@ use crate::sharp_kind::SHARP_AST_PROP_GROUP;
 use crate::sharp_kind::SHARP_AST_PROPERTY_HOOK;
 use crate::sharp_kind::SHARP_AST_PROPERTY_HOOK_SHORT_BODY;
 use crate::sharp_kind::SHARP_AST_RETURN;
-use crate::sharp_kind::SHARP_AST_SHARP_CALL_TYPE_ARGS;
 use crate::sharp_kind::SHARP_AST_SHARP_CLASS_METADATA;
 use crate::sharp_kind::SHARP_AST_SHARP_EXTERN;
 use crate::sharp_kind::SHARP_AST_SHARP_IS_TYPE;
@@ -1576,11 +1575,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
     }
 
-    /// The written order of the type arguments `written` a call writes, as `ZEND_AST_SHARP_CALL_TYPE_ARGS` gives it: each
+    /// The written order of the type arguments `written` a call writes, the first child of its `SHARP_TYPE_ARGS`: each
     /// one's [`Self::written_order`], when it holds more than one name or a type parameter of the method the call is in,
-    /// one after another, split by `; `. None when none does, or the call writes no type arguments.
+    /// one after another, split by `; `. None when no union in them writes its members in an order other than the
+    /// sorted one of its type text, as `(float|int)?` does, whose members the engine tries in that order already, or
+    /// the call writes no type arguments.
     fn call_order(&self, written: Option<&TypeArgumentList>) -> Option<String> {
-        let orders: Vec<String> = written?
+        let written = written?;
+        if !written.arguments.iter().any(|hint| self.writes_unsorted_union(hint)) {
+            return None;
+        }
+        let orders: Vec<String> = written
             .arguments
             .iter()
             .map(|hint| {
@@ -1594,7 +1599,34 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             })
             .collect();
 
-        orders.iter().any(|order| !order.is_empty()).then(|| orders.join("; "))
+        Some(orders.join("; "))
+    }
+
+    /// Whether the written type `hint` holds, at any depth, a union whose members it writes in an order other than the
+    /// one its type text sorts them in, as `(string|int)?`, whose text is `int|string`. A member is compared by its
+    /// [`Self::written_order`] name, so a member that names no one class, scalar type or type parameter is left out.
+    fn writes_unsorted_union(&self, hint: &Hint) -> bool {
+        match hint {
+            Hint::Union(_) => {
+                let members = union_members(hint);
+                let names: Vec<String> = members
+                    .iter()
+                    .filter_map(|member| {
+                        let mut order = Vec::new();
+                        self.written_order(member, true, &mut order);
+                        (order.len() == 1).then(|| order.remove(0))
+                    })
+                    .collect();
+
+                !names.is_sorted() || members.iter().any(|member| self.writes_unsorted_union(member))
+            }
+            Hint::Generic(generic) => {
+                generic.type_arguments.arguments.iter().any(|argument| self.writes_unsorted_union(argument))
+            }
+            Hint::Nullable(nullable) => self.writes_unsorted_union(nullable.hint),
+            Hint::Parenthesized(parenthesized) => self.writes_unsorted_union(parenthesized.hint),
+            _ => false,
+        }
     }
 
     /// A struct's or a PHP# class's `parse`, spec section 10, as
@@ -3609,7 +3641,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.call(
                         Some(instantiation.span()),
                         arguments,
-                        type_arguments.clone(),
+                        type_arguments.clone().map(|text| (text, None)),
                         None,
                         callee,
                         |_, arguments| arguments,
@@ -6840,7 +6872,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let is_property_call = tested && self.is_property_call(expression, call.object);
                 let object = if tested { self.expression(call.object) } else { self.null_safe_object(call.object) };
                 let method = self.member(&call.method);
-                let type_arguments = self.types.call_type_arguments(expression);
+                let type_arguments = self
+                    .types
+                    .call_type_arguments(expression)
+                    .map(|text| (text, self.call_order(call.type_arguments.as_ref())));
                 let parameters = self.types.call_parameters(expression);
                 let callee = self.types.sharp_callee(expression);
 
@@ -9864,8 +9899,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             values.extend(self.caller_positions(access.span(), list, callee, 1));
         }
         if let Some(type_arguments) = self.types.extension_type_arguments(access, member) {
-            let text = self.type_text(line, &type_arguments);
-            values.push(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text]));
+            let written = match access {
+                Expression::Call(Call::Method(call)) => call.type_arguments.as_ref(),
+                Expression::Call(Call::NullSafeMethod(call)) => call.type_arguments.as_ref(),
+                _ => None,
+            };
+            let order = self.call_order(written);
+            values.push(self.type_arguments_argument(line, &type_arguments, order.as_deref()));
         }
 
         self.operator_call(line, extension.class, extension.name.as_bytes(), &values)
@@ -10000,13 +10040,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             .collect()
     }
 
-    /// The last argument of a call of a generic method, a `SHARP_CALL_TYPE_ARGS` of the type arguments `text` the checker
-    /// found, which the engine resolves right before the call, and their written `order`, see [`Self::call_order`].
+    /// The last argument of a call of a generic method, the type arguments `text` the checker found, a
+    /// `SHARP_TYPE_ARGS` without a `new`, which the engine resolves right before the call. Its first child is the
+    /// written `order` of their unions, see [`Self::call_order`], or none.
     fn type_arguments_argument(&mut self, line: u32, text: &str, order: Option<&str>) -> u32 {
         let text = self.type_text(line, text);
         let order = order.map_or(NULL, |order| self.string(0, line, order.as_bytes()));
 
-        self.node(SHARP_AST_SHARP_CALL_TYPE_ARGS, 0, line, &[text, order])
+        self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[order, text])
     }
 
     /// The call `call` builds from its lowered arguments, which starts at `site`, or none for a call through a function
