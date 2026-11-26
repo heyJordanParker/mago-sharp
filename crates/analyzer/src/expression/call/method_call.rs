@@ -1010,22 +1010,28 @@ pub(crate) fn check_local_collection_change<A>(
     let written = BytesDisplay(name.name.value());
 
     match local.kind {
-        LocalKind::Const => context.collector.report_with_code(
-            IssueCode::ConstLocalChange,
-            Issue::error(format!("`{written}` is `const`, so the {held} it holds never changes."))
+        LocalKind::Const => {
+            context.collector.report_with_code(
+                IssueCode::ConstLocalChange,
+                Issue::error(format!("`{written}` is `const`, so the {held} it holds never changes."))
+                    .with_annotation(Annotation::primary(name.span()).with_message("Changed here."))
+                    .with_annotation(
+                        Annotation::secondary(local.declaration).with_message("Declared with `const` here."),
+                    )
+                    .with_help("Declare it with `let` to change it."),
+            );
+        }
+        LocalKind::Parameter if !is_ref_receiver(block_context, &local) => {
+            context.collector.report_with_code(
+                IssueCode::ParameterChange,
+                Issue::error(format!(
+                    "`{written}` is a parameter, so it never changes, and its caller never sees this write."
+                ))
                 .with_annotation(Annotation::primary(name.span()).with_message("Changed here."))
-                .with_annotation(Annotation::secondary(local.declaration).with_message("Declared with `const` here."))
-                .with_help("Declare it with `let` to change it."),
-        ),
-        LocalKind::Parameter if !is_ref_receiver(block_context, &local) => context.collector.report_with_code(
-            IssueCode::ParameterChange,
-            Issue::error(format!(
-                "`{written}` is a parameter, so it never changes, and its caller never sees this write."
-            ))
-            .with_annotation(Annotation::primary(name.span()).with_message("Changed here."))
-            .with_annotation(Annotation::secondary(local.declaration).with_message("Declared here."))
-            .with_help(format!("Change the caller's {held} with a `ref` extension, or return a changed copy.")),
-        ),
+                .with_annotation(Annotation::secondary(local.declaration).with_message("Declared here."))
+                .with_help(format!("Change the caller's {held} with a `ref` extension, or return a changed copy.")),
+            );
+        }
         LocalKind::Let => {
             context.local_changes.insert(name.span());
         }
