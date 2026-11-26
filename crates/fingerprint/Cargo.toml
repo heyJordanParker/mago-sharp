@@ -8,11 +8,12 @@ authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-# Every integration test is a module of tests/main.rs, so the crate links one test binary for them.
+# Every integration test is a module of tests/main.rs, so the crate links one test binary for them. It takes the
+# crate's name, so `cargo test --workspace --test fingerprint` builds it alone, with the workspace's features.
 autotests = false
 
 [[test]]
-name = "main"
+name = "fingerprint"
 path = "tests/main.rs"
 
 [dependencies]

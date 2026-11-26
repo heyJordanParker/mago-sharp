@@ -8,11 +8,12 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-# Every integration test is a module of tests/main.rs, so the crate links one test binary for them.
+# Every integration test is a module of tests/main.rs, so the crate links one test binary for them. It takes the
+# crate's name, so `cargo test --workspace --test syntax` builds it alone, with the workspace's features.
 autotests = false
 
 [[test]]
-name = "main"
+name = "syntax"
 path = "tests/main.rs"
 
 [lints]
@@ -27,7 +28,7 @@ mago-php-version = { workspace = true }
 serde = { workspace = true, optional = true }
 strum = { workspace = true }
 paste = { workspace = true }
-ordered-float = { workspace = true, features = ["rand"] }
+ordered-float = { workspace = true }
 mago-allocator = { workspace = true }
 memchr = { workspace = true }
 
