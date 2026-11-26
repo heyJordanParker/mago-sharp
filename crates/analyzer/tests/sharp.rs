@@ -14420,6 +14420,20 @@ fn a_map_method_on_a_list_or_map_from_plain_php_is_one_error() {
     );
 }
 
+/// Spec section 12: plain PHP's `array<V>`, a `List<V>` or a `Map<int|string, V>`, keeps the PHP array plain PHP gave,
+/// whose keys PHP's loop reads for a list as for a map, so `for (const [k, v] of x)` reads it, as it read the `Map`.
+/// A PHP# `List` still reads its indexes from `entries()`.
+#[test]
+fn a_key_read_loop_over_a_list_or_map_from_plain_php_compiles() {
+    let registry = "<?php\n\nnamespace App;\n\nfinal class Registry\n{\n    public static array $items = [1, 2, 3];\n\n    /** @return array<string> */\n    public static function names(): array { return []; }\n}\n";
+    let sharp = "namespace App;\n\nclass Counter\n{\n    public static int count(List<int> own)\n    {\n        let count = 0;\n        for (const [index, item] of Registry.items) {\n            count++;\n        }\n        for (const [key, name] of Registry.names()) {\n            count++;\n        }\n        for (const [index, item] of own) {\n            count++;\n        }\n        return count;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Counter.sharp", sharp), &[("src/App/Registry.php", registry)]),
+        ["14:37 invalid-iterator"]
+    );
+}
+
 /// Spec section 12: plain PHP's array keyed by `int` alone still arrives as a `List` alone, returned, held in a
 /// property, and as a `Map`'s value, since its keys are a list's.
 #[test]

@@ -39,6 +39,7 @@ use mago_codex::ttype::get_map_entry;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_non_empty_string;
+use mago_codex::ttype::get_sharp_received_list;
 use mago_codex::ttype::get_string;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
@@ -1694,9 +1695,20 @@ where
     if context.dialect.is_sharp()
         && let Some(key) = foreach.target.key()
     {
+        // Plain PHP's `array<V>`, a `List<V>` or a `Map<int|string, V>`, keeps the PHP array plain PHP gave, whose keys
+        // PHP's loop reads for a list as for a map, so `[k, v]` reads its `List` part's indexes too.
+        let plain_either = |list: &TList| {
+            iterator_atomics.iter().any(|atomic| match atomic {
+                TAtomic::Array(map @ TArray::Keyed(_)) => get_sharp_received_list(map)
+                    .is_some_and(|either| list.known_elements.is_none() && either.element_type == list.element_type),
+                _ => false,
+            })
+        };
         // `[a, b]` unpacks a two-element tuple, spec section 30, so it reads a `List` or a `Set` of them.
         let keyless = |atomic: &TAtomic| match atomic {
-            TAtomic::Array(TArray::List(list)) if unpacked_pair(&list.element_type).is_none() => {
+            TAtomic::Array(TArray::List(list))
+                if unpacked_pair(&list.element_type).is_none() && !plain_either(list) =>
+            {
                 Some(("List", "Loop over `list.entries()` to read each index with its value."))
             }
             TAtomic::Array(TArray::Set(element)) if unpacked_pair(element).is_none() => {
