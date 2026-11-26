@@ -54,6 +54,7 @@ use crate::expression::array_access::report_fixed_map_key;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
+use crate::expression::call::method_call::check_local_collection_change;
 use crate::resolver::extension::CollectionKind;
 use crate::resolver::extension::collection_member;
 use crate::resolver::method::get_declared_collection;
@@ -127,6 +128,15 @@ where
 
     let root_is_array_access_object =
         root_array_type.types.iter().all(|atomic| atomic.extends_or_implements(context.codebase, word("ArrayAccess")));
+
+    // Spec section 2: an index write changes the collection a local holds. An object's indexer runs its `set` instead.
+    if context.dialect.is_sharp()
+        && !root_is_array_access_object
+        && root_array_type.types.iter().any(|atomic| CollectionKind::of(atomic).is_some())
+        && let Expression::ConstantAccess(name) = root_array_expression.unparenthesized()
+    {
+        check_local_collection_change(context, block_context, name, &root_array_type);
+    }
 
     let mut current_type = root_array_type.clone();
 

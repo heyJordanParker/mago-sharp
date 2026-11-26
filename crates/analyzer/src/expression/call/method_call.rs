@@ -22,6 +22,8 @@ use mago_codex::ttype::get_never;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
+use mago_names::binding::Local;
+use mago_names::binding::LocalKind;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
@@ -32,6 +34,7 @@ use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MethodCall;
@@ -80,6 +83,7 @@ use crate::invocation::template_result::populate_template_result_from_invocation
 use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
+use crate::resolver::extension::CollectionKind;
 use crate::resolver::extension::has_extension_method;
 use crate::resolver::extension::own_member_classes;
 use crate::resolver::method::CalledProperty;
@@ -906,6 +910,9 @@ where
         Expression::ConstantAccess(name)
             if matches!(context.resolved_names.binding(&name.name), Some(Binding::Local(_) | Binding::Field)) =>
         {
+            if let Some(read) = artifacts.get_expression_type(collection) {
+                check_local_collection_change(context, block_context, name, read);
+            }
             let place = match context.resolved_names.binding(&name.name) {
                 Some(Binding::Field) => field_storage(name, context, block_context),
                 _ => Some(collection),
@@ -975,6 +982,65 @@ where
             Ok(None)
         }
     }
+}
+
+/// Spec section 2: a parameter and a `const` local never change, so a change at `name`, by a `ref` member call or an
+/// index write, of the `collection` either holds is refused. An extension's `ref` receiver is written back to its
+/// caller, so it changes. A `let` local changes, and its name there is no read of it, so the change is recorded for
+/// the never-read check.
+pub(crate) fn check_local_collection_change<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    name: &ConstantAccess<'_>,
+    collection: &TUnion,
+) where
+    A: Arena,
+{
+    let Some(Binding::Local(local)) = context.resolved_names.binding(&name.name) else {
+        return;
+    };
+
+    let kinds = collection.types.iter().filter_map(CollectionKind::of).collect::<Vec<_>>();
+    let held = match kinds.first() {
+        Some(&kind) if kind != CollectionKind::Iterable && kinds.iter().all(|other| *other == kind) => {
+            kind.name().to_ascii_lowercase()
+        }
+        _ => "collection".to_string(),
+    };
+    let written = BytesDisplay(name.name.value());
+
+    match local.kind {
+        LocalKind::Const => context.collector.report_with_code(
+            IssueCode::ConstLocalChange,
+            Issue::error(format!("`{written}` is `const`, so the {held} it holds never changes."))
+                .with_annotation(Annotation::primary(name.span()).with_message("Changed here."))
+                .with_annotation(Annotation::secondary(local.declaration).with_message("Declared with `const` here."))
+                .with_help("Declare it with `let` to change it."),
+        ),
+        LocalKind::Parameter if !is_ref_receiver(block_context, &local) => context.collector.report_with_code(
+            IssueCode::ParameterChange,
+            Issue::error(format!(
+                "`{written}` is a parameter, so it never changes, and its caller never sees this write."
+            ))
+            .with_annotation(Annotation::primary(name.span()).with_message("Changed here."))
+            .with_annotation(Annotation::secondary(local.declaration).with_message("Declared here."))
+            .with_help(format!("Change the caller's {held} with a `ref` extension, or return a changed copy.")),
+        ),
+        LocalKind::Let => {
+            context.local_changes.insert(name.span());
+        }
+        LocalKind::Parameter | LocalKind::Pattern { .. } => {}
+    }
+}
+
+/// Whether `local` is the receiver the extension member being analyzed takes by `ref`, spec section 26.
+fn is_ref_receiver(block_context: &BlockContext<'_>, local: &Local) -> bool {
+    block_context.scope.get_function_like().is_some_and(|function_like| {
+        function_like
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name_span == local.declaration && parameter.flags.is_by_reference())
+    })
 }
 
 /// Adds the functions the `called_properties` hold to `invocation_targets`, spec section 14: the call at `span` reads

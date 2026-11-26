@@ -1762,7 +1762,7 @@ fn nullable_values_flow_in_and_out_with_no_issues() {
 
 #[test]
 fn null_coalescing_assignment_makes_a_local_non_null_as_in_php() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int total(int? extra)\n    {\n        let total = extra;\n        total ??= 0;\n        extra ??= 1;\n        return total + extra;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int total(int? extra)\n    {\n        let total = extra;\n        total ??= 0;\n        let other = extra ?? 1;\n        return total + other;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function total(?int $extra): int\n    {\n        $total = $extra;\n        $total ??= 0;\n        $extra ??= 1;\n        return $total + $extra;\n    }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
@@ -1846,7 +1846,7 @@ fn null_safe_access_skips_the_rest_of_its_chain_through_an_index() {
 /// null again, whatever the skipped part tested or wrote. Plain PHP keeps mago's own reading.
 #[test]
 fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
-    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\nimport Lib.Magic;\n\nclass Flow\n{\n    private Step? current = null;\n\n    public void start(Step step) { this.current = step; }\n    public string reset() { this.current = null; return \"\"; }\n\n    public string? call(Step? step) => step?.route(step.label());\n    public string? chain(Step? step) => step?.child.route(step.label());\n    public string? index(Step? step) => step?.items[step.index()];\n    public string? field() => this.current?.route(this.current.label());\n    public string? fieldIndex() => this.current?.items[this.current.index()];\n    public string? reread() => this.current?.join(this.reset(), this.current.label());\n    public string? spareChild(Step? step) => step?.spare?.route(step.spare.label());\n    public string? extension(string? title) => title?.slug(title);\n    public void magic(Magic? magic) { magic?.anything(magic.name()); }\n\n    public int? classValue(bool flag)\n    {\n        const type = flag ? typeof(Step) : null;\n        return type?.twice(type.MAX);\n    }\n\n    public void writes(Step? step)\n    {\n        step?.title = step.label();\n        step?.items[step.index()] = \"x\";\n        step?.note ??= step.label();\n    }\n\n    public string? redundant(Step? step) => step?.route(step?.label() ?? \"\");\n\n    public void known(Step known)\n    {\n        known?.note ??= known.label();\n        known?.title += known.label();\n        known?.items[known.index()] = \"x\";\n        known?.count++;\n        --known?.count;\n    }\n\n    public string after(Step? step)\n    {\n        step?.route(\"x\");\n        return step.label();\n    }\n\n    public string afterTypeTest(Shape? shape)\n    {\n        shape?.draw(shape is Square ? \"square\" : \"other\");\n        return shape.name();\n    }\n\n    public string afterMatch(Shape? shape, bool flag)\n    {\n        shape?.draw(match (flag) { true => (shape = new Square()).name(), default => \"other\" });\n        return shape.name();\n    }\n\n    public string afterOr(Shape? shape, bool a, bool b, bool c, bool d)\n    {\n        shape?.check(a || b || c || d || shape is Square);\n        return shape.name();\n    }\n\n    public string afterLambda(Step? step)\n    {\n        step?.run(() => { step = new Step(); });\n        return step.label();\n    }\n\n    public string afterReference(Step? step)\n    {\n        step?.route(Magic.clear(step));\n        return step.label();\n    }\n\n    public string afterProperty(Step? step)\n    {\n        step?.route(step.title);\n        return step.title;\n    }\n\n    public string afterField()\n    {\n        this.current?.route(this.current.title);\n        return this.current.title;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\nimport Lib.Magic;\n\nclass Flow\n{\n    private Step? current = null;\n\n    public void start(Step step) { this.current = step; }\n    public string reset() { this.current = null; return \"\"; }\n\n    public string? call(Step? step) => step?.route(step.label());\n    public string? chain(Step? step) => step?.child.route(step.label());\n    public string? index(Step? step) => step?.items[step.index()];\n    public string? field() => this.current?.route(this.current.label());\n    public string? fieldIndex() => this.current?.items[this.current.index()];\n    public string? reread() => this.current?.join(this.reset(), this.current.label());\n    public string? spareChild(Step? step) => step?.spare?.route(step.spare.label());\n    public string? extension(string? title) => title?.slug(title);\n    public void magic(Magic? magic) { magic?.anything(magic.name()); }\n\n    public int? classValue(bool flag)\n    {\n        const type = flag ? typeof(Step) : null;\n        return type?.twice(type.MAX);\n    }\n\n    public void writes(Step? step)\n    {\n        step?.title = step.label();\n        step?.items[step.index()] = \"x\";\n        step?.note ??= step.label();\n    }\n\n    public string? redundant(Step? step) => step?.route(step?.label() ?? \"\");\n\n    public void known(Step known)\n    {\n        known?.note ??= known.label();\n        known?.title += known.label();\n        known?.items[known.index()] = \"x\";\n        known?.count++;\n        --known?.count;\n    }\n\n    public string after(Step? step)\n    {\n        step?.route(\"x\");\n        return step.label();\n    }\n\n    public string afterTypeTest(Shape? shape)\n    {\n        shape?.draw(shape is Square ? \"square\" : \"other\");\n        return shape.name();\n    }\n\n    public string afterMatch(Shape? given, bool flag)\n    {\n        let shape = given;\n        shape?.draw(match (flag) { true => (shape = new Square()).name(), default => \"other\" });\n        return shape.name();\n    }\n\n    public string afterOr(Shape? shape, bool a, bool b, bool c, bool d)\n    {\n        shape?.check(a || b || c || d || shape is Square);\n        return shape.name();\n    }\n\n    public string afterLambda(Step? given)\n    {\n        let step = given;\n        step?.run(() => { step = new Step(); });\n        return step.label();\n    }\n\n    public string afterReference(Step? step)\n    {\n        step?.route(Magic.clear(step));\n        return step.label();\n    }\n\n    public string afterProperty(Step? step)\n    {\n        step?.route(step.title);\n        return step.title;\n    }\n\n    public string afterField()\n    {\n        this.current?.route(this.current.title);\n        return this.current.title;\n    }\n}\n";
     let router = "namespace Demo;\n\nclass Router\n{\n    public string route(string label) => label;\n    public string label() => \"router\";\n}\n";
     let shape = "namespace Demo;\n\npublic abstract class Shape\n{\n    public string draw(string kind) => kind;\n    public string name() => \"shape\";\n    public string check(bool flag) => \"\";\n}\n";
     let square = "namespace Demo;\n\npublic class Square : Shape\n{\n}\n";
@@ -1882,19 +1882,19 @@ fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
             "44:16 redundant-nullsafe-operator",
             "50:16 possible-method-access-on-null",
             "56:16 possible-method-access-on-null",
-            "62:16 possible-method-access-on-null",
-            "68:16 possible-method-access-on-null",
-            "74:16 possible-method-access-on-null",
-            "80:16 possible-method-access-on-null",
-            "80:21 ambiguous-object-method-access",
-            "86:16 possibly-null-property-access",
-            "86:16 nullable-return-statement",
-            "86:16 invalid-return-statement",
-            "91:29 possibly-null-property-access",
-            "91:29 possibly-null-argument",
-            "92:16 possibly-null-property-access",
-            "92:16 nullable-return-statement",
-            "92:16 invalid-return-statement",
+            "63:16 possible-method-access-on-null",
+            "69:16 possible-method-access-on-null",
+            "76:16 possible-method-access-on-null",
+            "82:16 possible-method-access-on-null",
+            "82:21 ambiguous-object-method-access",
+            "88:16 possibly-null-property-access",
+            "88:16 nullable-return-statement",
+            "88:16 invalid-return-statement",
+            "93:29 possibly-null-property-access",
+            "93:29 possibly-null-argument",
+            "94:16 possibly-null-property-access",
+            "94:16 nullable-return-statement",
+            "94:16 invalid-return-statement",
         ]
     );
 
@@ -4743,7 +4743,7 @@ fn an_arrow_read_of_a_class_string_stays_an_error_in_php() {
 
 #[test]
 fn a_catch_variable_has_the_caught_classes_as_its_type_as_in_php() {
-    let sharp = "namespace Demo;\n\nimport RuntimeException;\nimport LogicException;\n\nclass Report\n{\n    public static int total(int extra)\n    {\n        try {\n            if (extra < 0) {\n                throw new RuntimeException(\"negative\");\n            }\n        } catch (RuntimeException | LogicException failure) {\n            return failure.getLine();\n        } finally {\n            extra += 1;\n        }\n        return extra;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\nimport LogicException;\n\nclass Report\n{\n    public static int total(int given)\n    {\n        let extra = given;\n        try {\n            if (extra < 0) {\n                throw new RuntimeException(\"negative\");\n            }\n        } catch (RuntimeException | LogicException failure) {\n            return failure.getLine();\n        } finally {\n            extra += 1;\n        }\n        return extra;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse RuntimeException;\nuse LogicException;\n\nclass Report\n{\n    public static function total(int $extra): int\n    {\n        try {\n            if ($extra < 0) {\n                throw new RuntimeException(\"negative\");\n            }\n        } catch (RuntimeException | LogicException $failure) {\n            return $failure->getLine();\n        } finally {\n            $extra += 1;\n        }\n        return $extra;\n    }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
@@ -5274,7 +5274,7 @@ fn check_throws_skips_sharp_files_and_keeps_reporting_in_php() {
 /// the statement after it in the named loop never runs.
 #[test]
 fn a_named_break_or_continue_leaves_or_continues_the_loop_it_names() {
-    let sharp = "namespace Demo;\n\nclass Flow\n{\n    public static int breaksOuter(List<int> items)\n    {\n        let found = 0;\n        orders: while (true) {\n            for (const item of items) {\n                found = item;\n                break orders;\n            }\n        }\n        return found;\n    }\n\n    public static void continuesOuter(bool again)\n    {\n        orders: do {\n            while (true) {\n                continue orders;\n            }\n            Halt.note(\"never\");\n        } while (again);\n    }\n\n    public static int leavesInner(bool again, bool more)\n    {\n        let rounds = 0;\n        while (again) {\n            do {\n                break;\n            } while (more);\n            rounds = rounds + 1;\n            again = rounds < 3;\n        }\n        return rounds;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Flow\n{\n    public static int breaksOuter(List<int> items)\n    {\n        let found = 0;\n        orders: while (true) {\n            for (const item of items) {\n                found = item;\n                break orders;\n            }\n        }\n        return found;\n    }\n\n    public static void continuesOuter(bool again)\n    {\n        orders: do {\n            while (true) {\n                continue orders;\n            }\n            Halt.note(\"never\");\n        } while (again);\n    }\n\n    public static int leavesInner(bool start, bool more)\n    {\n        let again = start;\n        let rounds = 0;\n        while (again) {\n            do {\n                break;\n            } while (more);\n            rounds = rounds + 1;\n            again = rounds < 3;\n        }\n        return rounds;\n    }\n}\n";
     let halt = "<?php\n\nnamespace Demo;\n\nfinal class Halt\n{\n    public static function note(int|string $value): void\n    {\n    }\n}\n";
 
     assert_eq!(
@@ -5658,27 +5658,27 @@ fn a_ternary_whose_condition_is_not_bool_is_an_invalid_operand() {
 
 #[test]
 fn every_condition_that_is_bool_has_no_issue() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int pick(int count, string name, bool on)\n    {\n        if (count > 0) {\n            count++;\n        } else if (name != \"\") {\n            count--;\n        }\n        while (count > 10 && on) {\n            count--;\n        }\n        do {\n            count++;\n        } while (count < 3 || !on);\n        for (let i = 3; i > 0; i--) {\n            count++;\n        }\n        while (true) {\n            break;\n        }\n        return on ? count : 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int pick(int start, string name, bool on)\n    {\n        let count = start;\n        if (count > 0) {\n            count++;\n        } else if (name != \"\") {\n            count--;\n        }\n        while (count > 10 && on) {\n            count--;\n        }\n        do {\n            count++;\n        } while (count < 3 || !on);\n        for (let i = 3; i > 0; i--) {\n            count++;\n        }\n        while (true) {\n            break;\n        }\n        return on ? count : 0;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
 
 #[test]
 fn a_condition_that_is_not_bool_is_an_invalid_operand_everywhere() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int pick(int count, string name, bool on, int n, string s)\n    {\n        if (count) {\n            count++;\n        } else if (name) {\n            count--;\n        }\n        while (count) {\n            count--;\n        }\n        do {\n            count++;\n        } while (count % 3);\n        for (let i = 3; i; i--) {\n            count += s ? 1 : 2;\n        }\n        const a = n && on;\n        const b = on || s;\n        const c = !n;\n        return a && b && c ? 1 : 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int pick(int start, string name, bool on, int n, string s)\n    {\n        let count = start;\n        if (count) {\n            count++;\n        } else if (name) {\n            count--;\n        }\n        while (count) {\n            count--;\n        }\n        do {\n            count++;\n        } while (count % 3);\n        for (let i = 3; i; i--) {\n            count += s ? 1 : 2;\n        }\n        const a = n && on;\n        const b = on || s;\n        const c = !n;\n        return a && b && c ? 1 : 0;\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "7:13 invalid-operand",
-            "9:20 invalid-operand",
-            "12:16 invalid-operand",
-            "17:18 invalid-operand",
-            "19:22 invalid-operand",
-            "18:25 invalid-operand",
-            "21:19 invalid-operand",
-            "22:25 invalid-operand",
-            "23:20 invalid-operand",
+            "8:13 invalid-operand",
+            "10:20 invalid-operand",
+            "13:16 invalid-operand",
+            "18:18 invalid-operand",
+            "20:22 invalid-operand",
+            "19:25 invalid-operand",
+            "22:19 invalid-operand",
+            "23:25 invalid-operand",
+            "24:20 invalid-operand",
         ]
     );
 }
@@ -5721,7 +5721,7 @@ fn not_before_is_adds_no_issue_and_not_of_a_value_that_is_not_bool_keeps_its_rep
 /// twin writes the parentheses PHP needs for the same meaning.
 #[test]
 fn the_bitwise_operators_and_their_compound_forms_take_ints_as_in_php() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int flags(int granted, int count, int n)\n    {\n        const canRead = 1;\n        const canWrite = 2;\n        const canDelete = 4;\n        let permissions = granted | canWrite;\n        permissions |= canDelete;\n        if (permissions & canWrite != 0) {\n            permissions = permissions ^ canRead;\n        }\n        if ((permissions & canWrite) != 0) {\n            permissions >>= 1;\n        }\n        const mask = 1 << count;\n        n %= 3;\n        n &= ~mask;\n        n ^= permissions >> 1;\n        n <<= 2;\n        return ~mask & permissions | n;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int flags(int granted, int count, int start)\n    {\n        let n = start;\n        const canRead = 1;\n        const canWrite = 2;\n        const canDelete = 4;\n        let permissions = granted | canWrite;\n        permissions |= canDelete;\n        if (permissions & canWrite != 0) {\n            permissions = permissions ^ canRead;\n        }\n        if ((permissions & canWrite) != 0) {\n            permissions >>= 1;\n        }\n        const mask = 1 << count;\n        n %= 3;\n        n &= ~mask;\n        n ^= permissions >> 1;\n        n <<= 2;\n        return ~mask & permissions | n;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function flags(int $granted, int $count, int $n): int\n    {\n        $READ = 1;\n        $WRITE = 2;\n        $DELETE = 4;\n        $permissions = $granted | $WRITE;\n        $permissions |= $DELETE;\n        if (($permissions & $WRITE) != 0) {\n            $permissions = $permissions ^ $READ;\n        }\n        if (($permissions & $WRITE) != 0) {\n            $permissions >>= 1;\n        }\n        $mask = 1 << $count;\n        $n %= 3;\n        $n &= ~$mask;\n        $n ^= $permissions >> 1;\n        $n <<= 2;\n        return ~$mask & $permissions | $n;\n    }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
