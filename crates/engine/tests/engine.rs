@@ -17,7 +17,7 @@ const DEADLINE: Duration = Duration::from_secs(10);
 
 /// The backstop of wall time of a call whose test checks no backstop: long past any test, so only its deadline of CPU
 /// time can stop it, however starved of CPU a loaded machine leaves its thread.
-const BACKSTOP: Duration = Duration::from_secs(120);
+const BACKSTOP: Duration = Duration::from_mins(2);
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)

@@ -442,7 +442,7 @@ const BACKSTOP: Duration = Duration::from_secs(5);
 
 /// The backstop of a host whose test checks the deadline of CPU time or no deadline: long past any test, so only
 /// `DEADLINE` can stop it, however starved of CPU a loaded machine leaves its thread.
-const UNREACHED_BACKSTOP: Duration = Duration::from_secs(120);
+const UNREACHED_BACKSTOP: Duration = Duration::from_mins(2);
 
 /// An extension host whose plugin `rules` registers three after-analysis hooks: `QuickRule`, which sleeps for 0.6 times
 /// `BACKSTOP`, then `SpinsRule`, which never finishes, then `SecondQuickRule`.
