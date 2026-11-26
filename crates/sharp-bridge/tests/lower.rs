@@ -37429,3 +37429,101 @@ fn a_machine_case_declares_only_its_own_moves() {
         "##}
     );
 }
+
+/// ```php
+/// return (($hit === null) ? null : $hit[1]) ?? 'none';
+/// return (($entry === null) ? null : ($entry[1])(2)) ?? 0;
+/// ```
+///
+/// Spec sections 14.4 and 30: `a?.b` reads `b`, or gives null when `a` is null, and a named element of a tuple, which
+/// runs as a PHP list, is the index read of its position. PHP's `?->` reads a property, so a `?.` of a named element,
+/// and of the call of the function an element holds, tests its receiver in a conditional, as an extension's member
+/// does, and reads the element as `.` does. `.` and a narrowed read stay the index read.
+#[test]
+fn a_null_safe_read_of_a_named_tuple_element_tests_its_receiver_and_reads_the_index() {
+    let lowered = Lowered::new(indoc! {r#"
+        namespace App;
+
+        class Reads
+        {
+            public string label([int step, string label]? hit) => hit?.label ?? "none";
+
+            public int twice([int step, Function<int(int)> twice]? entry) => entry?.twice(2) ?? 0;
+
+            public string direct(List<[int step, string label]> rows, [int step, string label]? row)
+            {
+                if (row != null) {
+                    return row.label;
+                }
+                return rows[0].label;
+            }
+        }
+    "#});
+
+    assert_eq!(
+        lowered.body_of("label"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                COALESCE
+                  CONDITIONAL [1]
+                    BINARY_OP [16]
+                      VAR
+                        ZVAL "hit"
+                      ZVAL null
+                    ZVAL null
+                    DIM
+                      VAR
+                        ZVAL "hit"
+                      ZVAL 1
+                  ZVAL "none"
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("twice"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                COALESCE
+                  CONDITIONAL [1]
+                    BINARY_OP [16]
+                      VAR
+                        ZVAL "entry"
+                      ZVAL null
+                    ZVAL null
+                    CALL
+                      DIM
+                        VAR
+                          ZVAL "entry"
+                        ZVAL 1
+                      ARG_LIST
+                        ZVAL 2
+                  ZVAL 0
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("direct"),
+        indoc! {r#"
+            STMT_LIST
+              IF
+                IF_ELEM
+                  BINARY_OP [17]
+                    VAR
+                      ZVAL "row"
+                    ZVAL null
+                  STMT_LIST
+                    RETURN
+                      DIM
+                        VAR
+                          ZVAL "row"
+                        ZVAL 1
+              RETURN
+                DIM
+                  DIM
+                    VAR
+                      ZVAL "rows"
+                    ZVAL 0
+                  ZVAL 1
+        "#}
+    );
+}

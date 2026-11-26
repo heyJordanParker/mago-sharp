@@ -6743,14 +6743,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CALL, 0, line, &[function, callable])
             }
-            // Spec section 30: a named element of a tuple, which runs as a PHP list, is the index read of its position.
             Expression::Access(Access::Property(access))
-                if let Some(index) = self.types.tuple_element_index(access) =>
+                if let Some(index) = self.types.tuple_element_index(access.object, &access.property) =>
             {
                 let object = self.expression(access.object);
-                let index = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = index as i64);
 
-                self.node(SHARP_AST_DIM, 0, line, &[object, index])
+                self.tuple_element(line, object, index)
             }
             // `Class.y` and `Self.y` is the fetch of the member the checker found on the class: a constant or enum case,
             // a static property, or a static method as a first-class callable.
@@ -6793,6 +6791,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                     return self.call_by_kind(expression, &kinds, parts, !tested);
                 }
+                if tested && let Some(position) = self.types.element_call(expression) {
+                    return self.tuple_element_call(call.span(), call.object, &call.argument_list, position);
+                }
 
                 let is_property_call = tested && self.is_property_call(expression, call.object);
                 let object = if tested { self.expression(call.object) } else { self.null_safe_object(call.object) };
@@ -6821,11 +6822,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 )
             }
             // A link whose chain's conditional tests the receiver, which `untested_link` found, is the extension's
-            // member, the method value, or the plain property read.
+            // member, the tuple's element, the method value, or the plain property read.
             Expression::Access(Access::NullSafeProperty(access)) => {
                 let tested = self.tested_links.contains(&expression.span());
                 if tested && let Some(extension) = self.types.extension(expression) {
                     return self.extension_access(expression, &extension, access.object, None);
+                }
+                if tested && let Some(index) = self.types.tuple_element_index(access.object, &access.property) {
+                    let object = self.expression(access.object);
+
+                    return self.tuple_element(line, object, index);
                 }
 
                 let is_method = tested && self.is_method_value(expression, access.object, &access.property);
@@ -7929,8 +7935,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.declaration(SHARP_AST_CLOSURE, 0, &span, &span, b"", &[parameters, uses, body, NULL, NULL])
     }
 
-    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, an
-    /// extension's member, a lazy operation of an `Iterable`, a call of a function that may be null, `f?.(x)`, or any link below a collection method call that runs as PHP on the array or below an
+    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, a tuple's
+    /// named element or the call of its function, which run as an index read of the PHP list, an extension's member, a lazy operation of an `Iterable`, a call of a function that may be null, `f?.(x)`, or any link below a collection method call that runs as PHP on the array or below an
     /// extension's member, which runs as a static call, with its receiver, when `chain` is a member
     /// read, a call or an index whose chain holds one no conditional tests yet. A null there would reach the PHP
     /// function, where `?->` skips only the rest of its own chain. PHP's `?->` never writes, so in the target of a
@@ -7965,6 +7971,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     if !self.tested_links.contains(&link.span())
                         && (below_php_call
                             || self.types.extension(link).is_some()
+                            || self.types.tuple_element_index(access.object, &access.property).is_some()
                             || self.is_method_value(link, access.object, &access.property))
                     {
                         return Some((link, access.object));
@@ -7977,6 +7984,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         && (below_php_call
                             || self.types.extension(link).is_some()
                             || self.types.members_by_kind(link).is_some()
+                            || self.types.element_call(link).is_some()
                             || self.is_property_call(link, call.object))
                     {
                         return Some((link, call.object));
@@ -9078,17 +9086,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if self.names.is_current_position(call) {
             return self.position(call.object.span());
         }
-        // Spec section 30: `entry.twice(2)` runs the function the tuple's element holds, `($entry[0])(2)`.
         if let Some(position) = self.types.element_call(expression) {
-            let line = self.line(call);
-
-            return self.call(Some(call.span()), &call.argument_list, None, None, None, |this, arguments| {
-                let tuple = this.expression(call.object);
-                let index = this.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = position as i64);
-                let element = this.node(SHARP_AST_DIM, 0, line, &[tuple, index]);
-
-                this.node(SHARP_AST_CALL, 0, line, &[element, arguments])
-            });
+            return self.tuple_element_call(call.span(), call.object, &call.argument_list, position);
         }
         if let Some(extension) = self.types.extension(expression) {
             return self.extension_access(expression, &extension, call.object, Some(&call.argument_list));
@@ -9173,6 +9172,34 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let call = this.node(kind, 0, line, &[object, method, arguments]);
 
             if quiet { this.node(SHARP_AST_SILENCE, 0, line, &[call]) } else { call }
+        })
+    }
+
+    /// Spec section 30: the element at `index` of the tuple `object` holds, which runs as a PHP list, so a named
+    /// element is the index read of its position. Every read of a named element is this one: `.`, a `?.` its chain's
+    /// conditional tested, and an element's call.
+    fn tuple_element(&mut self, line: u32, object: u32, index: usize) -> u32 {
+        let index = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = index as i64);
+
+        self.node(SHARP_AST_DIM, 0, line, &[object, index])
+    }
+
+    /// Spec section 30: the call at `site` of the function the element at `position` of the tuple `object` holds, as
+    /// `entry.twice(2)` runs `($entry[0])(2)`, with `arguments`.
+    fn tuple_element_call(
+        &mut self,
+        site: Span,
+        object: &Expression,
+        arguments: &ArgumentList,
+        position: usize,
+    ) -> u32 {
+        let line = self.line(&site);
+
+        self.call(Some(site), arguments, None, None, None, |this, arguments| {
+            let tuple = this.expression(object);
+            let element = this.tuple_element(line, tuple, position);
+
+            this.node(SHARP_AST_CALL, 0, line, &[element, arguments])
         })
     }
 
