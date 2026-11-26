@@ -3482,19 +3482,37 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
         }
     }
 
-    /// `statfs` names FAT and exFAT as the filesystems whose change time records no write.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    /// Linux's FAT and exFAT keep no status change time, and the stat of a FUSE, 9p, NFS, CIFS or SMB file can be one
+    /// the client cached while the file's bytes are new, so none of them records every write. ext4 does.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn statfs_tells_the_filesystems_whose_change_time_records_no_write() {
-        #[cfg(target_os = "macos")]
-        let (fat, exfat, others) =
-            (b"msdos".as_slice(), b"exfat".as_slice(), [b"apfs".as_slice(), b"hfs".as_slice(), b"nfs".as_slice()]);
-        #[cfg(target_os = "linux")]
-        let (fat, exfat, others) = (0x4d44, 0x2011_bab0, [0xef53, 0x9123_683e, 0x0102_1994]);
+    fn linux_names_fat_exfat_and_the_filesystems_whose_clients_cache_a_stat_as_recording_no_write() {
+        let fat = 0x4d44;
+        let exfat = 0x2011_bab0;
+        let fuse = 0x6573_5546;
+        let nine_p = 0x0102_1997;
+        let nfs = 0x6969;
+        let cifs = 0xff53_4d42;
+        let smb2 = 0xfe53_4d42;
+        let smb = 0x517b;
 
-        assert!(!records_writes(fat));
-        assert!(!records_writes(exfat));
-        assert!(others.into_iter().all(records_writes));
+        for magic in [fat, exfat, fuse, nine_p, nfs, cifs, smb2, smb] {
+            assert!(!records_writes(magic), "{magic:#x} records every write");
+        }
+        assert!(records_writes(0xef53), "ext4 records no write");
+        let directory = tempfile::tempdir().unwrap();
+        assert!(change_time_records_writes(directory.path()), "the temp folder's filesystem records every write");
+    }
+
+    /// macOS's FAT and exFAT keep no status change time, and the stat of an NFS, SMB, WebDAV or AFP file can be one the
+    /// client cached while the file's bytes are new, so none of them records every write. APFS does.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_names_fat_exfat_and_the_filesystems_whose_clients_cache_a_stat_as_recording_no_write() {
+        for name in [b"msdos".as_slice(), b"exfat", b"nfs", b"smbfs", b"webdav", b"afpfs"] {
+            assert!(!records_writes(name), "{} records every write", String::from_utf8_lossy(name));
+        }
+        assert!(records_writes(b"apfs"), "APFS records no write");
         let directory = tempfile::tempdir().unwrap();
         assert!(change_time_records_writes(directory.path()), "the temp folder's filesystem records every write");
     }
