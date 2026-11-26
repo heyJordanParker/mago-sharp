@@ -364,7 +364,7 @@ impl Converter<'_, '_> {
         }
 
         let parameters = if is_set { vec![b"$value".to_vec()] } else { Vec::new() };
-        self.rename_locals(&parameters, |names| match body {
+        let copies = self.rename_locals(&parameters, |names| match body {
             PropertyHookConcreteBody::Block(block) => names.walk_block(block, &mut ()),
             PropertyHookConcreteBody::Expression(body) => names.walk_expression(body.expression, &mut ()),
         });
@@ -376,7 +376,7 @@ impl Converter<'_, '_> {
             resolution: TypeResolutionContext::default(),
             parameters,
             variadic: None,
-            locals: Locals::default(),
+            locals: Locals::copying(copies),
             super_call: None,
             storage: Some(variable.name[1..].to_vec()),
             captures: None,
@@ -899,7 +899,7 @@ impl Converter<'_, '_> {
         match &method.body {
             MethodBody::Concrete(block) => {
                 let resolution = declared.type_resolution_context.clone().unwrap_or_default();
-                self.rename_locals(&parameters, |names| names.walk_block(block, &mut ()));
+                let copies = self.rename_locals(&parameters, |names| names.walk_block(block, &mut ()));
                 let checks_return = returning.as_ref().is_some_and(|returning| {
                     natively_checked(declared.return_type_declaration_metadata.as_ref(), returning, self.input.codebase)
                 });
@@ -910,7 +910,7 @@ impl Converter<'_, '_> {
                     resolution,
                     parameters,
                     variadic,
-                    locals: Locals::default(),
+                    locals: Locals::copying(copies),
                     super_call: None,
                     storage: None,
                     captures: None,

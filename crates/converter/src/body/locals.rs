@@ -39,7 +39,10 @@ use mago_syntax::cst::Static;
 use mago_syntax::cst::StaticItem;
 use mago_syntax::cst::StaticPropertyAccess;
 use mago_syntax::cst::TokenSeparatedSequence;
+use mago_syntax::cst::UnaryPostfix;
+use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::cst::Unset;
 use mago_syntax::cst::Variable;
 use mago_syntax::walker::MutWalker;
 use mago_word::word;
@@ -69,10 +72,31 @@ pub(crate) struct Locals {
     copied: Vec<(Vec<u8>, Span)>,
     /// Each parameter the body writes.
     written_parameters: Vec<Vec<u8>>,
+    /// Each parameter the body changes, which PHP# copies into a `let` local first.
+    copies: Vec<ParameterCopy>,
     /// Each `static` local, which PHP# keeps in a private static field of the class (spec section 6).
     statics: Vec<StaticLocal>,
     /// Each property a condition around the code tests and binds, as `this.pages is int pages`, innermost last.
     pub(super) bound: Vec<Bound>,
+}
+
+impl Locals {
+    /// The locals of a body that starts by copying each of `copies`.
+    pub(crate) fn copying(copies: Vec<ParameterCopy>) -> Self {
+        Self { copies, ..Self::default() }
+    }
+}
+
+/// A parameter the body changes, which PHP changes in the function's own copy of the argument, and a PHP# parameter
+/// never changes, so the body starts by copying it into a `let` local and uses that local instead (spec section 2).
+#[derive(Debug)]
+pub(crate) struct ParameterCopy {
+    /// The parameter's PHP# name.
+    parameter: String,
+    /// The local's name: `changed` and the parameter's name, as `changedInput`.
+    local: String,
+    /// The first place the body changes it.
+    at: Span,
 }
 
 /// A property `$object->property` a condition tests and binds to `name`, which the code the binding covers reads where
@@ -106,14 +130,16 @@ struct StaticLocal {
 }
 
 /// Each variable a method's body names and each parameter of a lambda in it, by their PHP names, which a local's new
-/// name must be none of.
+/// name must be none of, and each variable the body changes.
 #[derive(Debug, Default)]
-pub(crate) struct Names {
+pub(crate) struct Names<'ast, 'arena> {
     variables: Vec<Vec<u8>>,
     parameters: Vec<Vec<u8>>,
+    /// Each variable a write, `++`, `--` or `unset` changes, through any index.
+    changed: Vec<&'ast DirectVariable<'arena>>,
 }
 
-impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Names {
+impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Names<'ast, 'arena> {
     fn walk_in_direct_variable(&mut self, variable: &'ast DirectVariable<'arena>, _: &mut ()) {
         if !self.variables.iter().any(|name| name == variable.name) {
             self.variables.push(variable.name.to_vec());
@@ -122,6 +148,28 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Names {
 
     fn walk_in_function_like_parameter(&mut self, parameter: &'ast FunctionLikeParameter<'arena>, _: &mut ()) {
         self.parameters.push(parameter.variable.name.to_vec());
+    }
+
+    fn walk_in_assignment(&mut self, assignment: &'ast Assignment<'arena>, _: &mut ()) {
+        self.changed.extend(indexed_variable(assignment.lhs));
+    }
+
+    fn walk_in_unary_prefix(&mut self, unary: &'ast UnaryPrefix<'arena>, _: &mut ()) {
+        if unary.operator.is_increment_or_decrement() {
+            self.changed.extend(indexed_variable(unary.operand));
+        }
+    }
+
+    fn walk_in_unary_postfix(&mut self, unary: &'ast UnaryPostfix<'arena>, _: &mut ()) {
+        self.changed.extend(indexed_variable(unary.operand));
+    }
+
+    fn walk_in_unset(&mut self, unset: &'ast Unset<'arena>, _: &mut ()) {
+        for value in unset.values.iter() {
+            if let Expression::ArrayAccess(_) = value {
+                self.changed.extend(indexed_variable(value));
+            }
+        }
     }
 
     /// `Settings::$page_size` names a member of its class, which keeps its name, and no variable of the method.
@@ -652,10 +700,16 @@ impl Converter<'_, '_> {
     /// camel case spec section 24 gives a local, as `$line_total` is `lineTotal`. Code outside the method never reaches
     /// one by its name, since the converter refuses `compact`, `extract` and a variable named by a variable, so the
     /// new name keeps PHP's meaning where no other variable or parameter of the method, its lambdas' included, has it.
-    /// Keeps every such variable and parameter, which a name the conversion adds must be none of.
-    pub(crate) fn rename_locals(&mut self, parameters: &[Vec<u8>], walk: impl FnOnce(&mut Names)) {
+    /// Keeps every such variable and parameter, which a name the conversion adds must be none of. Gives the copy of
+    /// each of `parameters` the body changes, whose local the body names in its place.
+    pub(crate) fn rename_locals<'ast, 'arena>(
+        &mut self,
+        parameters: &[Vec<u8>],
+        walk: impl FnOnce(&mut Names<'ast, 'arena>),
+    ) -> Vec<ParameterCopy> {
         let mut names = Names::default();
         walk(&mut names);
+        let own = parameters;
         let parameters: Vec<&[u8]> = parameters.iter().chain(&names.parameters).map(Vec::as_slice).collect();
         let taken = |name: &[u8]| parameters.contains(&name) || names.variables.iter().any(|variable| variable == name);
         let candidates: Vec<(Vec<u8>, String)> = names
@@ -675,7 +729,33 @@ impl Converter<'_, '_> {
             .filter(|(_, camel)| candidates.iter().filter(|(_, other)| other == camel).count() == 1)
             .cloned()
             .collect();
+        let copies = self.parameter_copies(own, &names);
         self.variables = names.variables.into_iter().chain(parameters.into_iter().map(<[u8]>::to_vec)).collect();
+
+        copies
+    }
+
+    /// The copy of each of `parameters` the body `names` walked changes, by a write, `++`, `--` or `unset` through any
+    /// index. PHP changes the function's own copy of the argument, and a PHP# parameter never changes, so the body
+    /// copies it into a `let` local named `changed` and the parameter's name, as `let changedInput = input;`, and names
+    /// that local in its place (spec section 2).
+    fn parameter_copies(&mut self, parameters: &[Vec<u8>], names: &Names<'_, '_>) -> Vec<ParameterCopy> {
+        let mut copies: Vec<ParameterCopy> = Vec::new();
+        for parameter in parameters {
+            let Some(changed) = names.changed.iter().find(|variable| variable.name == parameter.as_slice()) else {
+                continue;
+            };
+            let name = self.variable_name(parameter);
+            let mut letters = name.trim_start_matches('@').chars();
+            let capitalized: String =
+                letters.next().map(|first| first.to_uppercase().chain(letters).collect()).unwrap_or_default();
+            let chosen: Vec<String> = self.renamed.iter().map(|(_, camel)| camel.clone()).collect();
+            let local = self.unused_name(&format!("changed{capitalized}"), &chosen);
+            self.renamed.push((parameter.clone(), local.clone()));
+            copies.push(ParameterCopy { parameter: name, local, at: changed.span });
+        }
+
+        copies
     }
 
     /// Refuses the local or `catch` variable `variable` when its name breaks the camel case spec section 24 gives a
@@ -993,7 +1073,21 @@ impl Converter<'_, '_> {
         let body = method.locals.body.take();
         let copied = std::mem::take(&mut method.locals.copied);
         let written_parameters = std::mem::take(&mut method.locals.written_parameters);
+        let copies = std::mem::take(&mut method.locals.copies);
         let statics = std::mem::take(&mut method.locals.statics);
+        // Each changed parameter's copy is the body's first statement.
+        for copy in copies {
+            let Some(body) = body else {
+                self.refuse(
+                    copy.at,
+                    format!("`{}` is changed here, in a body written `=> …`, and PHP# copies a changed parameter into a `let` local first, which only a body in braces declares (spec section 2)", copy.parameter),
+                );
+                continue;
+            };
+            let first = self.skip_whitespace(body.start.offset + 1);
+            let indentation = self.indentation(first);
+            self.edits.insert(first, format!("let {} = {};\n{indentation}", copy.local, copy.parameter));
+        }
         let is_static = |name: &[u8]| statics.iter().any(|kept| kept.name == name);
         // A PHP local lives for the whole function, so one read after the block that assigns it is declared first in
         // the body of the method or lambda it belongs to, where no pass of a loop declares it again.
@@ -1278,10 +1372,14 @@ impl Converter<'_, '_> {
         self.edits.replace(variable.span, name);
     }
 
-    /// Converts `place`, the target of a write, and records the write on the local it names.
+    /// Converts `place`, the target of a write, and records the write on the local it names, through any index.
     pub(super) fn written(&mut self, place: &Expression<'_>) {
         match place {
             Expression::Variable(Variable::Direct(variable)) => self.variable(variable, true),
+            Expression::ArrayAccess(_) | Expression::ArrayAppend(_) if let Some(variable) = indexed_variable(place) => {
+                self.local(variable, true);
+                self.expression(place, None);
+            }
             // A static of a class held at run time is written through reflection, by a statement of its own.
             place if self.held_static_place(place) => {
                 let shown = String::from_utf8_lossy(self.text(place.span())).into_owned();
@@ -1506,6 +1604,16 @@ pub(super) fn destructured<'ast, 'arena>(place: &'ast Expression<'arena>) -> Opt
         Expression::Array(array) => Some(&array.elements),
         Expression::LegacyArray(array) => Some(&array.elements),
         Expression::List(list) => Some(&list.elements),
+        _ => None,
+    }
+}
+
+/// The variable `place` names, through any index or append, as `$rows` in `$rows[0][] = 1`.
+pub(super) fn indexed_variable<'ast, 'arena>(place: &'ast Expression<'arena>) -> Option<&'ast DirectVariable<'arena>> {
+    match place.unparenthesized() {
+        Expression::Variable(Variable::Direct(variable)) => Some(variable),
+        Expression::ArrayAccess(access) => indexed_variable(access.array),
+        Expression::ArrayAppend(append) => indexed_variable(append.array),
         _ => None,
     }
 }
