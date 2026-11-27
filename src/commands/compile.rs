@@ -899,7 +899,6 @@ fn write_hosts(
         written.insert(table);
     }
 
-    let lowered = refused.is_empty();
     let (target, report) = ReportingTarget::buffer();
     Reporter::new(
         database.read_only(),
@@ -928,8 +927,6 @@ fn write_hosts(
     }
     // The statuses of the files this compile wrote or kept, which the next one keeps unread while they hold.
     let next_outputs = record.as_ref().map(|record| record.outputs.clone()).unwrap_or_default();
-    // A compile with a file that doesn't lower keeps no record, so the next one tries that file again.
-    let record = record.filter(|_| lowered);
     written.extend(record.as_ref().and_then(Record::marker_path));
     written.insert(folder.join(COMPILE_LOCK));
     let deleted = delete_all_but(folder, &written, &folder.join(PACKAGE_FOLDER))?;
@@ -3487,6 +3484,25 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
 
         assert_eq!(written_under(&root.join(unit::COMPILED_FOLDER), mago_compile), BTreeSet::new());
         assert!(Record::read(&hosts.join(INPUTS)).is_some(), "the hosts' folder is compiled again");
+    }
+
+    /// A file the hosts' compile refuses, here for a parse error, is refused again by the next compile of the same
+    /// files, so the hosts' folder keeps its record, and a compile with nothing changed compiles nothing into it.
+    #[test]
+    fn a_hosts_folder_with_a_refused_file_keeps_its_record_and_a_compile_with_no_change_writes_nothing_there() {
+        if !php_sdk() {
+            return;
+        }
+        let (_directory, root, configuration) = boxed_project();
+        write(&root, "app/Broken.sharp", "namespace App;\n\npublic class Broken\n{\n    public int count( => 1;\n}\n");
+        let hosts = HostsCompile::new(&configuration).unwrap().folder;
+        let mago_compile = || {
+            compile(&configuration, ColorChoice::Never).unwrap();
+        };
+        mago_compile();
+
+        assert!(Record::read(&hosts.join(INPUTS)).is_some(), "the hosts' folder kept no record");
+        assert_eq!(written_under(&hosts, mago_compile), BTreeSet::new());
     }
 
     /// A `vendor/` file a PHP# file calls is no input of its compiled file, which `composer.lock` stands for, so the
