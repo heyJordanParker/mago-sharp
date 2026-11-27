@@ -312,6 +312,7 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("codebase_scan_plan", &self.codebase_scan_plan.is_some())
             .field("codebase_scan_files", &self.codebase_scan_files.len())
             .field("refinements", &self.refinements.len())
+            .field("codebase_scan_unsent", &self.codebase_scan_unsent)
             .field("namespace_classes", &self.namespace_classes)
             .field("changing_members", &self.changing_members)
             .field("extern_namespaces", &self.extern_namespaces)
