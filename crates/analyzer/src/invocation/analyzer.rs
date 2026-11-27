@@ -2090,8 +2090,9 @@ fn report_abstract_called_statics<A>(
         let Some(found) = abstract_called_static(context.codebase, *name, template, type_argument) else {
             continue;
         };
-        let names_parameter = |atomic: &&TAtomic| match atomic {
-            TAtomic::GenericParameter(parameter) => parameter.parameter_name == *name,
+        // The parameter's type names the type parameter at any depth, as `Class<T>` does.
+        let names_parameter = |node: TypeRef<'_>| match node {
+            TypeRef::Atomic(TAtomic::GenericParameter(parameter)) => parameter.parameter_name == *name,
             _ => false,
         };
         let span = metadata
@@ -2100,7 +2101,7 @@ fn report_abstract_called_statics<A>(
             .position(|parameter| {
                 parameter
                     .get_type_metadata()
-                    .is_some_and(|declared| declared.type_union.get_template_types().iter().any(names_parameter))
+                    .is_some_and(|declared| declared.type_union.get_all_child_nodes().into_iter().any(names_parameter))
             })
             .and_then(|index| arguments.get(index))
             .map_or(invocation.span, HasSpan::span);
