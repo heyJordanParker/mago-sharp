@@ -20942,6 +20942,34 @@ fn a_plain_php_class_is_no_type_argument_a_named_constructor_is_called_through()
     );
 }
 
+/// Spec section 11: a type parameter bounded by a class binds to its static type argument, and `T.wireName()` runs that
+/// class's own static, so a type argument whose class leaves the static abstract is refused where it is bound, inferred
+/// from an argument or written, as C# refuses one with unimplemented static abstract members (CS8920). A class that
+/// declares the static compiles.
+#[test]
+fn a_type_argument_leaving_a_called_static_abstract_is_refused() {
+    let public_event = (
+        "src/App/PublicEvent.sharp",
+        "namespace App;\n\ninternal abstract class PublicEvent\n{\n    internal static abstract string wireName();\n}\n",
+    );
+    let order_paid = (
+        "src/App/OrderPaidEvent.sharp",
+        "namespace App;\n\ninternal class OrderPaidEvent : PublicEvent\n{\n    internal static override string wireName() => \"order.paid\";\n}\n",
+    );
+    let wire = (
+        "src/App/Wire.sharp",
+        "namespace App;\n\ninternal class Wire\n{\n    private static string wireNameOf<T : PublicEvent>(Class<T> type) => T.wireName();\n\n    internal static List<string> run()\n    {\n        Class<PublicEvent> held = typeof(OrderPaidEvent);\n        const first = Wire.wireNameOf(typeof(OrderPaidEvent));\n        const second = Wire.wireNameOf(held);\n        const third = Wire.wireNameOf<PublicEvent>(held);\n        return [first, second, third];\n    }\n}\n",
+    );
+
+    assert_eq!(
+        refusals(wire, &[public_event, order_paid]),
+        [
+            "11:40 template-constraint-violation `PublicEvent` leaves `wireName` abstract, so it can't stand for `T`, whose code calls `T.wireName()`. | Pass the class itself, as `typeof(OrderPaidEvent)`, or reach the static through `methods()` and `createInvoker`.",
+            "12:38 template-constraint-violation `PublicEvent` leaves `wireName` abstract, so it can't stand for `T`, whose code calls `T.wireName()`. | Pass the class itself, as `typeof(OrderPaidEvent)`, or reach the static through `methods()` and `createInvoker`.",
+        ]
+    );
+}
+
 /// Spec section 25: `Self.name` reads and writes a constant or a static member of the class the code is called on, as
 /// Swift's `Self.name` does, so a subclass's own constant answers when the call ran on the subclass.
 #[test]
