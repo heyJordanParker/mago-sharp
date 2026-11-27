@@ -402,6 +402,7 @@ final class AnalyzerCodeModuleGenerator
         'missing-readonly-marker',
         'invalid-json-key',
         'method-name-case',
+        'discarded-result',
     ];
 
     /**
