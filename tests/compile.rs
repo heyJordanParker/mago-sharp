@@ -3400,6 +3400,44 @@ fn a_compile_after_a_refused_one_with_nothing_changed_refuses_the_file_again_wit
     assert!(compiled(root, "app/Order.sharp").exists());
 }
 
+/// A refusal whose issue points into the installed standard library, as a law that reaches the plain PHP function a
+/// library `operator ==` calls does, prints again, with the library's lines, from the record of a compile with nothing
+/// to do.
+#[test]
+fn a_compile_after_one_refused_in_a_library_file_prints_the_same_refusal() {
+    let law = "namespace App;\n\nimport Sharp.Box;\n\npublic class Order\n{\n    law same(Box a) => a == a;\n}\n";
+    let directory = project(law, MONEY);
+    let root = directory.path();
+    let library = "vendor/heyjordanparker/php-sharp-composer";
+    write(root, &format!("{library}/composer.json"), "{\"name\": \"heyjordanparker/php-sharp-composer\"}\n");
+    write(
+        root,
+        &format!("{library}/library/Sharp/Box.sharp"),
+        "namespace Sharp;\n\nimport Sharp.Internal;\n\nextern Internal.equals uses none;\n\npublic struct Box\n{\n    public Box(public int value { get; }) { }\n\n    public static bool operator ==(Box a, Box b) => Internal.equals(a.value, b.value);\n\n    public int hash() => this.value;\n}\n",
+    );
+    release_library(&root.join(library));
+    write(
+        root,
+        "vendor/composer/installed.json",
+        &format!(
+            "{{\"packages\": [{{\"name\": \"heyjordanparker/php-sharp-composer\", \"version\": \"v{}\"}}]}}\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    // The rich format prints every annotation's lines, the library file's too.
+    let rich = || process::output(command(root, "never").env("MAGO_REPORTING_FORMAT", "rich")).unwrap();
+    let refused = rich();
+    assert_eq!(refused.status.code(), Some(1), "{}", printed(&refused));
+    assert!(printed(&refused).contains("the plain PHP function `Internal.equals`"), "{}", printed(&refused));
+    assert!(printed(&refused).contains(&format!("{library}/library/Sharp/Box.sharp")), "{}", printed(&refused));
+
+    let again = rich();
+
+    assert_eq!(again.status.code(), Some(1), "{}", printed(&again));
+    assert_eq!(again.stdout, refused.stdout, "{}", printed(&again));
+    assert_eq!(logged(&again), logged(&refused));
+}
+
 /// A compile that fails with an error of its own, as a source that links to a file outside the project, prints it
 /// again from its record while nothing changed.
 #[cfg(unix)]
