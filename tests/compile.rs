@@ -6,12 +6,14 @@ use std::process::Command;
 use std::process::Output;
 use std::process::Stdio;
 
+use mago_database::clock::poll_until;
 use mago_database::process;
 use mago_sharp_bridge::unit::GENERATION_LOCK;
 use mago_sharp_bridge::unit::GENERATION_PREFIX;
 use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::header;
 use mago_sharp_bridge::unit::inputs_changed;
+use mago_sharp_bridge::unit::release_checker;
 use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_bridge::unit::stamp;
 
@@ -42,6 +44,7 @@ use crate::common::compiling::money_and_wallet;
 use crate::common::compiling::printed;
 use crate::common::compiling::project;
 use crate::common::compiling::read;
+use crate::common::compiling::release_library;
 use crate::common::compiling::source_lean_files;
 use crate::common::compiling::unwritable_cache;
 use crate::common::compiling::write;
@@ -62,6 +65,7 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
     assert_eq!(
         files_under(&root.join(".sharp")),
         [
+            Path::new("analysis.bin"),
             Path::new("autoload.php"),
             Path::new("compiled.bin"),
             Path::new("current/app/Order.sharpc"),
@@ -111,6 +115,7 @@ fn compile_names_the_installed_standard_library_in_each_compiled_file() {
         &format!("{library}/library/Sharp/Math.sharp"),
         "namespace Sharp;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
     );
+    release_library(&root.join(library));
     let version = format!("v{}", env!("CARGO_PKG_VERSION"));
     write(
         root,
@@ -166,6 +171,7 @@ fn compile_refuses_a_standard_library_of_another_release() {
         &format!("{library}/library/Sharp/Math.sharp"),
         "namespace Sharp;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
     );
+    release_library(&root.join(library));
     let install = |version: &str| {
         write(
             root,
@@ -576,11 +582,12 @@ fn project_with_a_host_constructing_system_files() -> tempfile::TempDir {
     directory
 }
 
-/// The standard library's `SystemFiles`, as the project installs it.
-const SYSTEM_FILES: &str = "vendor/heyjordanparker/php-sharp-composer/library/Sharp/IO/SystemFiles.sharp";
+/// The standard library's compiled `SystemFiles`, in the `.sharp` folder of the package the project installs.
+const SYSTEM_FILES: &str =
+    "vendor/heyjordanparker/php-sharp-composer/.sharp/current/library/Sharp/IO/SystemFiles.sharpc";
 
-/// A host loads the standard library's classes from the compile for the hosts, so a host that constructs one as it
-/// loads starts on a tree `mago --no-extensions compile` compiled.
+/// A host loads the standard library's classes from the `.sharp` folder of its package, so a host that constructs one
+/// as it loads starts on a tree `mago --no-extensions compile` compiled.
 #[test]
 fn a_host_that_constructs_a_standard_library_class_starts_on_a_tree_compiled_without_hosts() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -597,7 +604,7 @@ fn a_host_that_constructs_a_standard_library_class_starts_on_a_tree_compiled_wit
     )
     .unwrap();
     assert!(without_hosts.status.success(), "{}", printed(&without_hosts));
-    assert!(compiled(root, SYSTEM_FILES).is_file(), "the compile without hosts wrote {SYSTEM_FILES}");
+    assert!(compiled(root, "app/Order.sharp").is_file(), "the compile without hosts wrote app/Order.sharp");
 
     compile_succeeds(root);
 }
@@ -613,19 +620,12 @@ fn a_host_that_constructs_a_standard_library_class_starts_on_a_clean_tree_and_th
     let directory = project_with_a_host_constructing_system_files();
     let root = directory.path();
 
-    let project: String = source_hash(root.canonicalize().unwrap().as_os_str().as_encoded_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    let hosts = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache/mago/hosts").join(project);
     let written_at = || {
-        [
-            compiled(root, "app/Order.sharp"),
-            compiled(root, SYSTEM_FILES),
-            hosts.join(SYSTEM_FILES).with_extension("sharpc"),
-        ]
-        .map(|path| std::fs::metadata(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())).modified())
-        .map(Result::unwrap)
+        [compiled(root, "app/Order.sharp"), root.join(SYSTEM_FILES)]
+            .map(|path| {
+                std::fs::metadata(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())).modified()
+            })
+            .map(Result::unwrap)
     };
 
     compile_succeeds(root);
@@ -1311,10 +1311,7 @@ fn a_later_run_rewrites_the_hosts_folder_only_once_the_hosts_reading_it_are_done
     };
     let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
     let wait_until = |done: &dyn Fn() -> bool, seconds: u64| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
-        while !done() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        poll_until(std::time::Duration::from_secs(seconds), done);
     };
 
     let (first, next) = std::thread::scope(|scope| {
@@ -2733,6 +2730,7 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
     assert_eq!(
         files_under(&root.join(".sharp")),
         [
+            Path::new("analysis.bin"),
             Path::new("autoload.php"),
             Path::new("compiled.bin"),
             Path::new("current/generation.lock"),
@@ -2815,6 +2813,7 @@ fn compile_reports_a_link_to_a_file_outside_the_project_and_writes_no_compiled_f
     assert_eq!(
         files_under(&root.join(".sharp")),
         [
+            Path::new("analysis.bin"),
             Path::new("autoload.php"),
             Path::new("compiled.bin"),
             Path::new("current/app/Order.sharpc"),
@@ -3722,6 +3721,7 @@ fn compile_names_the_app_module_that_binds_the_dispatcher() {
     let directory =
         lawful_project(&[composer, dispatcher, ("app/Recorder.sharp", recorder), ("app/Shop/Module.sharp", &shop)]);
     let root = directory.path();
+    release_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
 
     compile_succeeds(root);
     assert!(read(root, ".sharp/current/listeners.php").contains("    'dispatcher' => 'app\\\\shop',\n"));
@@ -4754,7 +4754,6 @@ fn a_signal_that_ends_a_compile_ends_the_lean_it_waits_on() {
     use std::os::unix::process::ExitStatusExt;
     use std::process::Stdio;
     use std::time::Duration;
-    use std::time::Instant;
 
     for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGHUP, libc::SIGTERM] {
         let lake = tempfile::tempdir().unwrap();
@@ -4777,20 +4776,16 @@ fn a_signal_that_ends_a_compile_ends_the_lean_it_waits_on() {
             })
         };
         let mut compile = process::spawn(&mut compiling).unwrap();
-        let started = Instant::now();
-        while !lake.path().join("stalled").exists() {
-            assert!(started.elapsed() < Duration::from_secs(300), "{signal}: the stalled Lean never started");
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        assert!(
+            poll_until(Duration::from_secs(300), || lake.path().join("stalled").exists()),
+            "{signal}: the stalled Lean never started"
+        );
 
         // SAFETY: `kill` only sends a signal, to the group the compile leads, as a terminal does.
         assert_eq!(unsafe { libc::kill(-i32::try_from(compile.id()).unwrap(), signal) }, 0);
 
         assert_eq!(compile.wait().unwrap().signal(), Some(signal));
-        let ended = Instant::now();
-        while !leans().is_empty() && ended.elapsed() < Duration::from_secs(10) {
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        poll_until(Duration::from_secs(10), || leans().is_empty());
         let left = leans();
         if !left.is_empty() {
             process::status(Command::new("pkill").args(["-f", &script])).unwrap();
@@ -4906,5 +4901,150 @@ fn a_transaction_s_body_emits_and_reaches_the_database_and_sending_mail_in_it_is
         ],
         "{}",
         printed(&refused)
+    );
+}
+
+/// `app/Cart.sharp`, which calls `Order.total`, so a signature edit of `Order` reaches it.
+const CART: &str = "namespace App;\n\npublic class Cart\n{\n    public int sum() => new Order().total(1);\n}\n";
+
+/// The key of each compiled file under the `.sharp` folder of `root`, by its path there. A compiled file's inputs hold
+/// their modification times, so its key, not its bytes, tells the code it holds.
+fn compiled_keys(root: &Path) -> Vec<(PathBuf, [u8; 16])> {
+    let folder = root.join(".sharp");
+    files_under(&folder)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "sharpc"))
+        .map(|path| {
+            let key = header(&std::fs::read(folder.join(&path)).unwrap()).unwrap().key;
+            (path, key)
+        })
+        .collect()
+}
+
+/// A compile of the project with `app/Cart.sharp`, then `between` and `edit`, then a compile again, which restores the
+/// analysis the first compile left, prints what a full compile of a fresh copy with `edit` prints, and writes compiled
+/// files of the same keys.
+fn assert_a_compile_after_an_edit_matches_a_full_compile(between: impl Fn(&Path), edit: impl Fn(&Path)) {
+    let seeded = project(ORDER, MONEY);
+    write(seeded.path(), "app/Cart.sharp", CART);
+    compile_succeeds(seeded.path());
+    assert!(seeded.path().join(".sharp/analysis.bin").is_file());
+    between(seeded.path());
+    edit(seeded.path());
+
+    let after = compile_lines(seeded.path());
+
+    let fresh = project(ORDER, MONEY);
+    write(fresh.path(), "app/Cart.sharp", CART);
+    edit(fresh.path());
+    let full = compile_lines(fresh.path());
+    assert_eq!(after.status.code(), full.status.code(), "{}", printed(&after));
+    assert_eq!(issue_lines(&after), issue_lines(&full), "{}", printed(&after));
+    assert_eq!(compiled_keys(seeded.path()), compiled_keys(fresh.path()));
+}
+
+/// After a body edit, a compile restores the analysis the last compile left and gives what a full compile gives.
+#[test]
+fn a_compile_after_a_body_edit_gives_what_a_full_compile_gives() {
+    assert_a_compile_after_an_edit_matches_a_full_compile(
+        |_| {},
+        |root| write(root, "app/Order.sharp", &ORDER.replace("extra + 1", "extra + 2")),
+    );
+}
+
+/// After a signature edit that breaks a caller in another file, a compile restores the last analysis, checks the
+/// caller again, and refuses it as a full compile does.
+#[test]
+fn a_compile_after_a_signature_edit_checks_each_caller_again_as_a_full_compile_does() {
+    assert_a_compile_after_an_edit_matches_a_full_compile(
+        |_| {},
+        |root| write(root, "app/Order.sharp", &ORDER.replace("int total(int extra)", "int total(string extra)")),
+    );
+}
+
+/// After a file is added, and after one is deleted, a compile gives what a full compile gives.
+#[test]
+fn a_compile_after_a_file_is_added_or_deleted_gives_what_a_full_compile_gives() {
+    assert_a_compile_after_an_edit_matches_a_full_compile(
+        |_| {},
+        |root| {
+            write(root, "app/Extra.sharp", "namespace App;\n\npublic class Extra\n{\n    public int one() => 1;\n}\n")
+        },
+    );
+    assert_a_compile_after_an_edit_matches_a_full_compile(
+        |_| {},
+        |root| std::fs::remove_file(root.join("app/Cart.sharp")).unwrap(),
+    );
+}
+
+/// An analysis the compile can't read, here one damaged after the compile that wrote it, leaves the next compile to
+/// analyze from scratch, which gives what a full compile gives.
+#[test]
+fn a_compile_after_a_damaged_analysis_analyzes_from_scratch() {
+    assert_a_compile_after_an_edit_matches_a_full_compile(
+        |root| {
+            let path = root.join(".sharp/analysis.bin");
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+        },
+        |root| write(root, "app/Order.sharp", &ORDER.replace("extra + 1", "extra + 2")),
+    );
+}
+
+/// The compiled file the engine reads for the source `name` of the project at `root`: the one under the current
+/// generation of the `.sharp` folder of the nearest folder above the source that holds one.
+fn compiled_as_the_engine_finds_it(root: &Path, name: &str) -> PathBuf {
+    let source = root.join(name);
+    let folder = source.ancestors().skip(1).find(|folder| folder.join(".sharp").is_dir()).unwrap();
+
+    folder.join(".sharp/current").join(source.strip_prefix(folder).unwrap()).with_extension("sharpc")
+}
+
+/// The standard library resolves its names when PHP# releases it, so a plain PHP class a package declares in `Sharp`
+/// never changes what the library's code names: `Sharp.Int` throws PHP's `ValueError`, not the package's.
+#[test]
+fn a_plain_php_sharp_value_error_leaves_the_standard_library_throwing_php_s_value_error() {
+    let directory = library_project(&[("app/Order.sharp", ORDER)]);
+    let root = directory.path();
+    write(
+        root,
+        "vendor/acme/shadow/ValueError.php",
+        "<?php\n\nnamespace Sharp;\n\nclass ValueError extends \\ValueError\n{\n}\n",
+    );
+
+    compile_succeeds(root);
+
+    let int = std::fs::read(compiled_as_the_engine_finds_it(
+        root,
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Int.sharp",
+    ))
+    .unwrap();
+    let names = |name: &[u8]| int.windows(name.len()).any(|window| window == name);
+    assert!(names(b"ValueError"), "Sharp.Int names no ValueError");
+    assert!(!names(b"Sharp\\ValueError"), "Sharp.Int throws the package's Sharp\\ValueError");
+}
+
+/// A compiled file of the standard library names the release that compiled it, and every `mago` of another release
+/// refuses it, since the library's code is that release's code.
+#[test]
+fn a_standard_library_compiled_file_of_another_release_is_refused() {
+    let directory = library_project(&[("app/Order.sharp", ORDER)]);
+    let root = directory.path();
+    let int = root.join("vendor/heyjordanparker/php-sharp-composer/.sharp/current/library/Sharp/Int.sharpc");
+    let mut bytes = std::fs::read(&int).unwrap();
+    bytes[24..40].copy_from_slice(&release_checker("0.0.1"));
+    std::fs::write(&int, bytes).unwrap();
+
+    let output = compile(root);
+
+    assert!(!output.status.success(), "{}", printed(&output));
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        printed(&output).contains(&format!(
+            "{} was compiled by another release of PHP#, and mago is {version}. Reinstall heyjordanparker/php-sharp-composer {version}.",
+            int.canonicalize().unwrap().display()
+        )),
+        "{}",
+        printed(&output)
     );
 }

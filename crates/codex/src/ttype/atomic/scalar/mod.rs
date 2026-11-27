@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use mago_word::Word;
 use mago_word::word;
 
@@ -501,14 +503,14 @@ impl TScalar {
 }
 
 impl TType for TScalar {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
         match self {
-            TScalar::Bool(ttype) => ttype.get_child_nodes(),
-            TScalar::Integer(ttype) => ttype.get_child_nodes(),
-            TScalar::Float(ttype) => ttype.get_child_nodes(),
-            TScalar::String(ttype) => ttype.get_child_nodes(),
-            TScalar::ClassLikeString(ttype) => ttype.get_child_nodes(),
-            _ => vec![],
+            TScalar::Bool(ttype) => ttype.visit_child_nodes(visit),
+            TScalar::Integer(ttype) => ttype.visit_child_nodes(visit),
+            TScalar::Float(ttype) => ttype.visit_child_nodes(visit),
+            TScalar::String(ttype) => ttype.visit_child_nodes(visit),
+            TScalar::ClassLikeString(ttype) => ttype.visit_child_nodes(visit),
+            _ => ControlFlow::Continue(()),
         }
     }
 

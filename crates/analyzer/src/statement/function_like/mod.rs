@@ -124,6 +124,7 @@ use crate::utils::report_int_for_float;
 
 pub mod function;
 pub mod rejected_nullable_parameter;
+pub mod unowned_disposable;
 pub mod unused_parameter;
 pub mod write_only_local;
 
@@ -2314,9 +2315,7 @@ where
 /// index read adds none.
 pub(crate) fn known_type_or_error(declared: TUnion) -> TUnion {
     let names_unknown_type = declared
-        .get_all_child_nodes()
-        .into_iter()
-        .any(|node| matches!(node, TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { .. }))));
+        .any_child_node(&mut |node| matches!(node, TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { .. }))));
 
     if names_unknown_type { TUnion::from_atomic(TAtomic::Error) } else { declared }
 }

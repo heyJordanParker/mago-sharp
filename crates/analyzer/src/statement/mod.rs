@@ -14,6 +14,7 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner;
@@ -77,6 +78,7 @@ use crate::expression::analyze_php_shape;
 use crate::expression::assignment::analyze_assignment;
 use crate::expression::is_refused_match;
 use crate::expression::match_arm_hints;
+use crate::expression::result_type_arguments;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::NamedCall;
@@ -365,6 +367,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
 
             result?;
 
+            if let Statement::Expression(expression) = self {
+                report_discarded_result(expression.expression, context, artifacts);
+            }
+
             if let Statement::Expression(expression) = self
                 && context.settings.find_unused_expressions
                 && !block_context.flags.inside_law_body()
@@ -472,6 +478,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LocalDeclaration<'arena> {
             unpacked_type.is_none().then_some(self.value),
             unpacked_type,
         )?;
+        if self.is_using() {
+            report_undisposable_using(context, artifacts, self.value);
+        }
 
         if let Some((local_type, _)) = local_type {
             block_context.locals.insert(variable_ids[0], local_type);
@@ -537,6 +546,34 @@ fn report_unpacked_non_tuple<A>(
     }
 
     context.collector.report_with_code(IssueCode::InvalidDestructuringSource, issue);
+}
+
+/// Reports a `using` local, spec section 2, whose `value` may be no `Disposable`: its block calls `dispose()` on the
+/// value when it ends. A value whose refusal was already reported says nothing again.
+fn report_undisposable_using<A>(context: &mut Context<'_, '_, A>, artifacts: &AnalysisArtifacts, value: &Expression<'_>)
+where
+    A: Arena,
+{
+    let Some(value_type) = artifacts.get_expression_type(value) else {
+        return;
+    };
+    let disposable = word(b"Sharp\\Disposable");
+    if value_type.types.iter().all(|atomic| match atomic {
+        TAtomic::Object(TObject::Named(named)) => context.codebase.is_instance_of(named.name, disposable),
+        atomic => matches!(atomic, TAtomic::Error),
+    }) {
+        return;
+    }
+
+    let quoted = quoted_source(context, value.span());
+    let issue = Issue::error(format!(
+        "A `using` local holds a `Disposable`, and the type of `{quoted}` is `{}`.",
+        display_type(context, &get_general_type(value_type, context.codebase))
+    ))
+    .with_annotation(Annotation::primary(value.span()).with_message("Its block disposes this value when it ends."))
+    .with_help("Declare it with `const`, or have its class implement `Disposable`.");
+
+    context.collector.report_with_code(IssueCode::UsingNotDisposable, issue);
 }
 
 /// Binds the local `variable_id` to its written type, or unbinds it when none is written, and returns the written type
@@ -953,6 +990,18 @@ where
     true
 }
 
+/// Whether the analyzed file is a PHP# file outside the standard library and `namespace`, a PHP name, is `Sharp` or a
+/// namespace under it, which [`report_standard_library_namespace`] refuses.
+pub(crate) fn refuses_standard_library_namespace<A>(context: &Context<'_, '_, A>, namespace: &[u8]) -> bool
+where
+    A: Arena,
+{
+    context.dialect.is_sharp()
+        && !context.source_file.is_standard_library
+        && namespace.get(..b"Sharp".len()).is_some_and(|root| root.eq_ignore_ascii_case(b"Sharp"))
+        && matches!(namespace.get(b"Sharp".len()), None | Some(b'\\'))
+}
+
 /// Checks statement expressions for unused results or lack of side effects.
 /// Refuses a PHP# file outside the standard library that declares `namespace Sharp` or a namespace under it. The name
 /// would reach the standard library's own classes and `Sharp.Internal` with no import, and only the analyzer knows the
@@ -962,11 +1011,7 @@ where
     A: Arena,
 {
     let namespace = php_name(name);
-    if !context.dialect.is_sharp()
-        || context.source_file.is_standard_library
-        || !namespace.get(..b"Sharp".len()).is_some_and(|root| root.eq_ignore_ascii_case(b"Sharp"))
-        || !matches!(namespace.get(b"Sharp".len()), None | Some(b'\\'))
-    {
+    if !refuses_standard_library_namespace(context, &namespace) {
         return;
     }
 
@@ -978,6 +1023,41 @@ where
         ))
         .with_annotation(Annotation::primary(name.span()).with_message("Declared here."))
         .with_help("Declare the file in a namespace of the app."),
+    );
+}
+
+/// Spec section 31, as Rust's `#[must_use]` on `Result`: a `Result` holds a failure the caller must handle, so a
+/// statement whose value is one and that drops it is refused. An assignment keeps its value, so it never is.
+fn report_discarded_result<'arena, A>(
+    expression: &Expression<'arena>,
+    context: &mut Context<'_, 'arena, A>,
+    artifacts: &AnalysisArtifacts,
+) where
+    A: Arena,
+{
+    if matches!(expression, Expression::Assignment(_)) {
+        return;
+    }
+    let Some(value_type) = artifacts.get_expression_type(expression) else {
+        return;
+    };
+    if value_type.is_never() || result_type_arguments(context.codebase, value_type).is_none() {
+        return;
+    }
+    let span = expression.span();
+    let end = match expression {
+        Expression::Call(call) => call.get_argument_list().span().start.offset,
+        _ => span.end.offset,
+    };
+    let written = String::from_utf8_lossy(&context.source_file.contents[span.start.offset as usize..end as usize]);
+    context.collector.report_with_code(
+        IssueCode::DiscardedResult,
+        Issue::error(format!(
+            "`{}` returns a Result: handle it with try, match, ok() or unwrap().",
+            written.trim_end()
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Its failure is dropped here."))
+        .with_help("A dropped Result loses its failure: pass it up with `try`, or keep the Result in a `const`."),
     );
 }
 

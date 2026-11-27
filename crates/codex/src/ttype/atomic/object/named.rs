@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use mago_word::Word;
 use mago_word::concat_word;
 use mago_word::word;
@@ -150,22 +152,9 @@ impl TNamedObject {
 }
 
 impl TType for TNamedObject {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        let mut children = vec![];
-
-        if let Some(type_parameters) = &self.type_parameters {
-            for parameter in type_parameters {
-                children.push(TypeRef::Union(parameter));
-            }
-        }
-
-        if let Some(intersection_types) = &self.intersection_types {
-            for atomic in intersection_types {
-                children.push(TypeRef::Atomic(atomic));
-            }
-        }
-
-        children
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.type_parameters.iter().flatten().try_for_each(|parameter| visit(TypeRef::Union(parameter)))?;
+        self.intersection_types.iter().flatten().try_for_each(|atomic| visit(TypeRef::Atomic(atomic)))
     }
 
     fn can_be_intersected(&self) -> bool {

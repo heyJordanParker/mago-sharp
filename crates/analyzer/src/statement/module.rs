@@ -12,6 +12,7 @@ use std::rc::Rc;
 use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_allocator::Arena;
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
@@ -253,6 +254,11 @@ where
         {
             report_captive(context, binding, captive, at);
         }
+        if let Some((transient, class, at)) = walk.owner
+            && first(IssueCode::UnownedDisposable, at)
+        {
+            report_undisposed_owner(context, transient, class, at);
+        }
         (seen, classes) = (walk.seen, walk.classes);
     }
     for class in classes {
@@ -286,6 +292,40 @@ where
     check_class_services(context, &services, class, Builds::Program(class.original_name));
 }
 
+/// Spec section 32: PHPUnit creates a test class, one that extends its `TestCase`, for each test, and an extension, one
+/// that implements its `Extension`, once, with `new`, so the container fills each parameter of their main constructor
+/// as a bound class's: a test class's from its file's test module over the base modules, rebuilt for every test, and an
+/// extension's from the base modules. A problem is reported at the parameter.
+pub(crate) fn check_filled_services<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    if !is_buildable(class) {
+        return;
+    }
+    // A test class with no main constructor of its own below `TestCase` takes PHPUnit's, which PHPUnit fills.
+    let constructor = MethodIdentifier::new(class.name, word("__construct"));
+    let declaring = codebase.get_declaring_method_identifier(&constructor).get_class_name();
+    if !codebase.class_extends(declaring, word(TEST_CASE)) && !codebase.class_implements(declaring, word(EXTENSION)) {
+        return;
+    }
+    let overrides = if codebase.class_extends(class.name, word(TEST_CASE)) {
+        codebase
+            .modules
+            .iter()
+            .filter(|module| module.kind == ModuleKind::Test && module.span.file_id == class.span.file_id)
+            .collect()
+    } else if codebase.class_implements(class.name, word(EXTENSION)) {
+        Vec::new()
+    } else {
+        return;
+    };
+    let services = Services::reading(codebase, overrides);
+
+    check_class_services(context, &services, class, Builds::Filled(class.original_name));
+}
+
 /// Spec section 32: PHP# creates the classes a module binds, the classes of listeners and the class of a program
 /// through their main constructors, so each parameter needs a binding in the module of the class's namespace or of a
 /// namespace above it.
@@ -313,13 +353,14 @@ fn check_class_services<A>(
 
 /// What the container builds when it fills a parameter: a class a binding binds, with that binding and the span of
 /// the class in its value, the service of a binding's expression, a listener's class, with the first event it
-/// listens to, or a program's class.
+/// listens to, a program's class, or a test class or PHPUnit extension, whose services the container fills.
 #[derive(Clone, Copy)]
 enum Builds<'ctx> {
     Bound(Word, &'ctx BindingMetadata, Span),
     Binding(&'ctx TUnion),
     Listener(Word, Word),
     Program(Word),
+    Filled(Word),
 }
 
 /// A parameter the container can't fill: a service no module binds, or a type that is no service, `None` when the
@@ -340,7 +381,7 @@ fn report_missing_service<A>(
     A: Arena,
 {
     let (name, subject) = match builds {
-        Builds::Bound(class, ..) | Builds::Program(class) => {
+        Builds::Bound(class, ..) | Builds::Program(class) | Builds::Filled(class) => {
             let name = display_class_like_name(context, class).to_string();
             (name.clone(), format!("`{name}`"))
         }
@@ -363,7 +404,9 @@ fn report_missing_service<A>(
             };
             let place = match builds {
                 Builds::Binding(_) => "this namespace".to_owned(),
-                Builds::Bound(..) | Builds::Listener(..) | Builds::Program(_) => format!("`{name}`'s namespace"),
+                Builds::Bound(..) | Builds::Listener(..) | Builds::Program(_) | Builds::Filled(_) => {
+                    format!("`{name}`'s namespace")
+                }
             };
             Issue::error(format!(
                 "{subject} needs {} `{service_name}`, and no module binds one: the container can't build `{name}`.",
@@ -388,7 +431,7 @@ fn report_missing_service<A>(
                         binding_expression(context, binding)
                     )
                 }
-                Builds::Binding(_) | Builds::Listener(..) | Builds::Program(_) => {
+                Builds::Binding(_) | Builds::Listener(..) | Builds::Program(_) | Builds::Filled(_) => {
                     "Take a service that gives the value, such as `Environment`, and read the value from it.".to_owned()
                 }
             };
@@ -402,7 +445,7 @@ fn report_missing_service<A>(
         Builds::Bound(_, _, bound) => issue
             .with_annotation(Annotation::primary(bound).with_message("Bound here."))
             .with_annotation(Annotation::secondary(parameter.span).with_message("Needed here.")),
-        Builds::Binding(_) | Builds::Listener(..) | Builds::Program(_) => {
+        Builds::Binding(_) | Builds::Listener(..) | Builds::Program(_) | Builds::Filled(_) => {
             issue.with_annotation(Annotation::primary(parameter.span).with_message("Needed here."))
         }
     };
@@ -606,6 +649,9 @@ struct Walk<'services, 'ctx> {
     classes: HashSet<Word>,
     cycle: Option<(Vec<Word>, &'ctx BindingMetadata)>,
     captive: Option<(&'ctx BindingMetadata, &'ctx BindingMetadata)>,
+    /// A transient `Disposable` service, the class that takes it and so owns it but isn't `Disposable`, and where it
+    /// is reported.
+    owner: Option<(&'ctx BindingMetadata, &'ctx ClassLikeMetadata, &'ctx BindingMetadata)>,
 }
 
 impl<'services, 'ctx> Walk<'services, 'ctx> {
@@ -629,6 +675,7 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
             classes,
             cycle: None,
             captive: None,
+            owner: None,
         }
     }
 
@@ -661,12 +708,34 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
                 self.path.push(class.original_name);
             }
             for served in &built.served {
+                if let Some(class) = built.class
+                    && self.owner.is_none()
+                    && self.owns_undisposed(class, served.1)
+                    && let Some(at) = self.reported_at(Some(served.1))
+                {
+                    self.owner = Some((served.1, class, at));
+                }
                 self.visit(*served, held);
             }
             if built.class.is_some() {
                 self.path.pop();
             }
         }
+    }
+
+    /// Spec sections 2 and 32: whether `class` takes the service of the transient `binding`, a `Disposable` one, and
+    /// isn't `Disposable` itself. A transient service is the class's own, so it owns the value, and only a
+    /// `Disposable` class can dispose a value it holds.
+    fn owns_undisposed(&self, class: &ClassLikeMetadata, binding: &BindingMetadata) -> bool {
+        let codebase = self.services.codebase;
+        let disposable = word(b"Sharp\\Disposable");
+
+        binding.lifetime == Lifetime::Transient
+            && binding.service.type_union.types.iter().any(|atomic| match atomic {
+                TAtomic::Object(TObject::Named(named)) => codebase.is_instance_of(named.name, disposable),
+                _ => false,
+            })
+            && !codebase.is_instance_of(class.name, disposable)
     }
 
     /// Visits `binding`, which serves a service the walk reached.
@@ -1023,6 +1092,30 @@ where
     );
 }
 
+/// Reports that `class` takes the transient `Disposable` service of `transient`, and so owns it, without being
+/// `Disposable`, at the binding `at`.
+fn report_undisposed_owner<A>(
+    context: &mut Context<'_, '_, A>,
+    transient: &BindingMetadata,
+    class: &ClassLikeMetadata,
+    at: &BindingMetadata,
+) where
+    A: Arena,
+{
+    let service_name = display_sharp_type(context, &transient.service.type_union);
+    let class_name = display_class_like_name(context, class.original_name);
+    let mut issue = Issue::error(format!(
+        "The transient `{service_name}` is `Disposable`, so `{class_name}`, which takes it, owns it, and only a `Disposable` class can dispose it."
+    ))
+    .with_annotation(Annotation::primary(at.span).with_message("Bound here."))
+    .with_help(format!("Make `{class_name}` `Disposable` and dispose it there, or make `{service_name}` scoped."));
+    if !std::ptr::eq(transient, at) {
+        issue = issue.with_annotation(Annotation::secondary(transient.span).with_message("Transient here."));
+    }
+
+    context.collector.report_with_code(IssueCode::UnownedDisposable, issue);
+}
+
 /// Reports that the singleton `binding` holds the scoped `captive`, at the binding `at`.
 fn report_captive<A>(
     context: &mut Context<'_, '_, A>,
@@ -1104,6 +1197,9 @@ fn is_buildable(class: &ClassLikeMetadata) -> bool {
 
 /// The class every PHPUnit test extends.
 const TEST_CASE: &str = "PHPUnit\\Framework\\TestCase";
+
+/// The interface every PHPUnit extension implements.
+const EXTENSION: &str = "PHPUnit\\Runner\\Extension\\Extension";
 
 /// Whether the file that declares `module`, a test module, holds a test, which alone turns a test module on, spec
 /// section 32: it is a test file, in a folder `composer.json` lists under `autoload-dev`, and its class isn't abstract

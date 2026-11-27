@@ -54,6 +54,13 @@ pub fn compile(root: &Path) -> Output {
     process::output(&mut command(root, "never")).unwrap()
 }
 
+/// Compiles the standard library's package at `package`, its `library/` folder, as PHP# compiles the library at its
+/// release, so a project that installs it there reads its compiled files and codex.
+pub fn release_library(package: &Path) {
+    write(package, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"library\"]\n");
+    compile_succeeds(package);
+}
+
 /// Compiles `root`, and fails the test with the printed output unless the compile succeeds.
 pub fn compile_succeeds(root: &Path) {
     let output = compile(root);
@@ -129,6 +136,9 @@ pub fn lawful_project(files: &[(&str, &str)]) -> tempfile::TempDir {
 }
 
 /// A project that installs the whole standard library, as every project does, holding `files`.
+///
+/// The library comes with its sources, and its compiled files and codex, which `sharp/bin/build-mago` compiles into
+/// `sharp/composer/.sharp` as a release does.
 pub fn library_project(files: &[(&str, &str)]) -> tempfile::TempDir {
     let directory = lawful_project(files);
     let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../composer");
@@ -144,6 +154,14 @@ pub fn library_project(files: &[(&str, &str)]) -> tempfile::TempDir {
             &format!("vendor/heyjordanparker/php-sharp-composer/library/{}", file.display()),
             &source,
         );
+    }
+    let compiled = package.join(".sharp");
+    for file in files_under(&compiled) {
+        if file.extension().is_some_and(|extension| extension == "sharpc") || file.ends_with("library.codex") {
+            let target = directory.path().join("vendor/heyjordanparker/php-sharp-composer/.sharp").join(&file);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(compiled.join(&file), target).unwrap();
+        }
     }
 
     directory

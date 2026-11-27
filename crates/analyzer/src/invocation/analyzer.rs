@@ -2460,7 +2460,7 @@ fn holds_violated_template(union: &TUnion, violated_templates: &WordSet) -> bool
 }
 
 fn contains_parameter_variable(union: &TUnion) -> bool {
-    union.get_all_child_nodes().into_iter().any(|node| {
+    union.any_child_node(&mut |node| {
         matches!(
             node,
             TypeRef::Atomic(TAtomic::Variable(variable))

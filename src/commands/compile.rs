@@ -69,6 +69,9 @@ use mago_orchestrator::Autoloader;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::Scans;
+use mago_orchestrator::service::incremental_analysis::codex::CodexError;
+use mago_orchestrator::service::incremental_analysis::codex::LIBRARY_CODEX;
+use mago_orchestrator::service::incremental_analysis::codex::LibraryCodex;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::Compiled;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
@@ -139,6 +142,12 @@ const INPUTS: &str = "inputs.json";
 /// folder, as `CompiledFiles::encode` writes it, so the next compile keeps the compiled file of each file whose key
 /// holds instead of lowering it again.
 const COMPILED_FILES: &str = "compiled.bin";
+
+/// The state of the last compile's analysis, in the `.sharp` folder, as `Server::persist` writes it after
+/// [`analysis_key`]: the codebase, the reference graphs and each file's state. A compile whose record holds in all but
+/// its source files restores it and rechecks the files that changed since, as watch mode does. Every other compile
+/// analyzes from scratch, and the compile with nothing to do never reads it.
+const ANALYSIS: &str = "analysis.bin";
 
 /// The file in the `.sharp` folder whose lock the engine holds while it runs `sharp.compile_command`, so a project
 /// compiles once at a time on demand, and in the hosts' folder whose lock [`compile_for_hosts`] takes the same way. The
@@ -674,7 +683,9 @@ impl LastCompile {
         let (database, _) =
             with_packages(orchestrator.load_listed(&configuration.source.workspace, listing)?.into_static());
         let library = standard_library(root, &database).map_err(OrchestratorError::General)?;
+        let codex = library_codex(root, &database).map_err(OrchestratorError::General)?;
         let mut server = Server::new(database.into_static(), decode_prelude, server_settings(orchestrator))
+            .with_library(codex)
             .keeping_lowering_inputs();
         server.analyze()?;
 
@@ -873,11 +884,11 @@ fn write_hosts(
     if !inputs.is_empty() {
         let listeners = server.listeners();
         let externs = server.extern_attributes();
-        let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| accepted.contains(&line.file_id)).collect();
+        let tabled = |file_id: &FileId| in_listener_table(&accepted, server.database(), file_id);
+        let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| tabled(&line.file_id)).collect();
         let families = server.families();
-        let families: Vec<&Family> = families.iter().filter(|family| accepted.contains(&family.file_id)).collect();
-        let accepted: Vec<&Listener> =
-            listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
+        let families: Vec<&Family> = families.iter().filter(|family| tabled(&family.file_id)).collect();
+        let accepted: Vec<&Listener> = listeners.iter().filter(|listener| tabled(&listener.file_id)).collect();
         let effects = server.extern_effects();
         let table = folder.join(LISTENERS);
         let dispatcher = server.dispatcher_namespace();
@@ -888,7 +899,6 @@ fn write_hosts(
         written.insert(table);
     }
 
-    let lowered = refused.is_empty();
     let (target, report) = ReportingTarget::buffer();
     Reporter::new(
         database.read_only(),
@@ -917,8 +927,6 @@ fn write_hosts(
     }
     // The statuses of the files this compile wrote or kept, which the next one keeps unread while they hold.
     let next_outputs = record.as_ref().map(|record| record.outputs.clone()).unwrap_or_default();
-    // A compile with a file that doesn't lower keeps no record, so the next one tries that file again.
-    let record = record.filter(|_| lowered);
     written.extend(record.as_ref().and_then(Record::marker_path));
     written.insert(folder.join(COMPILE_LOCK));
     let deleted = delete_all_but(folder, &written, &folder.join(PACKAGE_FOLDER))?;
@@ -1038,13 +1046,14 @@ impl HostsReach {
 }
 
 /// What the extension hosts of `hosts` load as their workers start among the files of the project's `database` at
-/// `root`: the standard library's files, each enabled host's file and every PHP# file under the folder that holds it, as
-/// a package is its folder, every PHP# file that [`declares_extern`] lines, whose declarations apply to every file as an
-/// analysis of the whole project applies them, every file of the project those files name, and every file those name in
-/// turn. A file's names are those its scan names, every name its code resolves and each class-like a `@var` tag of its
-/// bodies names, as an analysis's scan finds the class-likes a file reaches. A name reaches the file its namespace's
-/// folder holds under its last part, as a type of PHP# and a class Composer loads by PSR-4 each live in one, so the walk
-/// parses only the files it reaches, and the standard library, which names only itself, not at all.
+/// `root`: each enabled host's file and every PHP# file under the folder that holds it, as a package is its folder, every
+/// PHP# file that [`declares_extern`] lines, whose declarations apply to every file as an analysis of the whole project
+/// applies them, every file of the project those files name, and every file those name in turn. A file's names are those
+/// its scan names, every name its code resolves and each class-like a `@var` tag of its bodies names, as an analysis's
+/// scan finds the class-likes a file reaches. A name reaches the file its namespace's folder holds under its last part,
+/// as a type of PHP# and a class Composer loads by PSR-4 each live in one, so the walk parses only the files it reaches.
+/// The standard library is none of them: the hosts load it from the `.sharp` folder of its package, where PHP# compiled
+/// it.
 fn hosts_reach(
     configuration: &Configuration,
     root: &Path,
@@ -1090,10 +1099,6 @@ fn hosts_reach(
 
     let mut taken = vec![false; files.len()];
     let mut reach = HashSet::default();
-    for (index, file) in files.iter().enumerate().filter(|(_, file)| file.is_standard_library) {
-        taken[index] = true;
-        reach.insert(file.id);
-    }
     let mut folders = BTreeMap::new();
     let mut wave: Vec<usize> = Vec::new();
     for (index, file) in files.iter().enumerate() {
@@ -1178,10 +1183,10 @@ fn holds_compiled(
 }
 
 /// Lowers what the extension hosts of `hosts` load as their workers start, [`hosts_reach`], alone into their folder of
-/// the project at `root`, whose source files are `sources`, against `library`, unless the folder holds a current
-/// compiled file of each of those files already: the compiled file of each of those files of `database`, the project's
-/// database as [`with_packages`] gives it, written only when its bytes changed, and no other file, so the compile of the
-/// whole project that follows writes the rest of the folder and its record. Those files name no file outside them, so
+/// the project at `root`, whose source files are `sources`, against `library` and its codex `codex`, unless the folder
+/// holds a current compiled file of each of those files already: the compiled file of each of those files of
+/// `database`, the project's database as [`with_packages`] gives it, written only when its bytes changed, and no other
+/// file, so the compile of the whole project that follows writes the rest of the folder and its record. Those files name no file outside them, so
 /// their analysis holds them and Composer's packages alone, and runs as the hosts' compile does, without the hosts, on
 /// an orchestrator of its own, since the compile's orchestrator records what the hosts are asked. Returns that reach.
 ///
@@ -1195,6 +1200,7 @@ fn write_hosts_reach(
     sources: &BTreeMap<String, Found>,
     database: &Database<'static>,
     library: &unit::Library,
+    codex: Option<Arc<LibraryCodex>>,
 ) -> Result<HostsReach, Error> {
     let reach = hosts_reach(configuration, root, hosts, database);
     if holds_compiled(root, &hosts.folder, sources, database, &reach.files) {
@@ -1210,7 +1216,9 @@ fn write_hosts_reach(
         alone.delete(id);
     }
     let orchestrator = whole_workspace(configuration, ColorChoice::Never, false)?;
-    let mut server = Server::new(alone, decode_prelude, server_settings(&orchestrator)).keeping_lowering_inputs();
+    let mut server = Server::new(alone, decode_prelude, server_settings(&orchestrator))
+        .with_library(codex)
+        .keeping_lowering_inputs();
     server.analyze()?;
     let held = server.database().read_only();
     let folder = &hosts.folder;
@@ -1239,8 +1247,10 @@ fn write_hosts_reach(
     Ok(reach)
 }
 
-/// The project's database: every file the analyzer loads with the prelude, and each `.sharp` file of a package as a
-/// file of the project, which the compile checks too. Also gives the IDs of those packaged files.
+/// The project's database: every file the analyzer loads with the prelude, each `.sharp` file of a package as a file of
+/// the project, which the compile checks too, and each of the standard library as a built-in file, which no analysis
+/// scans, since the library's codex stands for it, [`library_codex`]. Also gives the IDs of the packaged files the
+/// compile checks.
 pub(crate) fn project_database(
     orchestrator: &Orchestrator<'_>,
     workspace: &Path,
@@ -1254,9 +1264,14 @@ fn with_packages(mut database: Database<'static>) -> (Database<'static>, HashSet
     let packaged: Vec<File> = database
         .files()
         .filter(|file| file.file_type == FileType::Vendored && Dialect::of(file).is_sharp())
-        .map(|file| File { modified_ns: file.modified_ns, ..copy_of(&file, FileType::Host, file.contents.clone()) })
+        .map(|file| {
+            let file_type = if file.is_standard_library { FileType::Builtin } else { FileType::Host };
+
+            File { modified_ns: file.modified_ns, ..copy_of(&file, file_type, file.contents.clone()) }
+        })
         .collect();
-    let included: HashSet<FileId> = packaged.iter().map(|file| file.id).collect();
+    let included: HashSet<FileId> =
+        packaged.iter().filter(|file| file.file_type == FileType::Host).map(|file| file.id).collect();
     for file in packaged {
         database.add(file);
     }
@@ -1278,6 +1293,7 @@ fn package_files(database: &Database<'_>, included: &HashSet<FileId>) -> Vec<Fil
 /// of the project, which the compile checks too.
 fn copy_of(file: &File, file_type: FileType, contents: Cow<'static, [u8]>) -> File {
     let mut copy = File::new(file.name.clone(), file_type, file.path.clone(), contents);
+    copy.id = file.id;
     copy.is_standard_library = file.is_standard_library;
     copy.folder_namespace = file.folder_namespace.clone();
     copy.is_project = file.is_project;
@@ -1593,7 +1609,10 @@ fn hosted(
         Loaded::Nothing | Loaded::Files(..) | Loaded::Hosted { .. } => {
             let (database, included) = project_database(&orchestrator, &configuration.source.workspace)?;
             let package_files = package_files(&database, &included);
+            let codex =
+                library_codex(&configuration.source.workspace, &database).map_err(OrchestratorError::General)?;
             let mut server = Server::new(database, decode_prelude, server_settings(&orchestrator))
+                .with_library(codex)
                 .with_package_files(package_files)
                 .scoped_to(is_lowered);
             let issues = server.analyze()?.issues;
@@ -1791,8 +1810,12 @@ fn compiled(
         .then(|| mago_database::lock::exclusive(&compiled_folder.join(WRITE_LOCK)))
         .transpose()?;
     let mut last = Record::read(&record_path);
-    if let Some(record) = last.as_mut()
-        && every_input_is_current(record, configuration, &root, &sources, &mut filesystems)
+    let all_but_the_sources = last
+        .as_ref()
+        .is_some_and(|record| every_input_but_the_sources_is_current(record, configuration, &root, &mut filesystems));
+    if all_but_the_sources
+        && let Some(record) = last.as_mut()
+        && the_sources_are_current(record, &root, &sources)
         && let Some(database) = record.outcome.report_database(&root)?
     {
         if writing.is_some() {
@@ -1815,6 +1838,15 @@ fn compiled(
 
         return Ok((std::mem::take(&mut record.outcome), database, Loaded::Nothing, start()));
     }
+    // A record that holds in all but the source files names the analysis its compile left, which this compile restores
+    // and rechecks the changed files from, as watch mode does. A run that passes its analysis on, or compiles with the
+    // extension hosts, analyzes from scratch.
+    let analysis = last
+        .as_ref()
+        .filter(|_| all_but_the_sources && keeping == Keeping::Nothing && hosts.is_none())
+        .and_then(|record| {
+            Some((std::fs::read(compiled_folder.join(ANALYSIS)).ok()?, analysis_key(configuration, record.marker)))
+        });
     let (hosts, held) = match hosts {
         Some((hosts, (lock, held, exclusive, stale))) => (stale.then_some(hosts), Some((hosts, lock, held, exclusive))),
         None => (None, None),
@@ -1859,29 +1891,41 @@ fn compiled(
     load.end();
 
     let mut errors = Vec::new();
-    let library = match standard_library(&root, &database) {
-        Ok(library) => library,
-        Err(refusal) => {
-            let outcome = Outcome { errors, summary: refusal, failed: true, ..Outcome::default() };
-            let record = record.filter(|_| logger::warnings() == warnings);
-            let (outcome, database) = finish(record, &record_path, outcome, &database, Vec::new())?;
-            drop(writing);
-            if let Some((hosts, lock, held, exclusive)) = held {
-                hosts.hold(lock, held, exclusive, None)?;
-            }
+    let library =
+        match standard_library(&root, &database).and_then(|library| Ok((library, library_codex(&root, &database)?))) {
+            Ok(library) => library,
+            Err(refusal) => {
+                let outcome = Outcome { errors, summary: refusal, failed: true, ..Outcome::default() };
+                let record = record.filter(|_| logger::warnings() == warnings);
+                let (outcome, database) = finish(record, &record_path, outcome, &database, Vec::new())?;
+                drop(writing);
+                if let Some((hosts, lock, held, exclusive)) = held {
+                    hosts.hold(lock, held, exclusive, None)?;
+                }
 
-            return Ok((
-                outcome,
-                database,
-                loaded_files.map_or(Loaded::Nothing, |files| Loaded::Files(Box::new(files), Scans::default())),
-                started.or_else(start),
-            ));
-        }
-    };
+                return Ok((
+                    outcome,
+                    database,
+                    loaded_files.map_or(Loaded::Nothing, |files| Loaded::Files(Box::new(files), Scans::default())),
+                    started.or_else(start),
+                ));
+            }
+        };
+    let (library, codex) = library;
+    // The library's own package, whose root is the project's, compiles the library once for every platform, as PHP#
+    // releases it, so each of its compiled files names the release in place of this checker build.
+    let releases_library = database.files().any(|file| {
+        file.is_standard_library
+            && file.file_type == FileType::Host
+            && library_package(&root, &file).is_ok_and(|package| package == root)
+    });
+    let checker = if releases_library { unit::release_checker(VERSION) } else { BUILD_ID };
     let mut reach = None;
     if let Some((hosts, ..)) = &hosts {
         let phase = Phase::start("hosts");
-        reach = Some(silenced(|| write_hosts_reach(configuration, &root, hosts, &sources, &database, &library))?);
+        reach = Some(silenced(|| {
+            write_hosts_reach(configuration, &root, hosts, &sources, &database, &library, codex.clone())
+        })?);
         phase.end();
         started = start();
     }
@@ -1907,6 +1951,7 @@ fn compiled(
     let reports = matches!(keeping, Keeping::Analysis | Keeping::Hosted)
         && database.files().any(|file| file.file_type == FileType::Host && !included.contains(&file.id));
     let server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator))
+        .with_library(codex)
         .keeping_lowering_inputs()
         .with_package_files(package_files);
     // The analysis with the hosts that reads the files this compile loaded, or analyzes them all again, takes this
@@ -1920,7 +1965,12 @@ fn compiled(
     // the files it loads would. A compile alone needs the node-analysis hooks only in the files it lowers.
     let mut server =
         if reports { server.scoped_to(move |file| !included.contains(&file.id)) } else { server.scoped_to(is_lowered) };
-    let issues = server.analyze()?.issues;
+    // The analysis the last compile left, restored, rechecks only what changed since. One it can't restore leaves the
+    // server to analyze the whole workspace.
+    if let Some((bytes, key)) = &analysis {
+        server.restore(bytes, key)?;
+    }
+    let issues = server.analyze_changed()?.issues;
     // The requests of this analysis alone: a file the compile analyzes again to lower it makes the same ones.
     let requests = orchestrator.get_analyzer_plugin_registry().take_return_type_requests();
     let hidden = Hidden::new(configuration)?;
@@ -1942,11 +1992,19 @@ fn compiled(
         Some(compiled) => read_listed(&compiled),
         None => Ok(None),
     };
-    // The generation of the `.sharp` folder the compile writes, while the project has a PHP# file to compile.
-    let generation = writing.as_ref().map(|_| Generation::start(&compiled_folder)).transpose()?;
+    // The generation of the `.sharp` folder the compile writes, while the project has a PHP# file to compile. The
+    // library's own package writes a plain `current` folder in place of a generation and its link, since a copy of
+    // the package, as Composer's path repository makes, keeps no link.
+    let current = compiled_folder.join(unit::CURRENT_GENERATION);
+    if releases_library && current.is_symlink() {
+        std::fs::remove_file(&current).map_err(|error| DatabaseError::io(IOAction::DeleteFile, &current, error))?;
+    }
+    let generation =
+        writing.as_ref().filter(|_| !releases_library).map(|_| Generation::start(&compiled_folder)).transpose()?;
     let write = |file: &File, bytes: Vec<u8>| {
         let wrote = match (compiled_path_of(&root, &sources, file)?, &generation) {
             (Some(compiled), Some(generation)) => generation.write(&compiled, &bytes)?,
+            (Some(compiled), None) if releases_library => write_if_changed(&compiled, &bytes)?,
             _ => false,
         };
 
@@ -1984,7 +2042,7 @@ fn compiled(
                 checked.issues
             })
         },
-        BUILD_ID,
+        checker,
         &library,
         |issues| hidden.shown(issues, &read_database),
     );
@@ -1992,7 +2050,15 @@ fn compiled(
         std::panic::set_hook(printing);
     }
     drop(hosts_files);
-    let ((compilations, compiled_files), hosts_compiled) = compilations?;
+    let ((compilations, mut compiled_files), hosts_compiled) = compilations?;
+    if !outcomes_kept {
+        compiled_files.forget_law_refusals();
+    }
+    let codex_bytes = if releases_library {
+        Some(server.library_codex(|issues| hidden.shown(issues, &read_database))?.encode(VERSION)?)
+    } else {
+        None
+    };
     let write_phase = Phase::start("write");
     let database = server.database();
     let mut stamped = in_path_order(stamped);
@@ -2057,11 +2123,11 @@ fn compiled(
     let inputs = listener_inputs(database, |path| stamp_of(&root, database, path))?;
     if !inputs.is_empty() {
         let externs = server.extern_attributes();
-        let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| accepted.contains(&line.file_id)).collect();
+        let tabled = |file_id: &FileId| in_listener_table(&accepted, server.database(), file_id);
+        let externs: Vec<&ExternAttributes> = externs.iter().filter(|line| tabled(&line.file_id)).collect();
         let families = server.families();
-        let families: Vec<&Family> = families.iter().filter(|family| accepted.contains(&family.file_id)).collect();
-        let accepted: Vec<&Listener> =
-            listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
+        let families: Vec<&Family> = families.iter().filter(|family| tabled(&family.file_id)).collect();
+        let accepted: Vec<&Listener> = listeners.iter().filter(|listener| tabled(&listener.file_id)).collect();
         let effects = server.extern_effects();
         let table = compiled_folder.join(unit::CURRENT_GENERATION).join(LISTENERS);
         let dispatcher = server.dispatcher_namespace();
@@ -2071,14 +2137,19 @@ fn compiled(
         if let Some(generation) = &generation {
             generation.write(&table, &bytes)?;
             published.push((table, unit::source_hash(&bytes)));
+        } else if releases_library {
+            write_if_changed(&table, &bytes)?;
+            published.push((table, unit::source_hash(&bytes)));
         }
     }
     if let Some(generation) = generation {
         generation.publish(&compiled_folder)?;
-        if let Some(record) = record.as_mut() {
-            for (path, hash) in &published {
-                record.output(path, *hash);
-            }
+    } else if releases_library {
+        collect_generations(&compiled_folder)?;
+    }
+    if let Some(record) = record.as_mut() {
+        for (path, hash) in &published {
+            record.output(path, *hash);
         }
     }
     if compiled_folder.is_dir() {
@@ -2088,7 +2159,29 @@ fn compiled(
             record.output(&compiled_files_path, unit::source_hash(&bytes));
         }
         written.insert(compiled_files_path);
+        // The analysis this compile ran, under the key of this compile's record, for the next compile to restore when
+        // only source files changed since, written while the compile keeps that record, as it keeps it below. A run with
+        // extension hosts, or one that passes its analysis on, writes none.
+        if keeping == Keeping::Nothing
+            && held.is_none()
+            && logger::warnings() == warnings
+            && outcomes_kept
+            && let Some(record) = record.as_ref()
+            && let Some(bytes) = server.persist(&analysis_key(configuration, record.marker))?
+        {
+            let analysis = compiled_folder.join(ANALYSIS);
+            write_by_rename(&analysis, &bytes)?;
+            written.insert(analysis);
+        }
         written.insert(compiled_folder.join(PROOFS));
+        if let Some(bytes) = &codex_bytes {
+            let codex = compiled_folder.join(LIBRARY_CODEX);
+            write_if_changed(&codex, bytes)?;
+            if let Some(record) = record.as_mut() {
+                record.output(&codex, unit::source_hash(bytes));
+            }
+            written.insert(codex);
+        }
         let autoload = compiled_folder.join(AUTOLOAD);
         let bytes = autoload_script(&root)?;
         write_if_changed(&autoload, &bytes)?;
@@ -2394,7 +2487,8 @@ impl Record {
     /// `sources`, and stamps each input the loader and the compile read apart from the analysis. Those are the
     /// `composer.json` of each PHP# source's folder, or of the nearest folder above it that holds one, as the loader
     /// reads it, each absent one below it, Composer's `installed.json`, the autoload maps of `autoloader`, the baseline,
-    /// and the `.sharp` folder of each folder that holds a package's PHP# file, absent unless the compile refuses it. `filesystems` tells which
+    /// and the `.sharp` folder of each folder that holds a package's PHP# file but the standard library's, whose package
+    /// holds the one PHP# compiled it into, absent unless the compile refuses it. `filesystems` tells which
     /// filesystems record every write, for the outputs' statuses. Gives none when the temp file can't be created or an
     /// input can't be stamped, and the compile then keeps no record.
     fn start(
@@ -2422,7 +2516,7 @@ impl Record {
                     break;
                 }
             }
-            if name.starts_with("vendor/") {
+            if name.starts_with("vendor/") && package_of(name.as_bytes()).as_deref() != Some(STANDARD_LIBRARY_PACKAGE) {
                 for folder in package_compiled_folders_of(name) {
                     inputs.push(stamp(folder.as_bytes())?);
                 }
@@ -2566,18 +2660,23 @@ fn every_input_is_current(
     sources: &BTreeMap<String, Found>,
     filesystems: &mut Filesystems,
 ) -> bool {
-    let found: Vec<(&String, &Found)> =
-        sources.iter().filter(|(name, _)| !record.outputs.contains_key(name.as_str())).collect();
-    let hashes_as =
-        |path: &Path, hash: &[u8; 16]| std::fs::read(path).is_ok_and(|bytes| unit::source_hash(&bytes) == *hash);
+    every_input_but_the_sources_is_current(record, configuration, root, filesystems)
+        && the_sources_are_current(record, root, sources)
+}
 
+/// Whether `record` stands for a compile of the project at `root` with `configuration` now in all but its source
+/// files: its header names this checker build, `root` and `configuration`, each output is unchanged, and each other
+/// input passes `unit::stamp`, as [`every_input_is_current`] checks them. A compile whose record holds this rechecks
+/// the sources from the analysis that record's compile left in [`ANALYSIS`].
+fn every_input_but_the_sources_is_current(
+    record: &Record,
+    configuration: &Configuration,
+    root: &Path,
+    filesystems: &mut Filesystems,
+) -> bool {
     record.build == BUILD_ID
         && record.root == root
         && record.configuration == configuration_hash(configuration)
-        && found.len() == record.files.len()
-        && found.iter().zip(&record.files).all(|((name, Found(_, real)), (recorded, (Found(_, recorded_real), _)))| {
-            *name == recorded && real == recorded_real
-        })
         && record.outputs.iter().all(|(name, output)| {
             let path = root.join(name);
             is_unchanged(&path, Some(output), filesystems) || hashes_as(&path, &output.1)
@@ -2588,9 +2687,38 @@ fn every_input_is_current(
             Ok(None) => (*size, *hash) == (0, [0; 16]) && !root.join(path).exists(),
             Err(_) => false,
         })
+}
+
+/// Whether `record` holds the source files `sources` of the project at `root`, at the same real paths, each unchanged,
+/// as [`every_input_is_current`] checks them.
+fn the_sources_are_current(record: &Record, root: &Path, sources: &BTreeMap<String, Found>) -> bool {
+    let found: Vec<(&String, &Found)> =
+        sources.iter().filter(|(name, _)| !record.outputs.contains_key(name.as_str())).collect();
+
+    found.len() == record.files.len()
+        && found.iter().zip(&record.files).all(|((name, Found(_, real)), (recorded, (Found(_, recorded_real), _)))| {
+            *name == recorded && real == recorded_real
+        })
         && found.iter().zip(record.files.values()).all(|((name, Found(status, _)), (Found(recorded, _), hash))| {
             (status == recorded && status.is_older_than(record.marker)) || hashes_as(&root.join(name), hash)
         })
+}
+
+/// The key of the analysis a compile with `configuration` writes beside its record, whose marker is `marker`: this
+/// checker build, the configuration's hash and the marker, so the analysis stands only for the compile whose record
+/// holds, whose other inputs' stamps that record checks.
+#[allow(clippy::little_endian_bytes)]
+fn analysis_key(configuration: &Configuration, marker: i64) -> Vec<u8> {
+    let mut key = BUILD_ID.to_vec();
+    key.extend(configuration_hash(configuration));
+    key.extend(marker.to_le_bytes());
+
+    key
+}
+
+/// Whether the bytes of the file at `path` hash to `hash`, as `unit::source_hash` hashes them.
+fn hashes_as(path: &Path, hash: &[u8; 16]) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| unit::source_hash(&bytes) == *hash)
 }
 
 /// Whether the file at `path`, an output a compile recorded as `output`, is the one it wrote: its status is the one
@@ -2757,13 +2885,8 @@ pub(crate) fn standard_library(root: &Path, database: &impl DatabaseReader) -> R
     let Some(file) = database.files().find(|file| file.is_standard_library) else {
         return Ok(unit::Library::default());
     };
-    let source = source_path(root, &file);
-    let Some(package) = source.ancestors().skip(1).find(|folder| folder.join("composer.json").is_file()) else {
-        return Err(format!(
-            "{} belongs to no Composer package. Reinstall {STANDARD_LIBRARY_PACKAGE}.",
-            source.display()
-        ));
-    };
+    let package = library_package(root, &file)?;
+    let package = package.as_path();
 
     let installed = package.parent().and_then(Path::parent).map(|vendor| vendor.join("composer/installed.json"));
     let version = installed
@@ -2807,6 +2930,70 @@ pub(crate) fn standard_library(root: &Path, database: &impl DatabaseReader) -> R
     Ok(unit::Library { native_fingerprint, version: version.into_bytes() })
 }
 
+/// The folder of the Composer package that holds `file`, a file of the standard library of the project at `root`.
+///
+/// Fails when no `composer.json` is above the file.
+fn library_package(root: &Path, file: &File) -> Result<PathBuf, String> {
+    let source = source_path(root, file);
+    match source.ancestors().skip(1).find(|folder| folder.join("composer.json").is_file()) {
+        Some(package) => Ok(package.to_path_buf()),
+        None => {
+            Err(format!("{} belongs to no Composer package. Reinstall {STANDARD_LIBRARY_PACKAGE}.", source.display()))
+        }
+    }
+}
+
+/// The standard library's codex, which the project's analysis takes the library from: the one PHP# wrote at its release
+/// into the `.sharp` folder of the library's package, beside a compiled file of each of the library's files, which the
+/// engine runs. None when the project installs no standard library, or holds the library's own sources, as the
+/// library's package does.
+///
+/// Fails when the folder lacks the codex or a compiled file of a library file, or when another release wrote one, since
+/// the library's code is the code of the release that compiled it.
+pub(crate) fn library_codex(root: &Path, database: &impl DatabaseReader) -> Result<Option<Arc<LibraryCodex>>, String> {
+    let library: Vec<Arc<File>> =
+        database.files().filter(|file| file.is_standard_library && file.file_type == FileType::Builtin).collect();
+    let Some(first) = library.first() else {
+        return Ok(None);
+    };
+    let package = library_package(root, first)?;
+    let folder = package.join(unit::COMPILED_FOLDER);
+    let reinstall = format!("Reinstall {STANDARD_LIBRARY_PACKAGE} {VERSION}.");
+    let path = folder.join(LIBRARY_CODEX);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Err(format!("{} is missing, so the PHP# standard library can't be read. {reinstall}", path.display()));
+    };
+    let mut codex = LibraryCodex::decode(&bytes, VERSION).map_err(|error| match error {
+        CodexError::OtherRelease(release) => format!(
+            "This project's PHP# standard library was compiled by PHP# {release}, and mago is {VERSION}. {reinstall}"
+        ),
+        CodexError::Unreadable => format!("{} is damaged. {reinstall}", path.display()),
+    })?;
+    let release = unit::release_checker(VERSION);
+    // The release named each library file from the package's folder, and the project names it from its own.
+    let mut moved: HashMap<FileId, (FileId, Vec<u8>)> = HashMap::default();
+    for file in &library {
+        let source = source_path(root, file);
+        let Ok(relative) = source.strip_prefix(&package) else {
+            continue;
+        };
+        moved.insert(FileId::new(&File::logical_name(&package, &source)), (file.id, file.name.to_vec()));
+        let compiled = folder.join(unit::CURRENT_GENERATION).join(relative).with_extension("sharpc");
+        let Ok(bytes) = std::fs::read(&compiled) else {
+            return Err(format!("{} is missing, so {} can't run. {reinstall}", compiled.display(), source.display()));
+        };
+        if !unit::header(&bytes).is_ok_and(|header| header.checker == release) {
+            return Err(format!(
+                "{} was compiled by another release of PHP#, and mago is {VERSION}. {reinstall}",
+                compiled.display()
+            ));
+        }
+    }
+    codex.relocate(|file_id| moved.get(&file_id).cloned());
+
+    Ok(Some(Arc::new(codex)))
+}
+
 /// The inputs of the listener table, stamped as the engine reads them, which it checks only while it compiles on
 /// demand: every PHP# file, which an `on` clause or a module binding the dispatcher may join, and the listing of the
 /// folder of each and of each folder above it, which a PHP# file or a namespace folder joining or leaving changes, each
@@ -2832,6 +3019,12 @@ fn listener_inputs(
     let stamped: Vec<Option<unit::Input>> = stamped.into_iter().collect::<Result<_, _>>()?;
 
     Ok(stamped.into_iter().flatten().collect())
+}
+
+/// Whether the listener table names the lines, families and listeners of `file_id`, a file of `database`: one the compile
+/// `accepted`, or one of the standard library, which PHP# compiled at its release.
+fn in_listener_table(accepted: &HashSet<FileId>, database: &Database<'_>, file_id: &FileId) -> bool {
+    accepted.contains(file_id) || database.get_ref(file_id).is_ok_and(|file| file.is_standard_library)
 }
 
 /// The PHP source of the listener table. Its `inputs` are the files whose change makes the table out of date, each as
@@ -3070,7 +3263,7 @@ fn package_of(name: &[u8]) -> Option<String> {
 fn package_compiled_folders(root: &Path, database: &impl DatabaseReader) -> BTreeSet<String> {
     database
         .files()
-        .filter(|file| file.name.starts_with(VENDOR) && Dialect::of(file).is_sharp())
+        .filter(|file| file.name.starts_with(VENDOR) && Dialect::of(file).is_sharp() && !file.is_standard_library)
         .flat_map(|file| package_compiled_folders_of(&String::from_utf8_lossy(&file.name)).collect::<Vec<_>>())
         .filter(|compiled| root.join(compiled).is_dir())
         .collect()
@@ -3291,6 +3484,25 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
 
         assert_eq!(written_under(&root.join(unit::COMPILED_FOLDER), mago_compile), BTreeSet::new());
         assert!(Record::read(&hosts.join(INPUTS)).is_some(), "the hosts' folder is compiled again");
+    }
+
+    /// A file the hosts' compile refuses, here for a parse error, is refused again by the next compile of the same
+    /// files, so the hosts' folder keeps its record, and a compile with nothing changed compiles nothing into it.
+    #[test]
+    fn a_hosts_folder_with_a_refused_file_keeps_its_record_and_a_compile_with_no_change_writes_nothing_there() {
+        if !php_sdk() {
+            return;
+        }
+        let (_directory, root, configuration) = boxed_project();
+        write(&root, "app/Broken.sharp", "namespace App;\n\npublic class Broken\n{\n    public int count( => 1;\n}\n");
+        let hosts = HostsCompile::new(&configuration).unwrap().folder;
+        let mago_compile = || {
+            compile(&configuration, ColorChoice::Never).unwrap();
+        };
+        mago_compile();
+
+        assert!(Record::read(&hosts.join(INPUTS)).is_some(), "the hosts' folder kept no record");
+        assert_eq!(written_under(&hosts, mago_compile), BTreeSet::new());
     }
 
     /// A `vendor/` file a PHP# file calls is no input of its compiled file, which `composer.lock` stands for, so the

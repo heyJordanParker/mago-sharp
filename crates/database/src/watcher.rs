@@ -33,6 +33,8 @@ use crate::Database;
 use crate::DatabaseConfiguration;
 use crate::DatabaseReader;
 use crate::ReadDatabase;
+use crate::clock::Clock;
+use crate::clock::SystemClock;
 use crate::error::DatabaseError;
 use crate::exclusion::Exclusion;
 use crate::file::FileId;
@@ -586,7 +588,7 @@ impl<'config> DatabaseWatcher<'config> {
             return Ok(None);
         };
 
-        std::thread::sleep(Duration::from_millis(STABILITY_CHECK_MS));
+        SystemClock.sleep(Duration::from_millis(STABILITY_CHECK_MS));
 
         let reread = read_listed(path)?;
         if reread.as_ref() != Some(&contents) {
@@ -1195,6 +1197,7 @@ mod tests {
     use notify::event::Flag;
 
     use super::*;
+    use crate::clock::poll_until;
     use crate::error::IOAction;
     use crate::file::File;
 
@@ -1233,17 +1236,54 @@ mod tests {
         paths
     }
 
+    /// An operating system watcher of `folder` that reports every change, cookies included, from the time it returns: it
+    /// returns once it reported a file it wrote there.
+    fn live_watcher(folder: &Path) -> (RecommendedWatcher, Receiver<notify::Result<Event>>) {
+        let (events, received) = mpsc::channel();
+        let mut watcher = RecommendedWatcher::new(events, Config::default()).expect("the watcher should start");
+        watcher.watch(folder, RecursiveMode::Recursive).expect("the folder should be watched");
+        let ready = folder.join("ready");
+        let reported = poll_until(Duration::from_mins(1), || {
+            std::fs::write(&ready, "").expect("the file should be written");
+            received
+                .recv_timeout(Duration::from_millis(100))
+                .is_ok_and(|event| event.is_ok_and(|event| event.paths.contains(&ready)))
+        });
+        assert!(reported, "the watcher reported no write of {} within a minute", ready.display());
+
+        (watcher, received)
+    }
+
+    /// The cookies whose delete `received` reports, once `count` of them, or each within a minute.
+    fn removed_cookies(received: &Receiver<notify::Result<Event>>, count: usize) -> HashSet<PathBuf> {
+        let deadline = Instant::now() + Duration::from_mins(1);
+        let mut removed = HashSet::new();
+        while removed.len() < count
+            && let Ok(event) = received.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            let event = event.expect("the watcher should report no error");
+            if event.kind.is_remove() {
+                removed.extend(event.paths.into_iter().filter(|path| is_cookie(path)));
+            }
+        }
+
+        removed
+    }
+
     /// No handler sees a cookie: not its watcher's own, nor the one a second watcher of the same folder writes once the
-    /// first is live, and each is gone from the folder.
+    /// first is live, and each is gone from the folder once its delete is reported.
     #[test]
     fn a_cookie_never_reaches_a_handler() {
         let (_directory, root) = project();
         let app = [(root.join("app"), RecursiveMode::Recursive)];
+        let (_live, reported) = live_watcher(&root.join("app"));
         let (events, received) = mpsc::channel();
 
         let _watcher = start_watcher(events, &app, Duration::from_millis(50)).expect("the watcher should start");
         let _second = start_watcher(|_: notify::Result<Event>| {}, &app, Duration::from_millis(50))
             .expect("the second watcher should start");
+        let cookies = removed_cookies(&reported, 2);
+        assert_eq!(cookies.len(), 2, "each watcher's cookie should be deleted: {cookies:?}");
         write(&root, "app/a.php", "<?php\n\necho 1;\n");
 
         let file = root.join("app/a.php");
@@ -1364,15 +1404,7 @@ mod tests {
 
     /// Whether `log` holds `line` within a minute.
     fn logs(log: &Log, line: &str) -> bool {
-        let deadline = Instant::now() + Duration::from_mins(1);
-        while !log.text().contains(line) {
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        true
+        poll_until(Duration::from_mins(1), || log.text().contains(line))
     }
 
     /// A watcher that reports, in each folder it watches, a `composer.lock` written before it started and then the
@@ -1643,13 +1675,13 @@ mod tests {
 
     /// The first round of `watcher` that holds a change, within a minute.
     fn changes_within_a_minute(watcher: &mut DatabaseWatcher<'static>) -> Vec<FileId> {
-        let deadline = Instant::now() + Duration::from_mins(1);
-        loop {
-            let changed = watcher.wait().expect("the watcher should report its changes");
-            if !changed.is_empty() || Instant::now() >= deadline {
-                return changed;
-            }
-        }
+        let mut changed = Vec::new();
+        poll_until(Duration::from_mins(1), || {
+            changed = watcher.wait().expect("the watcher should report its changes");
+            !changed.is_empty()
+        });
+
+        changed
     }
 
     /// A poll reads each file's status alone, never its contents: a poll of 1,000 unchanged files that a read would
@@ -1734,13 +1766,13 @@ mod tests {
             watcher
                 .watch_of::<DropsEvents>(WatchOptions::default(), TEST_COOKIE, |_| None)
                 .expect("the watcher should start");
-            let deadline = Instant::now() + Duration::from_mins(1);
-            loop {
-                let changed = watcher.wait().expect("the watcher should report its changes");
-                if log.text().contains("dropped events") || Instant::now() >= deadline {
-                    break changed;
-                }
-            }
+            let mut changed = Vec::new();
+            poll_until(Duration::from_mins(1), || {
+                changed = watcher.wait().expect("the watcher should report its changes");
+                log.text().contains("dropped events")
+            });
+
+            changed
         });
 
         (watcher, changed, log.text())
@@ -1847,13 +1879,11 @@ mod tests {
         watcher
             .watch_of::<EditsChangedPhp>(WatchOptions::default(), TEST_COOKIE, |_| None)
             .expect("the watcher should start");
-        let deadline = Instant::now() + Duration::from_mins(1);
-        let waited = loop {
-            match watcher.wait() {
-                Ok(changed) if changed.is_empty() && Instant::now() < deadline => {}
-                waited => break waited,
-            }
-        };
+        let mut waited = Ok(Vec::new());
+        poll_until(Duration::from_mins(1), || {
+            waited = watcher.wait();
+            waited.as_ref().map_or(true, |changed| !changed.is_empty())
+        });
 
         (watcher, waited)
     }
@@ -2037,28 +2067,25 @@ mod tests {
     /// Has the [`ReportsOnRequest`] watcher of `folder` report that the file at `path` was edited, once it watches the
     /// folder.
     fn report(folder: &Path, path: PathBuf) {
-        let deadline = Instant::now() + Duration::from_mins(1);
-        let handler = loop {
-            let watching = ON_REQUEST
+        let mut watching = None;
+        let watched = poll_until(Duration::from_mins(1), || {
+            watching = ON_REQUEST
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .iter()
                 .find(|(watched, _)| watched == folder)
                 .map(|(_, handler)| Arc::clone(handler));
-            match watching {
-                Some(handler) => break handler,
-                None => {
-                    assert!(Instant::now() < deadline, "no watcher watches {}", folder.display());
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        };
+            watching.is_some()
+        });
+        let handler = watching.filter(|_| watched).unwrap_or_else(|| panic!("no watcher watches {}", folder.display()));
         let edit = EventKind::Modify(ModifyKind::Data(DataChange::Content));
         handler.lock().unwrap_or_else(PoisonError::into_inner).handle_event(Ok(Event::new(edit).add_path(path)));
     }
 
-    /// A stream of edits to another file never holds back the round of an earlier edit: the round that holds
-    /// `app/a.php` starts within 200 ms of its edit, while `app/b.php` changes every 100 ms for 2 s.
+    /// A stream of edits to another file never holds back the round of an earlier edit: `app/b.php` changes at each look
+    /// of a `poll_until`, at most 100 ms apart, until the round that holds `app/a.php` is reported, so the round ends the
+    /// stream. A watcher that held the round back for as long as changes came would report it only once the stream ran
+    /// out, at its minute.
     #[test]
     fn a_stream_of_edits_to_another_file_never_holds_back_the_round_of_an_earlier_edit() {
         let (_directory, root) = project();
@@ -2076,21 +2103,30 @@ mod tests {
         let app = root.join("app");
 
         write(&root, "app/a.php", "<?php echo 2;\n");
-        let edited = Instant::now();
         report(&app, app.join("a.php"));
-        let stream = std::thread::spawn(move || {
-            for count in 0..20 {
-                std::thread::sleep(Duration::from_millis(100));
-                std::fs::write(app.join("b.php"), format!("<?php echo {count};\n")).expect("b.php should be written");
-                report(&app, app.join("b.php"));
+        let reported = Arc::new(AtomicBool::new(false));
+        let stream = std::thread::spawn({
+            let reported = Arc::clone(&reported);
+            move || {
+                let mut count = 0;
+                poll_until(Duration::from_mins(1), || {
+                    if reported.load(Ordering::Acquire) {
+                        return true;
+                    }
+                    count += 1;
+                    std::fs::write(app.join("b.php"), format!("<?php echo {count};\n"))
+                        .expect("b.php should be written");
+                    report(&app, app.join("b.php"));
+                    false
+                })
             }
         });
         let round = watcher.wait().expect("the watcher should report its changes");
-        let started = edited.elapsed();
-        stream.join().expect("the stream of edits should end");
+        reported.store(true, Ordering::Release);
+        let ended_by_the_round = stream.join().expect("the stream of edits should end");
 
         assert!(round.contains(&FileId::new(b"app/a.php")), "{round:?}");
-        assert!(started <= Duration::from_millis(200), "the round of app/a.php started {started:?} after its edit");
+        assert!(ended_by_the_round, "app/b.php changed for a minute, and the round of app/a.php came only after");
     }
 
     /// A cookie the watcher has not reported is written again, as one a watcher missed while its stream started would
@@ -2100,11 +2136,8 @@ mod tests {
         let (_directory, root) = project();
         let app = root.join("app");
         let modified = || std::fs::metadata(&app).and_then(|metadata| metadata.modified()).expect("app should be read");
-        let deadline = Instant::now() + Duration::from_mins(1);
         let changed_from = |earlier| {
-            while modified() == earlier && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            poll_until(Duration::from_mins(1), || modified() != earlier);
             modified()
         };
         let before = modified();

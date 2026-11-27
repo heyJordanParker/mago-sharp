@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use mago_analyzer::external::AFTER_FILE_ANALYSIS_BATCH_SIZE;
 use mago_analyzer::external::ExternalAnalyzer;
@@ -436,16 +435,17 @@ fn orchestrator_loads_initialization_stubs_into_the_source_database() {
 /// The deadline of each host the deadline tests start: the CPU time one unit of a request may use with no progress.
 const DEADLINE: Duration = Duration::from_millis(500);
 
-/// The backstop of a host whose hook sleeps forever: the wall time one unit of a request may go with no progress, ten
-/// times `DEADLINE`, as `request-timeout-ms` gives it.
-const BACKSTOP: Duration = Duration::from_secs(5);
+/// The backstop of a host whose hook sleeps forever: the wall time one unit of a request may go with no progress,
+/// twice `DEADLINE`. The test waits it out for real, since a hook's `sleep` waits real time inside the interpreter, so
+/// it is short, and each test asserts the error that names the hook, never the wall time (#958).
+const BACKSTOP: Duration = Duration::from_secs(1);
 
 /// The backstop of a host whose test checks the deadline of CPU time or no deadline: long past any test, so only
 /// `DEADLINE` can stop it, however starved of CPU a loaded machine leaves its thread.
 const UNREACHED_BACKSTOP: Duration = Duration::from_mins(2);
 
 /// An extension host whose plugin `rules` registers three after-analysis hooks: `QuickRule`, which sleeps for 0.6 times
-/// `BACKSTOP`, then `SpinsRule`, which never finishes, then `SecondQuickRule`.
+/// `BACKSTOP`, 600 ms, then `SpinsRule`, which never finishes, then `SecondQuickRule`.
 const HOST_WHOSE_SECOND_AFTER_ANALYSIS_HOOK_NEVER_FINISHES: &str = r#"<?php
 
 declare(strict_types=1);
@@ -462,7 +462,7 @@ final class QuickRule implements AfterAnalysisHook
 {
     public function afterAnalysis(AfterAnalysisContext $context): void
     {
-        usleep(3_000_000);
+        usleep(600_000);
     }
 }
 
@@ -471,7 +471,7 @@ final class SpinsRule implements AfterAnalysisHook
     public function afterAnalysis(AfterAnalysisContext $context): void
     {
         while (true) {
-            sleep(1);
+            usleep(100_000);
         }
     }
 }
@@ -534,7 +534,7 @@ final class HungFilter implements Plugin, IssueFilterHook
     public function filterIssue(IssueFilterContext $context): IssueFilterDecision
     {
         while (true) {
-            sleep(1);
+            usleep(100_000);
         }
     }
 }
@@ -575,7 +575,7 @@ final class HungFile implements Plugin, AfterFileAnalysisHook
     public function afterFileAnalysis(AfterFileAnalysisContext $context): void
     {
         while (true) {
-            sleep(1);
+            usleep(100_000);
         }
     }
 }
@@ -745,15 +745,11 @@ fn an_after_analysis_hook_that_never_finishes_fails_at_the_deadline_naming_its_h
         Arc::new(registry),
     );
 
-    let started_at = Instant::now();
     let error = service.analyze().expect_err("the after-analysis hook should fail at the deadline");
-    let elapsed = started_at.elapsed();
 
-    // `QuickRule` sleeps for 0.6 times the backstop, then `SpinsRule` sleeps past the rest of it.
-    assert!(elapsed >= BACKSTOP && elapsed < BACKSTOP * 2, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
-        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 5000 ms of wall time in the after-analysis hooks of plugin `rules`, in the hook `SpinsRule`"
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 1000 ms of wall time in the after-analysis hooks of plugin `rules`, in the hook `SpinsRule`"
     );
 }
 
@@ -777,14 +773,11 @@ fn an_issue_filter_that_never_finishes_fails_at_the_deadline_naming_its_file() {
         Arc::new(registry),
     );
 
-    let started_at = Instant::now();
     let error = service.analyze().expect_err("the issue filter should fail at the deadline");
-    let elapsed = started_at.elapsed();
 
-    assert!(elapsed >= BACKSTOP && elapsed < BACKSTOP * 2, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
-        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 5000 ms of wall time in the issue-filter hooks of src/Route.php, in the hook `HungFilter`"
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 1000 ms of wall time in the issue-filter hooks of src/Route.php, in the hook `HungFilter`"
     );
 }
 
@@ -809,14 +802,11 @@ fn an_after_file_hook_that_never_finishes_fails_at_the_deadline_naming_its_hook_
         Arc::new(registry),
     );
 
-    let started_at = Instant::now();
     let error = service.oneshot(FileId::new(b"src/Route.php")).expect_err("the after-file hook should fail");
-    let elapsed = started_at.elapsed();
 
-    assert!(elapsed >= BACKSTOP && elapsed < BACKSTOP * 2, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
-        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 5000 ms of wall time in the hooks of src/Route.php, in the hook `HungFile`"
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 1000 ms of wall time in the hooks of src/Route.php, in the hook `HungFile`"
     );
 }
 
@@ -842,11 +832,8 @@ fn an_after_file_hook_that_computes_forever_fails_at_its_deadline_of_cpu_time() 
         Arc::new(registry),
     );
 
-    let started_at = Instant::now();
     let error = service.oneshot(FileId::new(b"src/Route.php")).expect_err("the after-file hook should fail");
-    let elapsed = started_at.elapsed();
 
-    assert!(elapsed >= DEADLINE, "the analysis failed after {elapsed:?}");
     assert_eq!(
         error.to_string(),
         "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 500 ms of CPU time in the hooks of src/Route.php, in the hook `SpinningFile`"

@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -318,11 +319,11 @@ impl TArray {
 }
 
 impl TType for TArray {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
         match self {
-            TArray::Keyed(keyed_array) => keyed_array.get_child_nodes(),
-            TArray::List(list) => list.get_child_nodes(),
-            TArray::Set(element_type) => vec![TypeRef::Union(element_type)],
+            TArray::Keyed(keyed_array) => keyed_array.visit_child_nodes(visit),
+            TArray::List(list) => list.visit_child_nodes(visit),
+            TArray::Set(element_type) => visit(TypeRef::Union(element_type)),
         }
     }
 

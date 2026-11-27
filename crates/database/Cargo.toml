@@ -32,6 +32,8 @@ default = ["loader", "watcher"]
 serde = ["dep:serde"]
 loader = ["dep:glob", "dep:walkdir", "dep:serde_json"]
 watcher = ["loader", "dep:notify"]
+# FakeClock, for the tests of code that waits on a deadline.
+test-util = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -229,8 +230,8 @@ impl TPropertiesOf {
 }
 
 impl TType for TPropertiesOf {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        vec![TypeRef::Union(&self.target_type)]
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        visit(TypeRef::Union(&self.target_type))
     }
 
     fn needs_population(&self) -> bool {

@@ -4780,13 +4780,13 @@ fn report_no_effect(binary: &Binary, context: &mut Context<'_, '_, '_>) {
     );
 }
 
-/// Whether a write target is a `const` local or a parameter, or an index of one, which `check_const_write` and the
-/// analyzer refuse to change. An extension's `ref` receiver changes.
+/// Whether a write target is a `const` or `using` local or a parameter, or an index of one, which `check_const_write`
+/// and the analyzer refuse to change. An extension's `ref` receiver changes.
 fn never_changes(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
     match target {
         Expression::ConstantAccess(access) => matches!(
             context.names.binding(&access.name),
-            Some(Binding::Local(local)) if local.kind == LocalKind::Const
+            Some(Binding::Local(local)) if matches!(local.kind, LocalKind::Const | LocalKind::Using)
                 || (local.kind == LocalKind::Parameter && !is_ref_receiver(&local, context))
         ),
         Expression::ArrayAccess(access) => never_changes(access.array, context),
@@ -6586,6 +6586,13 @@ fn check_const_write(target: &Expression, write: &str, written: Written<'_, '_>,
                 .with_annotation(Annotation::primary(target.span()).with_message("Changed here."))
                 .with_annotation(Annotation::secondary(local.declaration).with_message("Declared with `const` here."))
                 .with_help(format!("Declare `{name}` with `let` to change it.")),
+        ),
+        LocalKind::Using => context.report(
+            Issue::error(format!(
+                "Cannot {write} `{name}`: it is declared with `using`, and its block disposes the value it holds."
+            ))
+            .with_annotation(Annotation::primary(target.span()).with_message("Changed here."))
+            .with_annotation(Annotation::secondary(local.declaration).with_message("Declared with `using` here.")),
         ),
         LocalKind::Parameter if !is_ref_receiver(&local, context) && !is_will_set_value(&local, context) => {
             let snippet = |span: Span| String::from_utf8_lossy(context.get_code_snippet(span)).into_owned();

@@ -22,11 +22,13 @@ use mago_allocator::Arena;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::attribute::AttributeMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::reference::SymbolReferenceKind;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::symbol::SymbolIdentifier;
+use mago_codex::visibility::Visibility;
 use mago_database::file::FileId;
 use mago_names::DYNAMICALLY_ACCESSED;
 use mago_names::EXPORT;
@@ -925,10 +927,12 @@ struct Reach {
 
 /// Each reach of spec section 5 the checker can't see, each a use from outside any namespace:
 ///
-/// - a class that carries a marked attribute, whose framework reaches the class and every member it has, the ones it
-///   inherits included, each on the class that declares it, so that class is reached as a type too
+/// - a class that carries a marked attribute, whose framework reaches the class and every public member it has, the
+///   ones it inherits included, each on the class that declares it, so that class is reached as a type too
 /// - a class that extends a marked base class, directly or not, as an Eloquent model extends `Model`: the class and
 ///   each public and protected method it declares
+///
+/// An `internal` member is its namespace's, which no framework reaches.
 /// - a member that carries a marked attribute, an `[Export]` method, which plain PHP calls through the global function
 ///   it declares, section 23, and a program's `main`, which the engine calls, section 27: the member and its class
 /// - a class in one of `test_files`, the files of an `autoload-dev` folder, which its test runner creates, as PHPUnit
@@ -943,17 +947,39 @@ fn unseen_reaches(codebase: &CodebaseMetadata, test_files: &[FileId]) -> Vec<Rea
         if let Some(attribute) = marked_attribute(codebase, &class.attributes) {
             let by = ReachedBy::Attribute(attribute);
             reaches.push(on(empty_word(), by));
-            reaches.extend(class.declaring_method_ids.iter().map(|(method, declared)| Reach {
-                member: *method,
-                on: declared.get_class_name(),
-                by,
-            }));
-            reaches.extend(class.declaring_property_ids.iter().map(|(property, declaring)| Reach {
-                member: *property,
-                on: *declaring,
-                by,
-            }));
-            reaches.extend(class.constants.keys().map(|constant| on(*constant, by)));
+            reaches.extend(
+                class
+                    .declaring_method_ids
+                    .iter()
+                    .filter(|(method, declared)| {
+                        codebase.function_likes.get(&(declared.get_class_name(), **method)).is_some_and(|method| {
+                            method
+                                .method_metadata
+                                .as_ref()
+                                .is_some_and(|metadata| is_public_member(metadata.visibility, method.flags))
+                        })
+                    })
+                    .map(|(method, declared)| Reach { member: *method, on: declared.get_class_name(), by }),
+            );
+            reaches.extend(
+                class
+                    .declaring_property_ids
+                    .iter()
+                    .filter(|(property, declaring)| {
+                        codebase
+                            .get_class_like(**declaring)
+                            .and_then(|declaring| declaring.properties.get(*property))
+                            .is_some_and(|property| is_public_member(property.read_visibility, property.flags))
+                    })
+                    .map(|(property, declaring)| Reach { member: *property, on: *declaring, by }),
+            );
+            reaches.extend(
+                class
+                    .constants
+                    .iter()
+                    .filter(|(_, constant)| is_public_member(constant.visibility, constant.flags))
+                    .map(|(constant, _)| on(*constant, by)),
+            );
             continue;
         }
         let methods: Vec<(Word, &FunctionLikeMetadata)> = class
@@ -989,7 +1015,10 @@ fn unseen_reaches(codebase: &CodebaseMetadata, test_files: &[FileId]) -> Vec<Rea
                             .declaring_method_ids
                             .get(name)
                             .is_none_or(|declaring| declaring.get_class_name() == *class_name)
-                            && method.method_metadata.as_ref().is_some_and(|metadata| !metadata.visibility.is_private())
+                            && method.method_metadata.as_ref().is_some_and(|metadata| {
+                                is_public_member(metadata.visibility, method.flags)
+                                    || metadata.visibility.is_protected()
+                            })
                     })
                     .map(|(name, _)| (*name, by)),
             );
@@ -1019,6 +1048,11 @@ fn unseen_reaches(codebase: &CodebaseMetadata, test_files: &[FileId]) -> Vec<Rea
     }
 
     reaches
+}
+
+/// Whether a member of `visibility` and `flags` is public as PHP# writes it, `public` and not `internal`, spec section 5.
+const fn is_public_member(visibility: Visibility, flags: MetadataFlags) -> bool {
+    visibility.is_public() && !flags.is_internal_reach()
 }
 
 /// [`types_only_their_namespace_uses`], of the uses [`uses_on`] gives.

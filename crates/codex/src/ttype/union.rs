@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -1267,8 +1268,8 @@ impl TUnion {
 }
 
 impl TType for TUnion {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        self.types.iter().map(TypeRef::Atomic).collect()
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.types.iter().try_for_each(|atomic| visit(TypeRef::Atomic(atomic)))
     }
 
     fn needs_population(&self) -> bool {

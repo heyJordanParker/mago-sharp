@@ -503,19 +503,31 @@ fn proof_key(
 /// a case can hold too. An invariant of a machine has none.
 /// A law without a body that states a `when`, which its one case holds as its first condition, first reads it with
 /// [`CONDITION_LEMMAS`] and the program's own definitions it uses, then closes each case of each branch it takes.
+/// A law over an enum runs them on each case of each enum, after the law's split.
 fn scripted(law: &Law, program: &Program<'_>) -> Option<String> {
     let (plain, recursive) = program.definitions(&law.statement);
+    let split = &law.proof.split;
     if let Some(opening) = &law.proof.opening {
         let steps = steps(&[], &plain, &recursive);
         if law.proof.cases.first().is_none_or(|case| case.conditions.is_empty()) {
-            return Some(format!("{opening}{steps}"));
+            if split.is_empty() {
+                return Some(format!("{opening}{steps}"));
+            }
+            return Some(format!("{opening}{split}({steps})"));
         }
         let condition: Vec<&str> = CONDITION_LEMMAS.iter().copied().chain(own(&plain)).collect();
+        let lines = [
+            "revert «when»".to_owned(),
+            format!("simp only [{}]", condition.join(", ")),
+            "and_intros".to_owned(),
+            "all_goals (intros; subst_vars)".to_owned(),
+            format!("all_goals ({steps})"),
+        ];
+        if split.is_empty() {
+            return Some(format!("{opening}{}", lines.join("\n  ")));
+        }
 
-        return Some(format!(
-            "{opening}revert «when»\n  simp only [{}]\n  and_intros\n  all_goals (intros; subst_vars)\n  all_goals ({steps})",
-            condition.join(", ")
-        ));
+        return Some(format!("{opening}{split}({})", lines.join("; ")));
     }
     if law.proof.closes.is_empty() {
         return None;
@@ -524,7 +536,7 @@ fn scripted(law: &Law, program: &Program<'_>) -> Option<String> {
         .chain(law.proof.laws.iter().map(|(statement, ..)| statement.as_str()))
         .collect();
 
-    let closed = format!("({})", steps(&statements, &plain, &recursive));
+    let closed = format!("{split}({})", steps(&statements, &plain, &recursive));
 
     Some(law.proof.closes.iter().fold(law.proof.text.clone(), |text, close| text.replace(close.as_str(), &closed)))
 }
@@ -983,7 +995,14 @@ fn refused(law: &Law, program: &Program<'_>, laws: &Laws<'_>, errored: &HashSet<
         }
     };
     let problems = program.problems(&law.statement);
-    let mut issues: Vec<Issue> = problems.unmodeled.iter().map(|construct| issues::unmodeled(law, construct)).collect();
+    // A construct reached in two places of another file stands on the law twice with one message, and prints once.
+    let mut printed = HashSet::default();
+    let mut issues: Vec<Issue> = problems
+        .unmodeled
+        .iter()
+        .map(|construct| issues::unmodeled(law, construct))
+        .filter(|issue| printed.insert((issue.message.clone(), issue.primary_span())))
+        .collect();
     issues.extend(problems.missing.iter().map(|missing| untranslated(&missing.place, missing.file)));
     issues.extend(
         law.proof

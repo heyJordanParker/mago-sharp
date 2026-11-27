@@ -10,6 +10,8 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
+use mago_names::EXPORT;
+use mago_names::IMPORT;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
@@ -31,6 +33,7 @@ use crate::graph::strongly_connected_parts;
 use crate::identifier::method::MethodIdentifier;
 use crate::issue::ScanningIssueKind;
 use crate::metadata::attribute::AttributeMetadata;
+use crate::metadata::attribute::ConstantExpression;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::class_like::ParsedField;
 
@@ -83,6 +86,7 @@ pub mod version_constraint;
 /// merged codebase without keeping a full `CodebaseMetadata` clone per file.
 /// Created via [`CodebaseMetadata::extract_keys()`].
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CodebaseEntryKeys {
     /// Class-like FQCN atoms (also used for symbol removal).
     pub class_like_names: Vec<Word>,
@@ -124,6 +128,11 @@ pub struct CodebaseMetadata {
     /// name in lowercase. Made again on each population.
     #[cfg_attr(feature = "serde", serde(skip))]
     short_names: WordMap<u32>,
+    /// The methods an interop attribute, spec section 23, gives a PHP function name with a string literal, by their
+    /// keys in `function_likes`, under the attribute's name and that PHP name in lowercase, as PHP's function names
+    /// ignore case. Made again on each population.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    interop_names: HashMap<(Word, Word), Vec<(Word, Word)>>,
     #[cfg_attr(feature = "serde", serde(default))]
     pub class_like_aliases: WordMap<Word>,
     #[cfg_attr(feature = "serde", serde(default))]
@@ -210,8 +219,10 @@ pub struct CodebaseMetadata {
     #[cfg_attr(feature = "serde", serde(default))]
     dev_packages: HashMap<FileId, Vec<DevPackage>>,
     /// Each user-defined class-like population filled, as its scan gave it, by its key. Population fills such a
-    /// class-like again from it, as a full analysis does, so nothing an earlier fill derived stays.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    /// class-like again from it, as a full analysis does, so nothing an earlier fill derived stays. A codebase decoded
+    /// to analyze again, as a compile restores the last one, keeps it for that. The prelude holds no user-defined
+    /// class-like, so its encoding holds none of it.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub(crate) scanned_class_likes: WordMap<Shared<ClassLikeMetadata>>,
 }
 
@@ -226,7 +237,12 @@ impl CodebaseMetadata {
     pub(crate) fn add_class_like_alias(&mut self, alias: Word, target: Word, span: Span, flags: MetadataFlags) {
         let replace =
             self.class_like_alias_declarations.get(&alias).is_none_or(|(_, existing_span, existing_flags)| {
-                should_replace_metadata(&self.file_names, (*existing_flags, *existing_span), (flags, span))
+                should_replace_metadata(
+                    &self.file_names,
+                    &self.standard_library_files,
+                    (*existing_flags, *existing_span),
+                    (flags, span),
+                )
             });
 
         if replace {
@@ -399,6 +415,14 @@ impl CodebaseMetadata {
         aliases_changed
     }
 
+    /// Makes again each map the codebase's encoding leaves out, as each population ends by: the import cycles, the
+    /// short names and the interop names. A codebase decoded to analyze again makes them once it is decoded.
+    pub fn populate_derived_maps(&mut self) {
+        self.populate_import_cycles();
+        self.populate_short_names();
+        self.populate_interop_names();
+    }
+
     /// Counts the class-likes of each short name that [`Self::shares_short_name`] reads.
     pub(crate) fn populate_short_names(&mut self) {
         let mut short_names = WordMap::default();
@@ -410,6 +434,31 @@ impl CodebaseMetadata {
         }
 
         self.short_names = short_names;
+    }
+
+    /// Groups the methods each interop attribute gives the same PHP function name, which [`Self::interop_namesakes`]
+    /// reads. A method's first attribute of a mark is the one that names its function.
+    pub(crate) fn populate_interop_names(&mut self) {
+        let mut interop_names: HashMap<(Word, Word), Vec<(Word, Word)>> = HashMap::default();
+        for (key, function_like) in &self.function_likes {
+            if function_like.method_metadata.is_none() {
+                continue;
+            }
+            for mark in [IMPORT, EXPORT] {
+                let Some(attribute) =
+                    function_like.attributes.iter().find(|attribute| attribute.name.as_bytes() == mark.as_bytes())
+                else {
+                    continue;
+                };
+                if let Some(ConstantExpression::String(name)) =
+                    attribute.arguments.first().and_then(|argument| argument.value.as_ref())
+                {
+                    interop_names.entry((attribute.name, name.to_ascii_lowercase())).or_default().push(*key);
+                }
+            }
+        }
+
+        self.interop_names = interop_names;
     }
 
     /// Finds each import that closes a cycle of imports between namespaces, spec section 23. The namespaces of one
@@ -623,6 +672,13 @@ impl CodebaseMetadata {
     #[must_use]
     pub fn shares_short_name(&self, name: Word) -> bool {
         self.short_names.get(&short_name_key(name.as_bytes())).is_some_and(|count| *count > 1)
+    }
+
+    /// The keys in `function_likes` of every method the interop attribute named `mark` gives the PHP function name
+    /// `name`, in any case, the method that asks among them.
+    #[must_use]
+    pub fn interop_namesakes(&self, mark: Word, name: Word) -> &[(Word, Word)] {
+        self.interop_names.get(&(mark, name.to_ascii_lowercase())).map_or(&[], Vec::as_slice)
     }
 
     /// Checks if a class or trait exists in the codebase, by [`Self::class_key`].
@@ -971,6 +1027,12 @@ impl CodebaseMetadata {
         if file.folder_namespace == Some(FolderNamespace::Test) {
             self.test_files.insert(file.id);
         }
+    }
+
+    /// Names the file `file_id` `name`, its path from the workspace, as a codebase another workspace scanned names it by
+    /// its path there: the standard library's codex names each library file by its path in the library's package.
+    pub fn name_file(&mut self, file_id: FileId, name: &[u8]) {
+        self.file_names.insert(file_id, word(name));
     }
 
     /// The name of the host or vendored file `file_id`, its path from the workspace, as `app/Shop/Cart.sharp`.
@@ -1971,12 +2033,14 @@ impl CodebaseMetadata {
     /// [`should_replace_metadata`] decides, for the same result whatever order the files are scanned in.
     pub fn extend(&mut self, other: CodebaseMetadata) {
         self.file_names.extend(other.file_names);
+        self.standard_library_files.extend(other.standard_library_files);
         let class_likes_changed = !other.class_likes.is_empty();
         for (k, mut v) in other.class_likes {
             match self.class_likes.entry(k) {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -2003,6 +2067,7 @@ impl CodebaseMetadata {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -2023,6 +2088,7 @@ impl CodebaseMetadata {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -2054,7 +2120,6 @@ impl CodebaseMetadata {
         }
 
         self.file_signatures.extend(other.file_signatures);
-        self.standard_library_files.extend(other.standard_library_files);
         self.test_files.extend(other.test_files);
         self.dev_packages.extend(other.dev_packages);
         self.safe_symbols.extend(other.safe_symbols);
@@ -2078,6 +2143,7 @@ impl CodebaseMetadata {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -2107,6 +2173,7 @@ impl CodebaseMetadata {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -2128,6 +2195,7 @@ impl CodebaseMetadata {
                 Entry::Occupied(mut entry) => {
                     if should_replace_metadata(
                         &self.file_names,
+                        &self.standard_library_files,
                         (entry.get().flags, entry.get().span),
                         (v.flags, v.span),
                     ) {
@@ -2816,9 +2884,17 @@ where
 /// Returns `true` if the new value should replace the existing one.
 fn should_replace_metadata(
     file_names: &HashMap<FileId, Word>,
+    standard_library_files: &HashSet<FileId>,
     (existing_flags, existing_span): (MetadataFlags, Span),
     (new_flags, new_span): (MetadataFlags, Span),
 ) -> bool {
+    // Spec section 23 reserves the standard library's names: a declaration of the library keeps its name over any other
+    // file's, which the analysis refuses, so every file resolves the name to the library's code.
+    let new_is_library = standard_library_files.contains(&new_span.file_id);
+    if new_is_library != standard_library_files.contains(&existing_span.file_id) {
+        return new_is_library;
+    }
+
     if new_flags.is_module() && !existing_flags.is_sharp() {
         return false;
     }
@@ -2899,7 +2975,12 @@ mod should_replace_metadata_tests {
 
     /// [`should_replace_metadata`] on two declarations of files that no name is known for.
     fn replaces(existing_flags: MetadataFlags, existing_span: Span, new_flags: MetadataFlags, new_span: Span) -> bool {
-        should_replace_metadata(&HashMap::default(), (existing_flags, existing_span), (new_flags, new_span))
+        should_replace_metadata(
+            &HashMap::default(),
+            &HashSet::default(),
+            (existing_flags, existing_span),
+            (new_flags, new_span),
+        )
     }
 
     /// Of two declarations with the same priority, the one whose file's name sorts first is kept, whichever file id
@@ -2913,11 +2994,29 @@ mod should_replace_metadata_tests {
         let (in_app, in_src) = (Span::new(app, 40.into(), 60.into()), Span::new(src, 0.into(), 20.into()));
 
         assert!(src < app, "the file ids sort the other way from the names");
-        assert!(should_replace_metadata(&file_names, (flags, in_src), (flags, in_app)));
-        assert!(!should_replace_metadata(&file_names, (flags, in_app), (flags, in_src)));
+        assert!(should_replace_metadata(&file_names, &HashSet::default(), (flags, in_src), (flags, in_app)));
+        assert!(!should_replace_metadata(&file_names, &HashSet::default(), (flags, in_app), (flags, in_src)));
 
         let earlier = Span::new(app, 0.into(), 20.into());
-        assert!(should_replace_metadata(&file_names, (flags, in_app), (flags, earlier)));
+        assert!(should_replace_metadata(&file_names, &HashSet::default(), (flags, in_app), (flags, earlier)));
+    }
+
+    /// A declaration of the standard library keeps its name over a project's, whichever is merged first.
+    #[test]
+    fn the_standard_library_keeps_its_name_over_a_project_file() {
+        let flags = MetadataFlags::USER_DEFINED;
+        let (library, project) = (FileId::new(b"library/Sharp/Bool.sharp"), FileId::new(b"src/App/Bool.sharp"));
+        let library_files: HashSet<FileId> = std::iter::once(library).collect();
+        let (in_library, in_project) =
+            (Span::new(library, 0.into(), 20.into()), Span::new(project, 0.into(), 20.into()));
+
+        assert!(!should_replace_metadata(
+            &HashMap::default(),
+            &library_files,
+            (flags, in_library),
+            (flags, in_project)
+        ));
+        assert!(should_replace_metadata(&HashMap::default(), &library_files, (flags, in_project), (flags, in_library)));
     }
 
     #[test]

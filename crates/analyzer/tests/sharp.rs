@@ -1266,6 +1266,69 @@ fn a_marked_base_class_reaches_public_and_protected_methods_of_its_subclasses() 
     );
 }
 
+/// A plain PHP console command's base class, and the `extern` line that marks it, as an application declares them.
+const MARKED_COMMAND: [(&str, &str); 2] = [
+    ("src/Lib/Command.php", "<?php\n\nnamespace Lib;\n\nabstract class Command\n{\n}\n"),
+    (
+        "src/App/Stubs/Stubs.sharp",
+        "namespace App.Stubs;\n\nimport Lib.Command;\n\n[DynamicallyAccessed]\nextern Command uses none;\n",
+    ),
+];
+
+/// Spec section 5: the framework of a marked base class reaches each class that extends it with its public and
+/// protected methods, so an `internal` helper of the class is the class's own, which no framework reaches, and it
+/// compiles. Its public methods stay reached, so neither the one the framework calls nor one no code calls is too wide.
+#[test]
+fn an_internal_helper_of_a_marked_base_class_subclass_compiles() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let report = "namespace App.Console;\n\nimport Lib.Command;\n\npublic class SendReport : Command\n{\n    public void handle() { this.helper(); }\n\n    internal string helper() => \"report\";\n\n    public void neverCalled() { }\n}\n";
+    let mut files = MARKED_COMMAND.to_vec();
+    files.extend([marker, ("src/App/Console/SendReport.sharp", report)]);
+
+    assert_eq!(too_wide(&files), Vec::<String>::new());
+}
+
+/// Spec section 5: the framework of a marked attribute reaches a class that carries it with every public member the
+/// class has, so an `internal` method, property and constant of the class are the class's own, which no framework
+/// reaches, and they compile.
+#[test]
+fn an_internal_member_of_a_class_carrying_a_marked_attribute_compiles() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let wired =
+        "namespace App.Wiring;\n\nimport Attribute;\n\n[Attribute]\n[DynamicallyAccessed]\npublic class Wired\n{\n}\n";
+    let tokens = "namespace App.Auth;\n\nimport App.Wiring.Wired;\n\n[Wired]\npublic class Tokens\n{\n    internal const int LIMIT = 3;\n\n    internal string realm { get; } = \"api\";\n\n    public string issue() => this.find(`${this.realm}:${Tokens.LIMIT}`);\n\n    internal string find(string bearer) => bearer;\n}\n";
+
+    assert_eq!(
+        too_wide(&[marker, ("src/App/Wiring/Wired.sharp", wired), ("src/App/Auth/Tokens.sharp", tokens)]),
+        Vec::<String>::new()
+    );
+}
+
+/// Spec section 5: the framework of a marked base class calls the protected methods of each class that extends it, so a
+/// protected method no code calls is neither too wide nor unused, in a final class too.
+#[test]
+fn a_protected_method_of_a_marked_base_class_subclass_is_reached() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let report = "namespace App.Console;\n\nimport Lib.Command;\n\npublic final class SendReport : Command\n{\n    protected string fallback() => \"report\";\n}\n";
+    let mut files = MARKED_COMMAND.to_vec();
+    files.extend([marker, ("src/App/Console/SendReport.sharp", report)]);
+
+    assert_eq!(too_wide(&files), Vec::<String>::new());
+    assert_eq!(
+        issues(("src/App/Console/SendReport.sharp", report), &[MARKED_COMMAND[0], MARKED_COMMAND[1], marker]),
+        Vec::<String>::new()
+    );
+}
+
 /// Spec section 5: each reach the checker can't see is a use from outside any namespace, so `internal`, written or by
 /// default, on a class or a member one reaches is too narrow, an error at its declaration, where the engine would
 /// throw when it runs. Each reach names who reaches: the test runner, the framework of a marked attribute or of a
@@ -1313,7 +1376,6 @@ fn an_internal_class_or_member_a_framework_reaches_is_too_narrow() {
             "tests/Shop/OrderTest.sharp 5:13 `OrderTest` is internal, and its test runner reaches it from outside `App.Shop`, so it throws when it runs. | Declare it public.",
             "tests/Shop/CartTest.sharp 9:19 `CartTest.testTotals` is internal, and its test runner reaches it from outside `App.Shop`, so it throws when it runs. | Declare it public.",
             "src/App/Payments/Hooks.sharp 8:19 `Hooks.paid` is internal, and the framework that reads `AsEventListener` reaches it from outside `App.Payments`, so it throws when it runs. | Declare it public.",
-            "src/App/Store/CartOffer.sharp 8:21 `CartOffer.offer` is internal, and the framework that `Model` declares reaches it from outside `App.Store`, so it throws when it runs. | Declare it public.",
             "src/App/Store/CartOffer.sharp 10:23 `CartOffer.label` is private, and the framework that `Model` declares reaches it from outside `CartOffer`, so it throws when it runs. | Declare it protected.",
             "src/App/Hooks/Overrides.sharp 8:28 `Overrides.title` is internal, and plain PHP's call of its `[Export]` function reaches it from outside `App.Hooks`, so it throws when it runs. | Declare it public.",
             "src/App/Console/Import.sharp 3:7 `Import` is internal, and the engine that runs the program reaches it from outside `App.Console`, so it throws when it runs. | Declare it public."
@@ -3960,6 +4022,16 @@ fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
             "Default value for property `Demo\\Order::$timestamps` is not assignable to its declared type.",
         ]
     );
+}
+
+/// `Map.from` of a plain PHP `array` gives the `Map` of its keys and values, `Map<int|string, Any?>`, with or without
+/// type arguments, so it returns, assigns and spreads where that type is declared, as the array itself does, spec
+/// section 12.
+#[test]
+fn map_from_a_plain_php_array_returns_as_the_map_it_gives() {
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Row : Model\n{\n    internal Map<int|string, Any?> held() => Map.from(this.appends);\n\n    internal Map<int|string, Any?> kept() => this.appends;\n\n    internal Map<int|string, Any?> copied()\n    {\n        Map<int|string, Any?> copy = Map.from(this.appends);\n        Map<int|string, Any?> typed = Map<int|string, Any?>.from(this.appends);\n\n        return [...copy, ...typed];\n    }\n\n    internal Map<int|string, Any?> spread() => [...Map.from(this.appends), \"b\": 2];\n}\n";
+
+    assert_eq!(worded(("src/Demo/Row.sharp", sharp), &[("src/Lib/Model.php", MODEL)]), Vec::<String>::new());
 }
 
 /// An override keeps its written type instead of inheriting the parent's `@var` type, so a type that does not fit is
@@ -32101,6 +32173,128 @@ fn a_use_of_a_class_s_statics_has_the_effects_of_their_initial_values() {
     );
 }
 
+/// Spec section 2: a `using` local's block calls `dispose()` on the value it holds when it ends, so the value is a
+/// `Disposable`, as `Archive` is. Any other value is refused.
+#[test]
+fn a_using_local_holds_a_disposable() {
+    let archive = (
+        "app/Shop/Archive.sharp",
+        "namespace App.Shop;\n\npublic class Archive : Disposable\n{\n    public void dispose() { }\n}\n",
+    );
+    let export = (
+        "app/Shop/Export.sharp",
+        "namespace App.Shop;\n\npublic class Export\n{\n    public int count()\n    {\n        using archive = new Archive();\n        using total = 3;\n        return total;\n    }\n}\n",
+    );
+
+    assert_eq!(messages(export, &[archive]), ["A `using` local holds a `Disposable`, and the type of `3` is `int`."]);
+}
+
+/// Spec sections 2 and 29: a `Disposable`'s `dispose()` may have any effect, as `Transaction`'s reads the database,
+/// and a `using` local carries the effects of its value's `dispose()`, as a written call of it would. So
+/// `Report.count`, which disposes a `Transaction`, has the effect `Database`, which the pure `Counter.count` refuses.
+#[test]
+fn a_using_local_carries_the_effects_of_its_value_s_dispose() {
+    let database = (
+        "src/App/Shop/Database.sharp",
+        "namespace App.Shop;\n\npublic effect abstract class Database\n{\n    public abstract int rows();\n}\n",
+    );
+    let transaction = (
+        "src/App/Shop/Transaction.sharp",
+        "namespace App.Shop;\n\npublic class Transaction : Disposable\n{\n    public Transaction(private Database database) { }\n\n    public void dispose()\n    {\n        this.database.rows();\n    }\n}\n",
+    );
+    let counter =
+        ("src/App/Shop/Counter.sharp", "namespace App.Shop;\n\npublic interface Counter\n{\n    int count();\n}\n");
+    let report = (
+        "src/App/Shop/Report.sharp",
+        "namespace App.Shop;\n\npublic class Report : Counter\n{\n    public Report(private Database database) { }\n\n    public int count()\n    {\n        using transaction = new Transaction(this.database);\n        return 1;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[report, transaction, database, counter]),
+        [
+            "src/App/Shop/Report.sharp:9:9 incompatible-effects: `Report.count` reaches `Transaction.dispose`, which calls `App.Shop.Database.rows` with the effect `App.Shop.Database`, so the pure `Counter.count` cannot accept it."
+        ]
+    );
+}
+
+const ZIP_ARCHIVE_LIBRARY: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/IO/ZipArchive.sharp",
+    include_str!("../../../../composer/library/Sharp/IO/ZipArchive.sharp"),
+);
+
+/// Spec sections 2 and 29: a `ZipArchive` is `Disposable`, so a `using` local holds it and writes it when its block
+/// ends, and it has no `close()`.
+#[test]
+fn a_zip_archive_is_disposed_by_its_using_local_and_has_no_close() {
+    let export = (
+        "app/Shop/Export.sharp",
+        "namespace App.Shop;\n\nimport Sharp.IO.ZipArchive;\n\npublic class Export\n{\n    public string? readme(string path)\n    {\n        using archive = ZipArchive.open(path);\n        return archive.read(\"readme.txt\");\n    }\n\n    public void closed(string path)\n    {\n        using archive = ZipArchive.open(path);\n        archive.close();\n    }\n}\n",
+    );
+
+    assert_eq!(messages(export, &[ZIP_ARCHIVE_LIBRARY]), ["Method `ZipArchive.close` does not exist."]);
+}
+
+const OWNED_ARCHIVE: (&str, &str) = (
+    "app/Shop/Archive.sharp",
+    "namespace App.Shop;\n\npublic class Archive : Disposable\n{\n    public void dispose() { }\n\n    public static Archive open() => new Archive();\n}\n",
+);
+
+/// Spec section 2, as .NET's CA2000 decides: a `Disposable` a `new` or a call makes has one owner, a `using` local, a
+/// `return`, a field of a `Disposable` class, or a module binding. `Holder` keeps one in a field, so it is
+/// `Disposable`, and `Export` returns one and holds one in a `using` local. A `const` local, a dropped call and a field
+/// of `Export`, which isn't `Disposable`, are refused, and a local that borrows the `using` local's value is not.
+#[test]
+fn a_disposable_made_outside_its_owners_is_refused() {
+    let holder = (
+        "app/Shop/Holder.sharp",
+        "namespace App.Shop;\n\npublic class Holder : Disposable\n{\n    private Archive? archive = null;\n\n    public Holder()\n    {\n        this.archive = Archive.open();\n    }\n\n    public void dispose() { this.archive?.dispose(); }\n}\n",
+    );
+    let export = (
+        "app/Shop/Export.sharp",
+        "namespace App.Shop;\n\npublic class Export\n{\n    private Archive? kept = null;\n\n    public Archive? held() => this.kept;\n\n    public Archive made(bool fresh) => fresh ? Archive.open() : new Archive();\n\n    public int count()\n    {\n        using archive = Archive.open();\n        const lost = Archive.open();\n        Archive.open();\n        this.kept = Archive.open();\n        const borrowed = archive;\n        return 1;\n    }\n}\n",
+    );
+    let refused = "`Archive.open()` makes a `Disposable`, and only its owner may hold it: a `using` local, a `return`, a field of a `Disposable` class, or a module binding.";
+
+    assert_eq!(messages(holder, &[OWNED_ARCHIVE]), Vec::<String>::new());
+    assert_eq!(messages(export, &[OWNED_ARCHIVE]), [refused, refused, refused]);
+}
+
+/// Spec sections 2 and 32: a `transient` service is the class's that takes it, so a `transient` `Disposable` is owned
+/// by that class, which must be `Disposable` to dispose it. A `scoped` one stays the container's, and a `Disposable`
+/// class may take a `transient` one.
+#[test]
+fn a_transient_disposable_taken_by_a_class_that_isnt_disposable_is_refused() {
+    let others = [
+        (
+            "app/Ledger/Transaction.sharp",
+            "namespace App.Ledger;\n\npublic class Transaction : Disposable\n{\n    public void dispose() { }\n}\n",
+        ),
+        (
+            "app/Ledger/Repository.sharp",
+            "namespace App.Ledger;\n\npublic class Repository\n{\n    public Repository(private Transaction transaction) { }\n}\n",
+        ),
+        (
+            "app/Ledger/Unit.sharp",
+            "namespace App.Ledger;\n\npublic class Unit : Disposable\n{\n    public Unit(private Transaction transaction) { }\n\n    public void dispose() { this.transaction.dispose(); }\n}\n",
+        ),
+    ];
+    let refused = "10:5 unowned-disposable The transient `Transaction` is `Disposable`, so `Repository`, which takes it, owns it, and only a `Disposable` class can dispose it. | Make `Repository` `Disposable` and dispose it there, or make `Transaction` scoped.";
+
+    for (members, expected) in [
+        ("    transient Transaction = Transaction;\n    transient Repository = Repository;", vec![refused]),
+        ("    scoped Transaction = Transaction;\n    transient Repository = Repository;", vec![]),
+        ("    transient Transaction = Transaction;\n    transient Unit = Unit;", vec![]),
+    ] {
+        let module = (
+            "app/Module.sharp",
+            leak(format!(
+                "namespace App;\n\nimport App.Ledger.Transaction;\nimport App.Ledger.Repository;\nimport App.Ledger.Unit;\n\nmodule\n{{\n{members}\n}}\n"
+            )),
+        );
+        assert_eq!(refusals(module, &others), expected, "{members}");
+    }
+}
+
 const BEHAVIOR_LIBRARY: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
     include_str!("../../../../composer/library/Sharp/Behavior.sharp"),
@@ -33067,6 +33261,219 @@ fn create_instance_may_have_every_effect() {
         effect_issues(&[making, building, MAKER, disk, stub, saved, note, a, b, c, d, e, f, g]),
         [
             "app/Shop/Making.sharp:5:28 incompatible-effects: `Making.make` reaches `ClassMembers.createInstance`, which may have every effect, so the pure `Maker.make` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
+/// The pure `Reading.read` and the `Storing.read` that may write to the database, which each reader below implements.
+const READING: [(&str, &str); 2] = [
+    ("app/Shop/Reading.sharp", "namespace App.Shop;\n\npublic interface Reading\n{\n    Any? read(Any? row);\n}\n"),
+    (
+        "app/Shop/Storing.sharp",
+        "namespace App.Shop;\n\npublic interface Storing\n{\n    Any? read(Any? row) uses Database;\n}\n",
+    ),
+];
+
+/// A reader of `app/Shop/{name}.sharp` that implements `interface` with `decode`, a `typeof(…).decode(row)` call.
+fn decoding(name: &str, interface: &str, decode: &str) -> (&'static str, &'static str) {
+    (
+        leak(format!("app/Shop/{name}.sharp")),
+        leak(format!(
+            "namespace App.Shop;\n\npublic class {name} : {interface}\n{{\n    public Any? read(Any? row) => {decode};\n}}\n"
+        )),
+    )
+}
+
+/// Spec sections 10, 25 and 29: `decode` runs the reader of the class its class value holds, its `parse`, which runs
+/// its constructor, so a pure method that decodes a `Saved`, whose `required` constructor writes to the database, is
+/// refused as `new Saved()` is, and one whose `uses` lists `Database` compiles.
+#[test]
+fn decode_has_the_effects_of_the_reader_it_runs() {
+    let pure = decoding("SavedReader", "Reading", "typeof(Saved).decode(row)");
+    let storing = decoding("StoredReader", "Storing", "typeof(Saved).decode(row)");
+    let [disk, stub, saved, note] = BUILT;
+    let [reading, storing_interface] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[pure, storing, reading, storing_interface, disk, stub, saved, note, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/SavedReader.sharp:5:35 incompatible-effects: `SavedReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
+/// A `final` class whose constructor has no effect, so no subclass's reader can run in its place.
+const MEMO: (&str, &str) = (
+    "app/Shop/Memo.sharp",
+    "namespace App.Shop;\n\npublic final class Memo\n{\n    public Memo(public string text { get; }) { }\n}\n",
+);
+
+/// Spec section 29: no class extends a `final` class, so `decode` of it runs its own reader alone, and one with no
+/// effect keeps a pure method pure.
+#[test]
+fn decode_of_a_final_class_with_no_effects_is_pure() {
+    let memo_reader = decoding("MemoReader", "Reading", "typeof(Memo).decode(row)");
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(effect_issues(&[memo_reader, MEMO, reading, a, b, c, d, e, f, g]), Vec::<String>::new());
+}
+
+/// Spec section 29: an open class whose constructor is not `required` may be any subclass whose constructor differs, so
+/// `decode` of it may have every effect, as `createInstance` may. Once the class is `final` its reader is known.
+#[test]
+fn decode_of_an_open_class_may_have_every_effect() {
+    let ledger_reader = decoding("LedgerReader", "Reading", "typeof(Ledger).decode(row)");
+    let open = (
+        "app/Shop/Ledger.sharp",
+        "namespace App.Shop;\n\npublic class Ledger\n{\n    public Ledger(public int total { get; }) { }\n}\n",
+    );
+    let closed = (
+        "app/Shop/Ledger.sharp",
+        "namespace App.Shop;\n\npublic final class Ledger\n{\n    public Ledger(public int total { get; }) { }\n}\n",
+    );
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[ledger_reader, open, reading, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/LedgerReader.sharp:5:35 incompatible-effects: `LedgerReader.read` reaches `ClassMembers.decode`, which may have every effect, so the pure `Reading.read` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects."
+        ]
+    );
+    assert_eq!(effect_issues(&[ledger_reader, closed, reading, a, b, c, d, e, f, g]), Vec::<String>::new());
+}
+
+/// Spec section 10: a family's `parse` reads one of its declared variants, so `decode` of the family has the effects of
+/// each variant's reader, and a variant whose constructor writes to the database makes a pure method's `decode` of the
+/// family refused.
+#[test]
+fn decode_of_a_family_has_its_variants_readers_effects() {
+    let entry =
+        ("app/Shop/Entry.sharp", "namespace App.Shop;\n\n[Tag(\"type\")]\npublic sealed interface Entry\n{\n}\n");
+    let stored = (
+        "app/Shop/StoredEntry.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\n[Key(\"stored\")]\npublic final class StoredEntry : Entry\n{\n    public StoredEntry() { Disk.save(); }\n}\n",
+    );
+    let noted = (
+        "app/Shop/NotedEntry.sharp",
+        "namespace App.Shop;\n\n[Key(\"noted\")]\npublic final class NotedEntry : Entry\n{\n    public NotedEntry(public string text { get; }) { }\n}\n",
+    );
+    let entry_reader = decoding("EntryReader", "Reading", "typeof(Entry).decode(row)");
+    let [disk, stub, _, _] = BUILT;
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[entry_reader, entry, stored, noted, reading, disk, stub, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/EntryReader.sharp:5:35 incompatible-effects: `EntryReader.read` reaches `StoredEntry.StoredEntry`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
+/// Spec sections 10 and 29: a type that is no class runs only the readers of the classes inside it, so `decode` of a
+/// `List<Memo>` or of an `int` keeps a pure method pure, and `decode` of a `List<Saved>` has `Saved`'s reader's effects.
+#[test]
+fn decode_of_a_list_takes_its_elements_readers_effects() {
+    let memos = decoding("MemosReader", "Reading", "typeof(List<Memo>).decode(row)");
+    let count = decoding("CountReader", "Reading", "typeof(int).decode(row)");
+    let saved_list = decoding("SavedListReader", "Reading", "typeof(List<Saved>).decode(row)");
+    let [disk, stub, saved, note] = BUILT;
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[memos, count, saved_list, MEMO, reading, disk, stub, saved, note, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/SavedListReader.sharp:5:35 incompatible-effects: `SavedListReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
+/// The standard library's `Json`, `JsonValue`, `Query` and `Url`, which `Json.decode<T>` and `Query.decode<T>` run.
+const TEXT_READERS: [(&str, &str); 4] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Json.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/Json.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/JsonValue.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/JsonValue.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Query.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/Query.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Net/Url.sharp",
+        include_str!("../../../../composer/library/Sharp/Net/Url.sharp"),
+    ),
+];
+
+/// Spec sections 23, 24 and 29, the program on #1090: `Json.decode<T>` and `Query.decode<T>` read their text, then
+/// build `T` as `typeof(T).decode` does, so each has the effects of its text read and of the readers `T` holds. A
+/// struct, which has no effects, calls them for a `Map<string, string>`. A pure method that decodes a `Saved`, whose
+/// constructor writes to the database, is refused as `typeof(Saved).decode` is.
+#[test]
+fn json_and_query_decode_have_the_effects_of_the_readers_their_type_argument_holds() {
+    let probe = (
+        "app/Shop/DecodeProbe.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\nimport Sharp.Encoding.Query;\n\ninternal struct DecodeProbe\n{\n    internal int count() => this.byJson().count() + this.byType().count() + this.byQuery().count();\n\n    private Map<string, string> byJson() => Json.decode<Map<string, string>>(\"{\\\"name\\\":\\\"ada\\\"}\");\n\n    private Map<string, string> byType() => typeof(Map<string, string>).decode([\"name\": \"ada\"]) as Map<string, string> ?? throw new LogicException(\"decode built no map.\");\n\n    private Map<string, string> byQuery() => Query.decode<Map<string, string>>(\"name=ada\");\n}\n",
+    );
+    let saved_json = (
+        "app/Shop/SavedJsonReader.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class SavedJsonReader : Reading\n{\n    public Any? read(Any? row) => Json.decode<Saved>(\"{}\");\n}\n",
+    );
+    let [disk, stub, saved, note] = BUILT;
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+    let [json, json_value, query, url] = TEXT_READERS;
+
+    assert_eq!(
+        effect_issues(&[
+            probe, saved_json, reading, disk, stub, saved, note, json, json_value, query, url, a, b, c, d, e, f, g
+        ]),
+        [
+            "app/Shop/SavedJsonReader.sharp:7:35 incompatible-effects: `SavedJsonReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
+/// Spec sections 25 and 29: `attributeData<T>()` reads attributes as written and builds none, so the pure `Counting.count`
+/// accepts a method that reads them, and rebuilding one from its data goes through `createInstance`, which may have
+/// every effect, so the pure `Rebuilding.rebuild` refuses a method that does it and a method no `uses` limits does it.
+#[test]
+fn attribute_data_is_pure_and_rebuilding_from_it_may_have_every_effect() {
+    let attribute_data = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/AttributeData.sharp",
+        include_str!("../../../../composer/library/Sharp/AttributeData.sharp"),
+    );
+    let counting =
+        ("app/Shop/Counting.sharp", "namespace App.Shop;\n\npublic interface Counting\n{\n    int count();\n}\n");
+    let rebuilding = (
+        "app/Shop/Rebuilding.sharp",
+        "namespace App.Shop;\n\npublic interface Rebuilding\n{\n    Object rebuild(AttributeData data);\n}\n",
+    );
+    let reading = (
+        "app/Shop/Reading.sharp",
+        "namespace App.Shop;\n\npublic class Reading : Counting\n{\n    public int count() => typeof(Reading).methods()[0].attributeData<Object>().count();\n}\n",
+    );
+    let pure = (
+        "app/Shop/PureRebuild.sharp",
+        "namespace App.Shop;\n\npublic class PureRebuild : Rebuilding\n{\n    public Object rebuild(AttributeData data) => data.type.createInstance(data.arguments);\n}\n",
+    );
+    let free = (
+        "app/Shop/Rebuild.sharp",
+        "namespace App.Shop;\n\npublic class Rebuild\n{\n    public Object rebuild(AttributeData data) => data.type.createInstance(data.arguments);\n}\n",
+    );
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[reading, pure, free, counting, rebuilding, attribute_data, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/PureRebuild.sharp:5:50 incompatible-effects: `PureRebuild.rebuild` reaches `ClassMembers.createInstance`, which may have every effect, so the pure `Rebuilding.rebuild` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
         ]
     );
 }
@@ -34568,6 +34975,19 @@ fn a_law_s_claim_and_body_read_what_its_when_condition_shows() {
     assert_eq!(issues(order, &[]), Vec::<String>::new());
 }
 
+/// Spec section 28: a law's claim holds where its `when` condition is true, so a variable a pattern of the condition
+/// assigns when it is true, alone or under `&&`, is in scope in the claim, as in an `if` block. One assigned under `||`
+/// is not.
+#[test]
+fn a_law_when_pattern_variable_is_in_scope_in_its_body() {
+    let order = (
+        "app/Shared/Order.sharp",
+        "namespace App.Shared;\n\npublic class Order\n{\n    public Order(public int total { get; }) { }\n\n    law aFamilyIsItself(Any? value) when value is Class<Object> family => family == family;\n    law positive(Any? value) when value is Order order && order.total > 0 => order.total >= 1;\n    law either(Any? value) when value is Order order || value is null => order.total > 0;\n}\n",
+    );
+
+    assert_eq!(messages(order, &[]), ["`order` exists only where `value is Order order` is true."]);
+}
+
 /// A PHP caller of a law gets the same refusal, with the law named as PHP writes a static method.
 #[test]
 fn a_php_call_of_a_law_is_a_non_existent_method_that_names_the_law_as_php_writes_it() {
@@ -35924,7 +36344,7 @@ fn scope_run_returns_what_its_body_returns_and_has_its_effects() {
 /// A class whose `watch` starts a listener with `Events.on<TEvent>` for the type `listened`, and holds its handle.
 fn watching(listened: &str) -> (&'static str, &'static str) {
     let code = format!(
-        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Screen\n{{\n    public static List<int> seen {{ get; set; }} = [];\n\n    public Listening watch()\n    {{\n        const listening = Events.on<{listened}>(e => Screen.seen.add(1));\n        return listening;\n    }}\n}}\n"
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Screen\n{{\n    public static List<int> seen {{ get; set; }} = [];\n\n    public Listening watch()\n    {{\n        return Events.on<{listened}>(e => Screen.seen.add(1));\n    }}\n}}\n"
     );
 
     ("app/Shop/Screen.sharp", Box::leak(code.into_boxed_str()) as &'static str)
@@ -35946,20 +36366,20 @@ fn events_on_takes_an_event_or_an_interface_an_event_implements() {
         "`Events.on` takes an event, which `event` or `extern event` declares, or an interface an event implements.";
     assert_eq!(
         worded(watching("Money"), &others),
-        [format!("11:37 invalid-event `Money` is not an event. | Given here. | {note}")]
+        [format!("11:26 invalid-event `Money` is not an event. | Given here. | {note}")]
     );
     assert_eq!(
         worded(watching("int"), &others),
-        [format!("11:37 invalid-event `int` is not an event. | Given here. | {note}")]
+        [format!("11:26 invalid-event `int` is not an event. | Given here. | {note}")]
     );
     assert_eq!(
         worded(watching("Unheard"), &others),
         [format!(
-            "11:37 invalid-event No event implements `Unheard`, so the listener never runs. | Given here. | {note}"
+            "11:26 invalid-event No event implements `Unheard`, so the listener never runs. | Given here. | {note}"
         )]
     );
     // A class that doesn't exist is reported once, where the type is written, and a type parameter is the caller's.
-    assert_eq!(issues(watching("Missing"), &others), ["11:37 non-existent-class-like"]);
+    assert_eq!(issues(watching("Missing"), &others), ["11:26 non-existent-class-like"]);
     let forwarding = (
         "app/Shop/Relay.sharp",
         "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Relay\n{\n    public static Listening forward<TEvent>(Function<void(TEvent)> listener) => Events.on<TEvent>(listener);\n}\n",
@@ -35967,8 +36387,8 @@ fn events_on_takes_an_event_or_an_interface_an_event_implements() {
     assert_eq!(worded(forwarding, &others), Vec::<String>::new());
 }
 
-/// Spec section 15: a listener stops when its handle goes, so `Events.on` as a statement, which drops the handle at
-/// once, listens to nothing and is reported in PHP# words.
+/// Spec sections 2 and 15: a listener's handle is a `Disposable` its owner disposes, so `Events.on` as a statement,
+/// which leaves the handle with no owner, is refused as any unowned `Disposable` is.
 #[test]
 fn a_dropped_events_on_handle_is_reported() {
     let [order_event, order_paid] = ORDER_EVENTS;
@@ -35980,7 +36400,7 @@ fn a_dropped_events_on_handle_is_reported() {
     assert_eq!(
         worded(dropping, &[EVENTS, order_event, order_paid]),
         [
-            "7:9 unused-method-call The value `Events.on` returns must be used. | Its value is dropped here. | `[NoDiscard]` on `Events.on` says the value it returns matters. | Keep the value in a local, pass it on, or return it."
+            "7:9 unowned-disposable `Events.on<OrderPaid>(e => { })` makes a `Disposable`, and only its owner may hold it: a `using` local, a `return`, a field of a `Disposable` class, or a module binding. | Made here, with no owner. | Hold it in a `using` local, which disposes it when its block ends."
         ]
     );
 }
@@ -36479,6 +36899,71 @@ fn a_test_module_outside_a_test_file_is_refused() {
             .collect();
         assert_eq!(refused, expected, "{}", written.0);
     }
+}
+
+/// Spec section 32: PHPUnit creates a test object for each test with the test's name, and the container fills the test
+/// class's main constructor from its file's test module over the base modules. So the constructor calls no super, each
+/// of its parameters needs a binding, and a test method takes only its data provider's values, as a `Before` method
+/// takes none.
+#[test]
+fn a_test_class_takes_its_services_in_its_constructor_and_its_test_methods_take_none() {
+    let test_case = (
+        "vendor/phpunit/phpunit/src/Framework/TestCase.php",
+        "<?php\n\nnamespace PHPUnit\\Framework;\n\nabstract class TestCase\n{\n    public function __construct(string $name)\n    {\n    }\n}\n",
+    );
+    let attribute = |name: &'static str| {
+        (
+            leak(format!("vendor/phpunit/phpunit/src/Framework/Attributes/{name}.php")),
+            leak(format!(
+                "<?php\n\nnamespace PHPUnit\\Framework\\Attributes;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD)]\nfinal class {name}\n{{\n}}\n"
+            )),
+        )
+    };
+    let shop = ("app/Shop/Module.sharp", "namespace App.Shop;\n\nmodule\n{\n}\n");
+    let mailer = ("app/Shop/Mailer.sharp", "namespace App.Shop;\n\npublic class Mailer\n{\n}\n");
+    let clock = ("app/Shop/Clock.sharp", "namespace App.Shop;\n\npublic class Clock\n{\n}\n");
+    let test = |body: &str| {
+        (
+            "tests/Shop/CheckoutTest.sharp",
+            leak(format!(
+                "namespace App.Shop;\n\nimport PHPUnit.Framework.Attributes.Before;\nimport PHPUnit.Framework.Attributes.Test;\nimport PHPUnit.Framework.TestCase;\n\nmodule : App.Shop\n{{\n    singleton Mailer = Mailer;\n}}\n\npublic class CheckoutTest : TestCase\n{{\n{body}\n}}\n"
+            )),
+        )
+    };
+    let others = [test_case, attribute("Test"), attribute("Before"), shop, mailer, clock];
+
+    let takes = test(
+        "    public CheckoutTest(private Mailer mailer) { }\n\n    [Test]\n    public Mailer sends() => this.mailer;",
+    );
+    assert_eq!(refusals(takes, &others), Vec::<String>::new());
+
+    let calls_super = test(
+        "    public CheckoutTest(private Mailer mailer) : super(\"sends\") { }\n\n    [Test]\n    public Mailer sends() => this.mailer;",
+    );
+    assert_eq!(
+        refusals(calls_super, &others),
+        [
+            "14:48 test-class-super-call PHPUnit names each test, so a test class's constructor calls no super. | Remove `: super(…)`, and take the class's services as the constructor's parameters."
+        ]
+    );
+
+    let unbound =
+        test("    public CheckoutTest(private Clock clock) { }\n\n    [Test]\n    public Clock sends() => this.clock;");
+    assert_eq!(
+        refusals(unbound, &others),
+        [
+            "14:25 missing-service `CheckoutTest` needs an `App.Shop.Clock`, and no module binds one: the container can't build `CheckoutTest`. | Bind `App.Shop.Clock` in a module of `CheckoutTest`'s namespace or one above it, as in `transient App.Shop.Clock = App.Shop.Clock;`."
+        ]
+    );
+
+    let with_parameters = test(
+        "    [Before]\n    public void prepare(Mailer mailer) { }\n\n    [Test]\n    public Mailer sends(Mailer mailer) => mailer;",
+    );
+    let refused = "A test method takes only its data provider's values: take services in the test class's constructor. | Move the parameter to the test class's constructor, and read it from `this`.";
+    assert_eq!(
+        refusals(with_parameters, &others),
+        [format!("15:25 test-method-parameter {refused}"), format!("18:25 test-method-parameter {refused}")]
+    );
 }
 
 /// Spec section 32, as .NET's scope validation and Dagger's graph check refuse them: a service that needs itself, at
@@ -37544,6 +38029,25 @@ const PAYMENTS: [(&str, &str); 3] = [
 /// The section 31 tests' other files: the standard library's `Result` and `Error`, then `PAYMENTS`.
 fn payments() -> Vec<(&'static str, &'static str)> {
     RESULT_LIBRARY.iter().chain(&PAYMENTS).copied().collect()
+}
+
+/// Spec section 31, as Rust's `#[must_use]` on `Result`: a `Result` holds a failure the caller must handle, so a
+/// statement that discards one is refused, a call's and a case's alike. A `Result` the code keeps, and the `Ok` value
+/// `try` gives, are never refused.
+#[test]
+fn a_statement_that_discards_a_result_is_refused() {
+    let code = "namespace App;\n\nclass Checkout\n{\n    public Checkout(private Gateway gateway) { }\n\n    public Result<int, PaymentError> run()\n    {\n        this.gateway.charge();\n        const order = try this.gateway.charge();\n        const kept = this.gateway.charge();\n        Result<int, PaymentError>.Ok(order.total);\n        try this.gateway.charge();\n        return Result.Ok(order.total);\n    }\n}\n";
+
+    let refused = |line: u32, written: &str| {
+        format!(
+            "{line}:9 discarded-result `{written}` returns a Result: handle it with try, match, ok() or unwrap(). | A dropped Result loses its failure: pass it up with `try`, or keep the Result in a `const`."
+        )
+    };
+
+    assert_eq!(
+        refusals(("src/App/Checkout.sharp", code), &payments()),
+        [refused(9, "this.gateway.charge"), refused(12, "Result<int, PaymentError>.Ok")]
+    );
 }
 
 /// Spec section 31: `try` gives the `Ok` value, and on `Err` the method returns an `Err` holding the same error. It is a

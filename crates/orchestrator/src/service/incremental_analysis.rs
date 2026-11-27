@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
@@ -88,6 +90,7 @@ use mago_syntax::settings::ParserSettings;
 use mago_word::Word;
 use mago_word::WordSet;
 
+use self::codex::LibraryCodex;
 use crate::Autoloader;
 use crate::error::OrchestratorError;
 use crate::progress::ProgressBarTheme;
@@ -100,6 +103,7 @@ use crate::service::telemetry::HangWatcher;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::service::telemetry::SlowestFiles;
 
+pub mod codex;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod compile;
 
@@ -108,7 +112,7 @@ pub mod compile;
 type IncrementalScan<Snapshot> = ((FileId, CodebaseMetadata, Snapshot, Vec<mago_word::Word>), WordSet);
 
 /// Per-file cached state for incremental analysis.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct FileState {
     content_hash: u64,
     entry_keys: CodebaseEntryKeys,
@@ -129,7 +133,9 @@ struct FileState {
     /// and refuse a law that reaches the file, as a compile refuses the file for them.
     package_errors: IssueCollection,
     /// What the last analysis gave the lowering of the file, a PHP# file, when the service keeps lowering inputs and
-    /// that analysis ran from scratch. An incremental analysis skips the methods it keeps, so it gives none.
+    /// that analysis ran from scratch. An incremental analysis skips the methods it keeps, so it gives none, and the
+    /// service's persisted state holds none.
+    #[serde(skip)]
     lowering_input: Option<LoweringInput>,
     /// Whether the code of the file `lowering_input` holds the analysis of reaches a PHP# extension member.
     reaches_extension: bool,
@@ -137,12 +143,36 @@ struct FileState {
 }
 
 /// What one file's analysis read from the codebase.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct AnalysisReads {
     /// The sets the file's own analysis read whole.
     listings: HashSet<Listing>,
     /// What the extension callbacks read while Mago analyzed it.
     extension: ExtensionReads,
+}
+
+/// What [`IncrementalAnalysisService::persist`] encodes and [`IncrementalAnalysisService::restore`] decodes: the
+/// state the last analysis left, so a later run's [`IncrementalAnalysisService::analyze_incremental`] rechecks only
+/// what changed since, as watch mode's does. Each part borrows the service's when it encodes, and is owned when it
+/// decodes.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Persisted<'state> {
+    codebase: Cow<'state, CodebaseMetadata>,
+    symbol_references: Cow<'state, SymbolReferences>,
+    native_symbol_references: Cow<'state, SymbolReferences>,
+    external_symbol_references: Cow<'state, SymbolReferences>,
+    late_symbol_references: Cow<'state, SymbolReferences>,
+    file_states: Cow<'state, HashMap<FileId, FileState>>,
+    before_analysis_reads: Cow<'state, ExtensionReads>,
+    codebase_issues: Cow<'state, IssueCollection>,
+    lifecycle_issues: Cow<'state, IssueCollection>,
+    namespace_classes: Cow<'state, NamespaceClasses>,
+    changing_members: Cow<'state, ChangingMembers>,
+    extern_namespaces: Cow<'state, ExternNamespaces>,
+    declared_returns: Cow<'state, HashMap<(Word, Word), Option<TypeMetadata>>>,
+    class_logs: Cow<'state, ClassLogs>,
+    /// The path of each vendor file the autoloader served, which the decoded state reads again.
+    autoloaded: Vec<PathBuf>,
 }
 
 struct SelectiveAnalysisOutput {
@@ -238,6 +268,12 @@ pub struct IncrementalAnalysisService {
     declared_returns: HashMap<(Word, Word), Option<TypeMetadata>>,
     /// Each extension worker's class log, as the analyses' responses reported it, which each file's reads index.
     class_logs: ClassLogs,
+    /// The standard library's codex, which a project's analysis takes the library from, with no file of the library to
+    /// scan, analyze or lower.
+    library: Option<Arc<LibraryCodex>>,
+    /// The scan of the standard library's own files the last analysis from scratch made, of the library's package, which
+    /// [`Self::library_codex`] writes its codex from.
+    library_scan: CodebaseMetadata,
     /// The files the last analysis analyzed, which the fanout tests compare with the inputs.
     #[cfg(test)]
     pub(crate) analyzed_files: HashSet<FileId>,
@@ -283,6 +319,8 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("autoloaded", &self.autoloaded.len())
             .field("declared_returns", &self.declared_returns.len())
             .field("class_logs", &self.class_logs)
+            .field("library", &self.library.is_some())
+            .field("library_scan", &"<CodebaseMetadata>")
             .finish()
     }
 }
@@ -351,6 +389,8 @@ impl IncrementalAnalysisService {
             autoloaded: Vec::new(),
             declared_returns: HashMap::default(),
             class_logs: ClassLogs::default(),
+            library: None,
+            library_scan: CodebaseMetadata::new(),
             #[cfg(test)]
             analyzed_files: HashSet::default(),
             #[cfg(test)]
@@ -411,6 +451,14 @@ impl IncrementalAnalysisService {
         self
     }
 
+    /// Takes the standard library from `library`, its codex, in place of its files, which the database then holds only
+    /// as built-in files that no analysis scans. With none, a project's analysis has no library but the files it holds.
+    #[must_use]
+    pub fn with_library(mut self, library: Option<Arc<LibraryCodex>>) -> Self {
+        self.library = library;
+        self
+    }
+
     /// Draws a progress bar for each file pass when `use_progress_bars` is set.
     #[must_use]
     pub fn with_progress_bars(mut self, use_progress_bars: bool) -> Self {
@@ -449,6 +497,104 @@ impl IncrementalAnalysisService {
         self.extern_namespaces = ExternNamespaces::default();
         self.autoloaded.clear();
         self.declared_returns.clear();
+    }
+
+    /// The service's state after its last analysis, encoded after `key`, which [`Self::restore`] reads back: the
+    /// codebase, the reference graphs and each file's state, so a later run rechecks only what changed since, as watch
+    /// mode does. None before the first analysis, when an extension scans the codebase, since the declarations it is
+    /// given hold values no decoding rebuilds, and when a vendor file the autoloader served has no path to read again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when the state does not encode.
+    pub fn persist(&self, key: &[u8]) -> Result<Option<Vec<u8>>, OrchestratorError> {
+        if !self.initialized || self.codebase_scan_plan.is_some() {
+            return Ok(None);
+        }
+        let Some(autoloaded) = self.autoloaded.iter().map(|file| file.path.clone()).collect::<Option<Vec<_>>>() else {
+            return Ok(None);
+        };
+        let state = Persisted {
+            codebase: Cow::Borrowed(&self.codebase),
+            symbol_references: Cow::Borrowed(&self.symbol_references),
+            native_symbol_references: Cow::Borrowed(&self.native_symbol_references),
+            external_symbol_references: Cow::Borrowed(&self.external_symbol_references),
+            late_symbol_references: Cow::Borrowed(&self.late_symbol_references),
+            file_states: Cow::Borrowed(&self.file_states),
+            before_analysis_reads: Cow::Borrowed(&self.before_analysis_reads),
+            codebase_issues: Cow::Borrowed(&self.codebase_issues),
+            lifecycle_issues: Cow::Borrowed(&self.lifecycle_issues),
+            namespace_classes: Cow::Borrowed(&self.namespace_classes),
+            changing_members: Cow::Borrowed(&self.changing_members),
+            extern_namespaces: Cow::Borrowed(&self.extern_namespaces),
+            declared_returns: Cow::Borrowed(&self.declared_returns),
+            class_logs: Cow::Borrowed(&self.class_logs),
+            autoloaded,
+        };
+        let mut bytes = key.to_vec();
+        bytes.extend(bincode::serde::encode_to_vec(&state, bincode::config::standard()).map_err(|error| {
+            OrchestratorError::General(format!("The state of the analysis does not encode: {error}."))
+        })?);
+
+        Ok(Some(bytes))
+    }
+
+    /// Takes the state [`Self::persist`] encoded in `bytes` as the state its last analysis left: the analysis's state,
+    /// with the database the service was made with and each vendor file the autoloader served then, read again, so
+    /// [`Self::analyze_incremental`] rechecks each file that changed since. Returns whether it took it. It takes none,
+    /// and the service stays as it was, when `bytes` don't start with `key` or hold no state, when an extension now
+    /// scans the codebase, and when a vendor file served then is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when the extensions' codebase scan plan can't be made, or a vendor file served
+    /// then can't be read.
+    pub fn restore(&mut self, bytes: &[u8], key: &[u8]) -> Result<bool, OrchestratorError> {
+        let Some(encoded) = bytes.strip_prefix(key) else {
+            return Ok(false);
+        };
+        let Ok((state, _)) =
+            bincode::serde::decode_from_slice::<Persisted<'static>, _>(encoded, bincode::config::standard())
+        else {
+            return Ok(false);
+        };
+        if self
+            .plugin_registry
+            .external_codebase_scan_plan()
+            .map_err(mago_analyzer::error::AnalysisError::from)?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        let mut autoloaded = Vec::with_capacity(state.autoloaded.len());
+        for path in &state.autoloaded {
+            let Some(file) = self.autoloader.as_ref().map(|autoloader| autoloader.file_at(path)).transpose()?.flatten()
+            else {
+                return Ok(false);
+            };
+            autoloaded.push(file);
+        }
+        self.database.extend(autoloaded.iter().cloned());
+        self.autoloaded = autoloaded;
+        let mut codebase = state.codebase.into_owned();
+        codebase.populate_derived_maps();
+        self.codebase = codebase;
+        self.symbol_references = state.symbol_references.into_owned();
+        self.native_symbol_references = state.native_symbol_references.into_owned();
+        self.external_symbol_references = state.external_symbol_references.into_owned();
+        self.late_symbol_references = state.late_symbol_references.into_owned();
+        self.file_states = state.file_states.into_owned();
+        self.before_analysis_reads = state.before_analysis_reads.into_owned();
+        self.codebase_issues = state.codebase_issues.into_owned();
+        self.lifecycle_issues = state.lifecycle_issues.into_owned();
+        self.namespace_classes = state.namespace_classes.into_owned();
+        self.changing_members = state.changing_members.into_owned();
+        self.extern_namespaces = state.extern_namespaces.into_owned();
+        self.declared_returns = state.declared_returns.into_owned();
+        self.class_logs = state.class_logs.into_owned();
+        self.initialized = true;
+
+        Ok(true)
     }
 
     /// Takes in that the compiled files of `classes`, each a lowercase class name, changed: starts again each extension
@@ -900,6 +1046,14 @@ impl IncrementalAnalysisService {
         // The prelude decodes while the files scan, so no copy of it outlives an analysis.
         let ((mut merged_codebase, mut symbol_references), scans) =
             rayon::join(self.prelude, || scan_files(source_files));
+        if let Some(library) = &self.library {
+            merged_codebase.extend(library.metadata.clone());
+            for file in
+                self.database.files().filter(|file| file.is_standard_library && file.file_type == FileType::Builtin)
+            {
+                merged_codebase.name_file(file.id, &file.name);
+            }
+        }
         let (mut per_file_results, reached): (Vec<FileScan>, Vec<WordSet>) = scans?.into_iter().unzip();
         if let Some(autoloader) = &autoloader {
             // A vendor file another analysis of the run served is the one this one serves, as the file it scanned.
@@ -927,20 +1081,20 @@ impl IncrementalAnalysisService {
                 Scans { settings: Some(settings), files: kept.into_inner().unwrap_or_else(PoisonError::into_inner) };
         }
 
+        // The standard library's codex counts as one more scanned file. Its own names resolved when it was released,
+        // against its own files, so nothing here scans it again.
+        let library = self.library.as_deref().map(|library| &library.metadata);
+        let scanned = || per_file_results.iter().map(|(_, _, metadata, _, _)| metadata).chain(library);
         // A class-like's name never depends on how names resolve, so the first scan finds every class-like that wins
         // over a default class-like, and the files that name one are scanned again against them.
-        self.namespace_classes = NamespaceClasses::new(per_file_results.iter().flat_map(|(_, _, metadata, _, _)| {
+        self.namespace_classes = NamespaceClasses::new(scanned().flat_map(|metadata| {
             metadata.class_likes.values().map(|class_like| (class_like.original_name, class_like.flags.is_sharp()))
         }));
         // An extension changes only as a whole analysis runs again, so the members that change their receiver stay.
-        self.changing_members = ChangingMembers::new(
-            per_file_results.iter().flat_map(|(_, _, metadata, _, _)| receiver_changing_members(metadata)),
-        );
+        self.changing_members = ChangingMembers::new(scanned().flat_map(receiver_changing_members));
         // A namespace a `.sharp` file gives a library's classes, spec section 23, changes what a class name means in
         // every PHP# file, so each is scanned again against them.
-        self.extern_namespaces = ExternNamespaces::new(extern_namespace_classes(
-            &per_file_results.iter().map(|(_, _, metadata, _, _)| metadata).collect::<Vec<_>>(),
-        ));
+        self.extern_namespaces = ExternNamespaces::new(extern_namespace_classes(&scanned().collect::<Vec<_>>()));
         let namespace_classes = &self.namespace_classes;
         let extern_namespaces = &self.extern_namespaces;
         per_file_results
@@ -991,6 +1145,10 @@ impl IncrementalAnalysisService {
         scan.end();
 
         let populate = Phase::start("populate");
+        self.library_scan = CodebaseMetadata::new();
+        for (_, _, metadata, _, _) in per_file_results.iter().filter(|(file, ..)| file.is_standard_library) {
+            self.library_scan.extend(metadata.clone());
+        }
         let staged: Vec<(FileId, u64, CodebaseEntryKeys, Vec<mago_word::Word>)> = per_file_results
             .into_iter()
             .map(|(file, content_hash, metadata, _, named)| {
@@ -2841,8 +2999,9 @@ impl IncrementalAnalysisService {
                 .filter_map(|file_id| Some((*file_id, self.file_states.get(file_id)?.effect_summaries.as_slice()))),
         );
         effect_summaries.sort_unstable_by_key(|(file_id, _)| *file_id);
+        let library = self.library.iter().flat_map(|library| library.effect_summaries.iter());
         let effect_summaries: Vec<EffectSummary> =
-            effect_summaries.into_iter().flat_map(|(_, summaries)| summaries.iter().cloned()).collect();
+            library.chain(effect_summaries.into_iter().flat_map(|(_, summaries)| summaries.iter())).cloned().collect();
         let native_symbol_references = aggregated_result.symbol_references.clone();
         aggregated_result.symbol_references.extend(external_symbol_references.clone());
         aggregated_result.symbol_references.extend(late_symbol_references.clone());
@@ -3587,6 +3746,54 @@ mod tests {
             only_incr.is_empty() && only_full.is_empty(),
             "Incremental and full analysis produced different issues.\n  Only in incremental: {only_incr:?}\n  Only in full: {only_full:?}"
         );
+    }
+
+    /// A service restored from the state another persisted after its analysis takes up where that one left off: after
+    /// a body edit it analyzes the edited file alone, after a signature edit the file that reads the edited declaration
+    /// too, and each time it reports what a full analysis of the edited tree reports.
+    #[test]
+    fn a_restored_service_rechecks_only_what_changed_and_matches_a_full_analysis() {
+        let files = vec![
+            ("src/a.php", "<?php\nfunction get_value(): int { return 42; }\n"),
+            ("src/b.php", "<?php\nfunction use_value(): int { return get_value(); }\n"),
+            ("src/c.php", "<?php\nfunction other(): string { return 'c'; }\n"),
+        ];
+        for (edit, analyzed) in [
+            ("<?php\nfunction get_value(): int { return 99; }\n", vec!["src/a.php"]),
+            ("<?php\nfunction get_value(): string { return 'x'; }\n", vec!["src/a.php", "src/b.php"]),
+        ] {
+            let mut db = make_database(files.clone());
+            let mut first = make_service(&db);
+            first.analyze().expect("the first analysis runs");
+            let bytes = first.persist(b"key").expect("the state encodes").expect("the service holds state to encode");
+
+            db.update(FileId::new(b"src/a.php"), Cow::Owned(edit.as_bytes().to_vec()));
+            let mut restored = make_service(&db);
+            assert!(restored.restore(&bytes, b"key").expect("the state restores"), "{edit}");
+            let incremental = restored.analyze_incremental(None).expect("the recheck runs");
+            let full = make_service(&db).analyze().expect("the full analysis runs");
+
+            let expected: HashSet<FileId> = analyzed.iter().map(|name| FileId::new(name.as_bytes())).collect();
+            assert_eq!(restored.analyzed_files, expected, "{edit}");
+            let (only_incremental, only_full) = diff_issues(&incremental.issues, &full.issues);
+            assert!(only_incremental.is_empty() && only_full.is_empty(), "{edit}: {only_incremental:?} {only_full:?}");
+        }
+    }
+
+    /// State persisted under another key, or cut short, restores nothing, and the service stays as it was, to analyze
+    /// from scratch.
+    #[test]
+    fn state_under_another_key_or_cut_short_restores_nothing() {
+        let db = make_database(vec![("src/a.php", "<?php\nfunction get_value(): int { return 42; }\n")]);
+        let mut first = make_service(&db);
+        first.analyze().expect("the first analysis runs");
+        let bytes = first.persist(b"key").expect("the state encodes").expect("the service holds state to encode");
+
+        let mut restored = make_service(&db);
+
+        assert!(!restored.restore(&bytes, b"another").expect("the restore runs"));
+        assert!(!restored.restore(&bytes[..bytes.len() / 2], b"key").expect("the restore runs"));
+        assert!(!restored.is_initialized());
     }
 
     #[test]

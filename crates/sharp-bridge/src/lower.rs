@@ -284,6 +284,7 @@ use inline::InlineReceiver;
 use types::Declaration;
 use types::DeclarationKind;
 use types::Equality;
+use types::FilledClass;
 use types::FunctionType;
 use types::MembersByKind;
 use types::PlainParameter;
@@ -585,6 +586,8 @@ struct Lowering<'lowering, 'arena> {
     method_type_parameters: HashMap<u32, usize>,
     /// Whether the file declares a test module, so each of its classes starts and ends its tests.
     tested: bool,
+    /// Whether PHPUnit creates the class being lowered, whose services the container fills, spec section 32.
+    filled: Option<FilledClass>,
     /// Whether the expression being lowered is one PHP evaluates as a constant expression, where a `Map` or a `Set`
     /// constant's read is the PHP array the constant holds, as [`Self::constant_expression`] lowers it.
     in_constant_expression: bool,
@@ -634,6 +637,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             type_parameters: HashMap::default(),
             method_type_parameters: HashMap::default(),
             tested: false,
+            filled: None,
             in_constant_expression: false,
             in_default: false,
             forming: false,
@@ -842,46 +846,35 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// Spec section 32: each test of a class a test file declares runs with the file's module, in PHPUnit's own
     /// process or a child one, because PHPUnit runs the methods `Before` and `After` mark wherever it runs the test.
     /// The class gets `__sharpStartTest`, which calls `\Sharp\Internal\startTest(static::class)` before every other
-    /// `Before` method and `setUp`, and `__sharpEndTest`, which calls `\Sharp\Internal\endTest()` after every other
+    /// `Before` method and `setUp`, then `\Sharp\Internal\fillTest($this)`, which fills the test object's services
+    /// from that module, and `__sharpEndTest`, which calls `\Sharp\Internal\endTest()` after every other
     /// `After` method and `tearDown`, by their priorities. PHP# refuses a member name that starts with `__`, so no
     /// member of the class can take them.
     fn test_hooks(&mut self, class: &Class) -> [u32; 2] {
         let line = self.line(class.class.span);
         let test_class = self.string(ZEND_NAME_NOT_FQ, line, b"static");
         let test_class = self.node(SHARP_AST_CLASS_NAME, 0, line, &[test_class]);
+        let started = self.global_call(line, b"Sharp\\Internal\\startTest", &[test_class]);
+        let this = self.variable(class.class.span, b"this");
+        let filled = self.global_call(line, b"Sharp\\Internal\\fillTest", &[this]);
         let start = self.test_hook(
             class,
             b"__sharpStartTest",
             (b"PHPUnit\\Framework\\Attributes\\Before", i64::MAX),
-            b"Sharp\\Internal\\startTest",
-            &[test_class],
+            &[started, filled],
         );
-        let end = self.test_hook(
-            class,
-            b"__sharpEndTest",
-            (b"PHPUnit\\Framework\\Attributes\\After", i64::MIN),
-            b"Sharp\\Internal\\endTest",
-            &[],
-        );
+        let ended = self.global_call(line, b"Sharp\\Internal\\endTest", &[]);
+        let end =
+            self.test_hook(class, b"__sharpEndTest", (b"PHPUnit\\Framework\\Attributes\\After", i64::MIN), &[ended]);
 
         [start, end]
     }
 
     /// A public `void` method of `class` named `name`, which PHPUnit's attribute runs at the priority `marked` gives,
-    /// and which calls the function `function` with `arguments`.
-    fn test_hook(
-        &mut self,
-        class: &Class,
-        name: &[u8],
-        marked: (&[u8], i64),
-        function: &[u8],
-        arguments: &[u32],
-    ) -> u32 {
+    /// and whose body is `statements`.
+    fn test_hook(&mut self, class: &Class, name: &[u8], marked: (&[u8], i64), statements: &[u32]) -> u32 {
         let line = self.line(class.class.span);
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, arguments);
-        let function = self.string(ZEND_NAME_FQ, line, function);
-        let call = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[call]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, statements);
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
         let return_type = self.string(ZEND_NAME_NOT_FQ, line, b"void");
         let (attribute, priority) = marked;
@@ -975,6 +968,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn class(&mut self, class: &Class) -> u32 {
         self.class = self.names.get(&class.name);
         self.enter(class.name.value);
+        self.filled = self.types.filled_class(word(self.class));
         let (parent, interfaces, parent_name) = match &class.inheritance {
             Some(inheritance) => self.class_header(inheritance),
             None => (NULL, NULL, None),
@@ -987,9 +981,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.extend(self.string_conversion(class.members.as_slice(), class.left_brace, class.right_brace));
         members
             .extend(class.inheritance.as_ref().and_then(|inheritance| self.iteration(inheritance, class.right_brace)));
-        if self.tested {
+        // A test class's services are filled at the start of each test, so one that declares a main constructor starts
+        // its tests outside a test file too.
+        let fills_test = self.filled == Some(FilledClass::Test)
+            && class.members.iter().any(
+                |member| matches!(member, ClassLikeMember::Method(method) if php_method_name(method) == b"__construct"),
+            );
+        if self.tested || fills_test {
             members.extend(self.test_hooks(class));
         }
+        self.filled = None;
         members.extend(self.generic_statics(&class.name, &class.members));
         members.extend(self.class_metadata(word(self.class), self.line(class.name), class.members.as_slice()));
         members.splice(0..0, self.trait_members(class.inheritance.as_ref(), class.left_brace));
@@ -1857,6 +1858,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                             || SUPERGLOBALS.contains(&parameter.variable.name)
                             || parameter.attribute_lists.iter().any(|list| list.target.is_some())
                     });
+                    // Spec section 32: PHPUnit creates a test class and an extension with `new`, so their main
+                    // constructor runs as `__sharpServices`, which the container calls with their services, and each
+                    // property it promotes is declared beside it.
+                    self.promoted_beside |= self.filled.is_some();
                     if self.promoted_beside {
                         for parameter in promoted() {
                             members.push(self.promoted_property(parameter));
@@ -1868,6 +1873,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let constructor =
                         self.method(method, modifier_flags_or_private(&method.modifiers), &initial_values);
                     self.promoted_beside = false;
+                    if let Some(filled) = self.filled {
+                        self.nodes[constructor as usize].text = store_text(&mut self.texts, b"__sharpServices");
+                        self.nodes[constructor as usize].attr = (self.nodes[constructor as usize].attr
+                            & !(ZEND_ACC_PRIVATE | ZEND_ACC_PROTECTED))
+                            | ZEND_ACC_PUBLIC;
+                        members.push(self.filled_constructor(filled, method));
+                    }
 
                     constructor
                 }
@@ -2196,17 +2208,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let field = self.statics_field(field_line, word(self.class), &own, variable.name, PlaceUse::Write);
             writes.push(self.node(SHARP_AST_ASSIGN, 0, field_line, &[field, value]));
         }
-        if let Some(MethodBody::Concrete(block)) = constructor.map(|constructor| &constructor.body) {
-            for statement in &block.statements {
-                writes.push(self.statement(statement));
-            }
-        }
+        let constructor_body: Vec<&Statement> = match constructor.map(|constructor| &constructor.body) {
+            Some(MethodBody::Concrete(block)) => block.statements.iter().collect(),
+            _ => Vec::new(),
+        };
+        let body = self.statement_list(&constructor_body, writes, line);
         self.static_type_parameters = None;
 
         let type_arguments = self.string(0, line, TYPE_ARGUMENTS);
         let parameter = self.node(SHARP_AST_PARAM, 0, line, &[NULL, type_arguments, NULL, NULL, NULL, NULL]);
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &writes);
 
         Some(self.declaration(
             SHARP_AST_METHOD,
@@ -3204,6 +3215,40 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         Some(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[bounds, checks]))
     }
 
+    /// The PHP constructor of a class PHPUnit creates, whose main constructor `method` runs as `__sharpServices`, spec
+    /// section 32: a test class's takes the test's name, as PHPUnit's `TestCase` does, and passes it on, and an
+    /// extension's takes nothing and has the container fill its services.
+    fn filled_constructor(&mut self, filled: FilledClass, method: &Method) -> u32 {
+        let line = self.line(method.name.span);
+        let (parameters, statement) = match filled {
+            FilledClass::Test => {
+                let hint = self.string(ZEND_NAME_NOT_FQ, line, b"string");
+                let name = self.string(0, line, b"name");
+                let parameter = self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL]);
+                let passed = self.variable(method.name.span, b"name");
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[passed]);
+
+                (vec![parameter], self.parent_construct(line, arguments))
+            }
+            FilledClass::Extension => {
+                let this = self.variable(method.name.span, b"this");
+
+                (Vec::new(), self.global_call(line, b"Sharp\\Internal\\fillExtension", &[this]))
+            }
+        };
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[statement]);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            method.name.span,
+            method.body.span(),
+            b"__construct",
+            &[parameters, NULL, body, NULL, NULL],
+        )
+    }
+
     /// `parent::__construct(…)` with `arguments`, the call `: super(…)` runs as, a static call of `parent` as
     /// `super.m()`'s is.
     fn parent_construct(&mut self, line: u32, arguments: u32) -> u32 {
@@ -3218,11 +3263,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn method_body(&mut self, body: &MethodBody, returns_value: bool, mut statements: Vec<u32>) -> u32 {
         match body {
             MethodBody::Concrete(block) => {
-                for statement in &block.statements {
-                    statements.push(self.statement(statement));
-                }
+                let body: Vec<&Statement> = block.statements.iter().collect();
 
-                self.node(SHARP_AST_STMT_LIST, 0, self.line(block), &statements)
+                self.statement_list(&body, statements, self.line(block))
             }
             MethodBody::Expression(body) => {
                 let line = self.line(body);
@@ -5627,12 +5670,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     fn block(&mut self, block: &Block) -> u32 {
-        let mut statements = Vec::new();
-        for statement in &block.statements {
-            statements.push(self.statement(statement));
+        let statements: Vec<&Statement> = block.statements.iter().collect();
+
+        self.statement_list(&statements, Vec::new(), self.line(block))
+    }
+
+    /// The `STMT_LIST` on `line` of `lowered`, nodes lowered before them, then `statements`. A `using` local, spec
+    /// section 2, is its assignment, then a `TRY` whose block holds the statements after it and whose `finally` calls
+    /// the local's `dispose()`. So a `return`, the end of the block and a throw each dispose it, and a later `using`
+    /// local, nested inside, is disposed first.
+    fn statement_list(&mut self, statements: &[&Statement], mut lowered: Vec<u32>, line: u32) -> u32 {
+        for (position, statement) in statements.iter().enumerate() {
+            lowered.push(self.statement(statement));
+            if let Statement::LocalDeclaration(local) = statement
+                && local.is_using()
+            {
+                let LocalTarget::Name(name) = &local.target else {
+                    unreachable!("the parser reads a `using` local with one name, at {:?}", local.span());
+                };
+                let local_line = self.line(local);
+                let rest = self.statement_list(&statements[position + 1..], Vec::new(), local_line);
+                let variable = self.variable(name.span, name.value);
+                let method = self.string(0, local_line, b"dispose");
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, local_line, &[]);
+                let dispose = self.node(SHARP_AST_METHOD_CALL, 0, local_line, &[variable, method, arguments]);
+                let finally = self.node(SHARP_AST_STMT_LIST, 0, local_line, &[dispose]);
+                let catches = self.node(SHARP_AST_CATCH_LIST, 0, local_line, &[]);
+                lowered.push(self.node(SHARP_AST_TRY, 0, local_line, &[rest, catches, finally]));
+                break;
+            }
         }
 
-        self.node(SHARP_AST_STMT_LIST, 0, self.line(block), &statements)
+        self.node(SHARP_AST_STMT_LIST, 0, line, &lowered)
     }
 
     fn statement(&mut self, statement: &Statement) -> u32 {
@@ -8284,15 +8353,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let lambda = closure.span();
         let parameters = self.lambda_parameters(lambda, &closure.parameter_list);
         let ((body, return_type), captures_type_arguments) = self.lambda_body(|lowering| {
-            let mut statements = lowering.collection_parameters(&closure.parameter_list.parameters);
-            for statement in &closure.body.statements {
-                statements.push(lowering.statement(statement));
-            }
+            let statements = lowering.collection_parameters(&closure.parameter_list.parameters);
+            let body: Vec<&Statement> = closure.body.statements.iter().collect();
 
-            (
-                lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(&closure.body), &statements),
-                lowering.lambda_type(lambda),
-            )
+            (lowering.statement_list(&body, statements, lowering.line(&closure.body)), lowering.lambda_type(lambda))
         });
         let uses = self.closure_uses(lambda, captures_type_arguments);
         let attributes = self.attributes(&closure.attribute_lists, None, &[]);
@@ -10578,7 +10642,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Some(Binding::Local(local)) => match local.kind {
                     LocalKind::Parameter => false,
                     LocalKind::Pattern { .. } => self.names.is_written(&local),
-                    LocalKind::Let | LocalKind::Const => self.typed_local(value).is_none(),
+                    LocalKind::Let | LocalKind::Const | LocalKind::Using => self.typed_local(value).is_none(),
                 },
                 _ => true,
             },

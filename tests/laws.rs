@@ -51,17 +51,7 @@ fn compile_proves_a_law_from_its_sharp_file_alone_and_writes_the_compiled_file()
 
 #[test]
 fn compile_proves_a_law_in_a_project_that_installs_the_standard_library() {
-    let directory = lawful_project(&[
-        ("app/Shared/Money.sharp", LAWFUL_MONEY),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/composer.json",
-            "{\n    \"name\": \"heyjordanparker/php-sharp-composer\",\n    \"autoload\": {\n        \"psr-4\": {\n            \"Sharp\\\\\": \"library/Sharp/\"\n        }\n    }\n}\n",
-        ),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math.sharp",
-            "namespace Sharp;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
-        ),
-    ]);
+    let directory = library_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
     let root = directory.path();
 
     let output = compile_lines(root);
@@ -348,6 +338,30 @@ fn a_law_the_fixed_steps_leave_unproven_goes_on_to_lean_s_search() {
     );
     assert!(compiled(root, "app/Shared/Money.sharp").exists());
     assert!(!compiled(root, "app/Shared/Purse.sharp").exists());
+}
+
+/// A law over an enum value closes with the fixed steps on each case of the enum, as a `match` on the value reads one
+/// case in each, so it ends in the one runner, before Lean's search.
+#[cfg(unix)]
+#[test]
+fn a_law_over_an_enum_value_proves_with_the_fixed_steps_on_each_case() {
+    let directory = lawful_project(&[(
+        "app/Auth/Level.sharp",
+        "namespace App.Auth;\n\npublic enum Level\n{\n    case Low;\n    case Mid;\n    case High;\n\n    public int rank() => match (this) {\n        Level.Low => 1,\n        Level.Mid => 2,\n        Level.High => 3,\n    };\n\n    law rankIsPositive(Level a) => a.rank() > 0;\n}\n",
+    )]);
+    let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
+
+    let output = process::output(command(root, "never").env("XDG_CACHE_HOME", counting_cache(lake.path()))).unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let (_, _, steps, _) = runner_request(lake.path())
+        .theorems
+        .into_iter()
+        .find(|(statement, ..)| statement == "«App».«Auth».«Level».«rankIsPositive»")
+        .expect("the law's theorem");
+    assert!(steps.contains("cases «a» <;> "), "{steps}");
+    assert!(compiled(root, "app/Auth/Level.sharp").exists());
 }
 
 #[test]
@@ -4324,13 +4338,94 @@ fn a_law_reaching_another_list_method_is_refused_naming_the_members_it_reads() {
     );
 }
 
-/// `map` and `filter` take a pure function, so a lambda whose body can throw, as `x * 2` throws on overflow, is
-/// refused.
+/// Spec section 28: a lambda passed to a `List`'s `map`, `filter`, `any` or `all`, or a `Map`'s `filter` or `any`, may
+/// call PHP# methods, as `cases()`, `tryFrom` and a static method that compares, so a law proves that no value of one
+/// string enum is a value of another.
 #[test]
-fn a_law_reaching_a_lambda_that_can_throw_is_refused() {
-    assert_unmodeled(
+fn a_law_lambda_may_call_a_method_that_cannot_throw() {
+    let directory = library_project(&[
+        (
+            "app/Kinds/Color.sharp",
+            "namespace App.Kinds;\n\npublic enum Color : string\n{\n    case Red = \"red\";\n    case Blue = \"blue\";\n}\n",
+        ),
+        (
+            "app/Kinds/Mood.sharp",
+            "namespace App.Kinds;\n\npublic enum Mood : string\n{\n    case Calm = \"calm\";\n    case Angry = \"angry\";\n}\n",
+        ),
+        (
+            "app/Kinds/Kinds.sharp",
+            "namespace App.Kinds;\n\npublic static class Kinds\n{\n    public static bool clashes(Color color) => Mood.cases().any(mood => mood.value == color.value);\n\n    public static bool same(Color color, Mood mood) => color.value == mood.value;\n\n    law noColorIsAMood() => Color.cases().filter(color => Mood.cases().filter(mood => mood.value == color.value).isNotEmpty()).isEmpty();\n\n    law noColorClashes() => Color.cases().filter(color => Kinds.clashes(color)).isEmpty();\n\n    law noColorReadsAsAMood() => Color.cases().filter(color => Mood.tryFrom(color.value) != null).isEmpty();\n\n    law noMoodIsThisColor(Color color) => Mood.cases().filter(mood => Kinds.same(color, mood)).isEmpty();\n\n    law aMapKeepsNoClash() => [\"a\": Color.Red, \"b\": Color.Blue].filter(color => Kinds.clashes(color)).isEmpty();\n\n    law aMapHasNoClash() => ![\"a\": Color.Red].any(color => Kinds.clashes(color));\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Kinds/Kinds.sharp").exists());
+}
+
+/// Spec section 28: a lambda whose body can throw, as `x * 2` throws on overflow, translates as a function of the monad
+/// the code runs in, so its law is judged on its own terms: `same` is false for a list whose doubling overflows, so it
+/// is not proved, and no construct refuses it.
+#[test]
+fn a_law_lambda_that_can_throw_translates() {
+    let directory = library_project(&[(
+        "app/Shared/Shape.sharp",
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static List<int> doubled(List<int> items) => items.map(x => x * 2);\n\n    law same(List<int> items) => Shape.doubled(items).count() == items.count();\n}\n",
-        "Law same reaches a lambda whose body can throw in Shape.doubled. Pass a lambda only to a List's `map` or `filter`, with a body that cannot throw, and call a PHP# method in place of any other function value.",
+    )]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert!(!printed(&output).contains("unmodeled-construct"), "{}", printed(&output));
+    assert!(printed(&output).contains("error - law-unproven: law same"), "{}", printed(&output));
+    assert!(!compiled(root, "app/Shared/Shape.sharp").exists());
+}
+
+/// Spec section 25: a class value of a type no family names, as `Class<Object>` and `Class<Any?>`, is a value a law
+/// holds and compares, so a law over a reflection type that holds one, as `Parameter`, reads its fields and compares two
+/// class values.
+#[test]
+fn a_law_over_a_type_with_a_class_value_field_translates() {
+    let directory = library_project(&[(
+        "app/Shared/Shape.sharp",
+        "namespace App.Shared;\n\nimport Sharp.Parameter;\n\npublic static class Shape\n{\n    law namedAsItself(Parameter parameter) => parameter.name == parameter.name;\n\n    law sameType(Parameter a) => a.type == a.type;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Shape.sharp").exists());
+}
+
+/// A law that reaches one construct the translation does not model in two places of another file is refused once, on
+/// the law.
+#[test]
+fn a_refused_law_construct_prints_once() {
+    let directory = library_project(&[
+        (
+            "app/Shared/Box.sharp",
+            "namespace App.Shared;\n\npublic class Box\n{\n    public Box(public string label { get; }, public Function<int(int)> first { get; }, public Function<int(int)> second { get; }) { }\n}\n",
+        ),
+        (
+            "app/Shared/Shape.sharp",
+            "namespace App.Shared;\n\npublic static class Shape\n{\n    law labelled(Box box) => box.label == box.label;\n}\n",
+        ),
+    ]);
+
+    let output = compile_without_lean(directory.path());
+
+    let refusals: Vec<String> =
+        issue_lines(&output).into_iter().filter(|line| line.contains("unmodeled-construct")).collect();
+    assert_eq!(
+        refusals,
+        [
+            "app/Shared/Shape.sharp:5:5:error - unmodeled-construct: Law labelled reaches a function type in Box. Pass a lambda only to a List's `map` or `filter`, with a body that cannot throw, and call a PHP# method in place of any other function value."
+        ],
+        "{}",
+        printed(&output)
     );
 }
 
