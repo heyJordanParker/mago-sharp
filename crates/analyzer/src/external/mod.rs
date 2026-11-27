@@ -77,6 +77,7 @@ pub(crate) use requests::ReturnTypeRecord;
 pub use requests::ReturnTypeRequests;
 pub use scan::CodebaseScanFile;
 pub use scan::CodebaseScanPlan;
+pub use scan::StoredCodebaseScanFile;
 
 const SLOW_PROVIDER_THRESHOLD: Duration = Duration::from_millis(5);
 const SLOW_LIFECYCLE_THRESHOLD: Duration = Duration::from_millis(5);

@@ -1542,11 +1542,14 @@ fn encode_union_snapshot_with_offset<'type_info>(
 }
 
 fn object(class: &'static str, properties: Vec<(&'static str, Value)>) -> Value {
-    Value::Object { class, properties }
+    Value::Object {
+        class: Cow::Borrowed(class),
+        properties: properties.into_iter().map(|(name, value)| (Cow::Borrowed(name), value)).collect(),
+    }
 }
 
 fn case(enumeration: &'static str, case: &'static str) -> Value {
-    Value::Case { enumeration, case }
+    Value::Case { enumeration: Cow::Borrowed(enumeration), case: Cow::Borrowed(case) }
 }
 
 fn span_object(span: mago_span::Span) -> Value {
