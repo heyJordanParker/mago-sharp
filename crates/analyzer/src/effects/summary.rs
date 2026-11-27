@@ -74,6 +74,7 @@ use crate::effects::FunctionValue;
 use crate::effects::Roots;
 use crate::effects::Runs;
 use crate::effects::member_of_effect_class;
+use crate::effects::sharp_attributes;
 use crate::external::Listing;
 use crate::resolver::static_property::StaticProperty;
 use crate::statement::function_like::FunctionLikeBody;
@@ -1071,13 +1072,13 @@ where
                     // A read of attributes has the effects of the class its type argument names, spec section 1: none
                     // for a PHP# attribute class, and those each call gives for the body's own type parameter.
                     match self.attributes_read(declaring_class, method_name, span) {
-                        Some(AttributeArgument::Sharp) => continue,
+                        Some(AttributeArgument::Class(class)) if sharp_attributes(self.codebase(), class) => continue,
                         Some(AttributeArgument::Parameter(index)) => {
                             let cause = self.member_cause(declaring_class, method_name, named_class);
                             self.summary.attribute_reads.push((index, span, cause));
                             continue;
                         }
-                        Some(AttributeArgument::Other) | None => {}
+                        Some(AttributeArgument::Class(_) | AttributeArgument::Other) | None => {}
                     }
                     if self.runs_initial_values(declaring_class, method_name, span) {
                         continue;
@@ -1103,7 +1104,8 @@ where
     /// What the call at `span` of `method` of `class` reads, when the standard library marks the method
     /// `CreatesAttributes`, as `Class<T>.attributes<TAttribute>()`: the attributes of the class its own type argument
     /// names, the last the checker inferred, after an extension block's, as [`Self::attribute_argument`] gives it. The
-    /// read reaches every descendant of that class, so it records the set. None for any other method.
+    /// summary decides what the read does from every descendant of a class it names, so it records that set. None for
+    /// any other method.
     fn attributes_read(&mut self, class: Word, method: Word, span: Span) -> Option<AttributeArgument> {
         let codebase = self.codebase();
         if !codebase
@@ -1113,14 +1115,12 @@ where
             return None;
         }
 
-        let artifacts = self.artifacts;
-        let attribute_class =
-            artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset)).and_then(|types| types.last());
-        if let Some(named) = attribute_class.and_then(|argument| argument.get_single_named_object()) {
-            self.listings.insert(Listing::Descendants(named.name));
+        let argument = self.attribute_arguments(span).last().copied().unwrap_or(AttributeArgument::Other);
+        if let AttributeArgument::Class(attribute_class) = argument {
+            self.listings.insert(Listing::Descendants(attribute_class));
         }
 
-        Some(attribute_class.map_or(AttributeArgument::Other, |argument| self.attribute_argument(argument)))
+        Some(argument)
     }
 
     /// The type arguments the checker inferred for the call at `span`, by the callee's own type parameter index, each as
@@ -1133,11 +1133,9 @@ where
             .unwrap_or_default()
     }
 
-    /// What `argument` is to a read of the attributes of the class it names, spec sections 1 and 25. A PHP# class-like
-    /// that no plain PHP class extends or implements, since the attributes a read creates are of the class or of one
-    /// that extends or implements it, and whose constructor, each one's own or inherited, PHP# declares, has attributes
-    /// a read creates with no effects. A type parameter of the body's own method gives the type argument each of its
-    /// calls gives. Any other type may have every effect.
+    /// What `argument` is to a read of the attributes of the class it names, spec sections 1 and 25: the class-like it
+    /// names, which [`sharp_attributes`] decides where a read takes it, a type parameter of the body's own method, which
+    /// each of its calls gives, or any other type, which may have every effect.
     fn attribute_argument(&self, argument: &TUnion) -> AttributeArgument {
         let codebase = self.codebase();
         if let [TAtomic::GenericParameter(parameter)] = &*argument.types
@@ -1152,25 +1150,9 @@ where
             return AttributeArgument::Parameter(index as u32);
         }
 
-        let is_sharp = |class: Word| codebase.get_class_like(class).is_some_and(|class| class.flags.is_sharp());
-        let written_in_sharp = |class: Word| {
-            is_sharp(class)
-                && codebase
-                    .get_declaring_method_class(class, word("__construct"))
-                    .is_none_or(|constructor| is_sharp(word(constructor.as_bytes())))
-        };
-        match argument.get_single_named_object() {
-            Some(named)
-                if written_in_sharp(named.name)
-                    && codebase
-                        .get_all_descendants(named.name)
-                        .iter()
-                        .all(|descendant| written_in_sharp(word(descendant.as_bytes()))) =>
-            {
-                AttributeArgument::Sharp
-            }
-            _ => AttributeArgument::Other,
-        }
+        argument
+            .get_single_named_object()
+            .map_or(AttributeArgument::Other, |named| AttributeArgument::Class(named.name))
     }
 
     /// The callee of a call of `method` of `declaring_class`, through `named_class` when the call names another, as

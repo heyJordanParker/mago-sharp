@@ -5130,6 +5130,40 @@ mod tests {
         assert_matches_full_with(&service, &db, "a plain descendant of Order added", make_library_watch_service);
     }
 
+    /// Spec sections 1 and 25: a generic helper that reads `attributes<TAttribute>()` has the effects of the class each
+    /// call names, so a plain PHP descendant of `Column` added in another file refuses the pure caller of
+    /// `Marks.marked<Column>(…)` in a watch, as a full analysis refuses it, though neither the helper's file nor the
+    /// caller's changed.
+    #[test]
+    fn test_watch_a_plain_descendant_of_an_attribute_class_refuses_a_generic_helper_s_pure_caller() {
+        let column = "namespace App;\n\n[Attribute]\npublic class Column\n{\n    public Column(public string name { get; } = \"\") { }\n}\n";
+        let marks = "namespace App;\n\npublic static class Marks\n{\n    public static List<TAttribute> marked<TAttribute : Object>(Method method) => method.attributes<TAttribute>();\n}\n";
+        let checker = "namespace App;\n\npublic interface Checker\n{\n    int count(Method method);\n}\n";
+        let counted = "namespace App;\n\npublic class Counted : Checker\n{\n    public int count(Method method) => Marks.marked<Column>(method).count();\n}\n";
+        let loud = "<?php\n\nnamespace Lib;\n\nclass LoudColumn extends \\App\\Column\n{\n    public function __construct()\n    {\n        echo \"loud\\n\";\n        parent::__construct(\"loud\");\n    }\n}\n";
+        let files = [
+            ("src/App/Column.sharp", column),
+            ("src/App/Marks.sharp", marks),
+            ("src/App/Checker.sharp", checker),
+            ("src/App/Counted.sharp", counted),
+        ];
+        let mut db = make_library_database(files.to_vec());
+        let mut service = make_library_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(incompatible_effects(&service), Vec::<String>::new());
+
+        add_file(&mut db, "src/Lib/LoudColumn.php", loud);
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(
+            incompatible_effects(&service),
+            [
+                "`Counted.count` reaches `Method.attributes`, which may have every effect, so the pure `Checker.count` cannot accept it."
+            ]
+        );
+        assert_matches_full_with(&service, &db, "a plain descendant of Column added", make_library_watch_service);
+    }
+
     /// Spec section 29: `defaultValue()` has the effects of every initial value the program declares that is not
     /// constant, so a default added in another file that creates a `Stamp`, whose constructor reads the clock, refuses
     /// the pure caller in a watch, as a full analysis refuses it, though the caller's file is unchanged.
