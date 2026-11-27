@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use foldhash::HashMap;
+use foldhash::HashSet;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -73,6 +74,7 @@ use crate::effects::FunctionValue;
 use crate::effects::Roots;
 use crate::effects::Runs;
 use crate::effects::member_of_effect_class;
+use crate::external::Listing;
 use crate::resolver::static_property::StaticProperty;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_holder;
@@ -105,7 +107,9 @@ pub(crate) fn record<'ast, 'arena, A>(
 
     let function_values = std::mem::take(&mut artifacts.function_values);
     let readonly_calls = std::mem::take(&mut artifacts.readonly_calls);
-    let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, initializer, code);
+    let (mut summary, mut lambdas, listings) =
+        summarize(context, artifacts, class, body, member, parameters, initializer, code);
+    artifacts.listings.extend(listings);
     summary.function_values = function_values;
     summary.readonly_calls = readonly_calls;
     // Code that reaches an object of an abstract effect class, the real one or a fake, has that effect, whatever its
@@ -415,7 +419,8 @@ fn function_value_runs(codebase: &CodebaseMetadata, function: Word) -> Runs {
     plain_php_runs(declaration, callee, callee)
 }
 
-/// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
+/// The summary of `body`, a body of the class `class`, the summaries of the lambdas written in it, and the sets of the
+/// program they read whole.
 #[allow(clippy::too_many_arguments)]
 fn summarize<'ast, 'arena, A>(
     context: &Context<'_, 'arena, A>,
@@ -426,7 +431,7 @@ fn summarize<'ast, 'arena, A>(
     parameters: Vec<Span>,
     initializer: Option<&'ast ConstructorInitializer<'arena>>,
     code: FunctionLikeBody<'ast, 'arena>,
-) -> (EffectSummary, Vec<EffectSummary>)
+) -> (EffectSummary, Vec<EffectSummary>, HashSet<Listing>)
 where
     A: Arena,
 {
@@ -487,6 +492,7 @@ where
         },
         summary: empty_summary(),
         lambda_summaries: Vec::new(),
+        listings: HashSet::default(),
     };
 
     // A local takes the roots of every value assigned to it anywhere in the body, so the walk repeats until no
@@ -523,7 +529,24 @@ where
         }
     }
 
-    (recorder.summary, recorder.lambda_summaries)
+    (recorder.summary, recorder.lambda_summaries, recorder.listings)
+}
+
+/// Every PHP# property that declares an initial value, as its class and its name, which a read of an initial value can
+/// run, spec section 29. PHP takes only a constant expression for a property, so a plain PHP one runs no code.
+pub(crate) fn initial_values(codebase: &CodebaseMetadata) -> Vec<(Word, Word)> {
+    codebase
+        .class_likes
+        .values()
+        .filter(|class_like| class_like.flags.is_sharp())
+        .flat_map(|class_like| {
+            class_like
+                .properties
+                .iter()
+                .filter(|(_, metadata)| metadata.flags.has_default())
+                .map(|(property, _)| (class_like.name, *property))
+        })
+        .collect()
 }
 
 /// The state of one body's walk.
@@ -556,6 +579,8 @@ where
     summary: EffectSummary,
     /// The summary of each lambda written in the body, once, which a function value of the lambda runs.
     lambda_summaries: Vec<EffectSummary>,
+    /// The sets of the program the body's summary read whole, so a watch analyzes the file again when one changes.
+    listings: HashSet<Listing>,
 }
 
 impl<'ctx, 'ast, 'arena, A> Recorder<'_, 'ctx, 'ast, 'arena, A>
@@ -976,8 +1001,9 @@ where
         }
 
         let parameters = parameters.parameters.iter().map(|parameter| parameter.variable.span).collect();
-        let (summary, lambdas) =
+        let (summary, lambdas, listings) =
             summarize(self.context, self.artifacts, self.class, body, empty_word(), parameters, None, code);
+        self.listings.extend(listings);
         self.lambda_summaries.push(summary);
         for lambda in lambdas {
             if !self.lambda_summaries.iter().any(|summary| summary.body == lambda.body) {
@@ -1076,9 +1102,9 @@ where
 
     /// What the call at `span` of `method` of `class` reads, when the standard library marks the method
     /// `CreatesAttributes`, as `Class<T>.attributes<TAttribute>()`: the attributes of the class its own type argument
-    /// names, the last the checker inferred, after an extension block's, as [`Self::attribute_argument`] gives it. None
-    /// for any other method.
-    fn attributes_read(&self, class: Word, method: Word, span: Span) -> Option<AttributeArgument> {
+    /// names, the last the checker inferred, after an extension block's, as [`Self::attribute_argument`] gives it. The
+    /// read reaches every descendant of that class, so it records the set. None for any other method.
+    fn attributes_read(&mut self, class: Word, method: Word, span: Span) -> Option<AttributeArgument> {
         let codebase = self.codebase();
         if !codebase
             .get_method(class, method)
@@ -1087,7 +1113,14 @@ where
             return None;
         }
 
-        Some(self.attribute_arguments(span).last().copied().unwrap_or(AttributeArgument::Other))
+        let artifacts = self.artifacts;
+        let attribute_class =
+            artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset)).and_then(|types| types.last());
+        if let Some(named) = attribute_class.and_then(|argument| argument.get_single_named_object()) {
+            self.listings.insert(Listing::Descendants(named.name));
+        }
+
+        Some(attribute_class.map_or(AttributeArgument::Other, |argument| self.attribute_argument(argument)))
     }
 
     /// The type arguments the checker inferred for the call at `span`, by the callee's own type parameter index, each as
@@ -1164,14 +1197,9 @@ where
         {
             return false;
         }
-        let mut callees = Vec::new();
-        for class_like in codebase.class_likes.values().filter(|class_like| class_like.flags.is_sharp()) {
-            for (property, metadata) in &class_like.properties {
-                if metadata.flags.has_default() {
-                    callees.push(Body::InitialValue(class_like.name, *property));
-                }
-            }
-        }
+        let mut callees: Vec<Body> =
+            initial_values(codebase).into_iter().map(|(class, property)| Body::InitialValue(class, property)).collect();
+        self.listings.insert(Listing::InitialValues);
 
         callees.sort_unstable();
         for callee in callees {

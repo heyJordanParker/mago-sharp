@@ -4556,24 +4556,52 @@ mod tests {
         );
     }
 
+    fn watch_settings() -> Settings {
+        Settings {
+            diff: true,
+            find_unused_definitions: true,
+            find_unused_parameters: true,
+            check_missing_override: true,
+            ..Default::default()
+        }
+    }
+
     fn make_watch_service(db: &Database<'_>) -> IncrementalAnalysisService {
-        make_service_with_settings(
-            db,
-            Settings {
-                diff: true,
-                find_unused_definitions: true,
-                find_unused_parameters: true,
-                check_missing_override: true,
-                ..Default::default()
-            },
+        make_service_with_settings(db, watch_settings())
+    }
+
+    fn prelude() -> (CodebaseMetadata, SymbolReferences) {
+        let mago_prelude::Prelude { metadata, symbol_references, .. } = crate::service::PRELUDE.clone();
+
+        (metadata, symbol_references)
+    }
+
+    /// A watch service over the prelude, which declares the standard library's marks and engine functions.
+    fn make_library_watch_service(db: &Database<'_>) -> IncrementalAnalysisService {
+        IncrementalAnalysisService::new(
+            db.read_only(),
+            prelude,
+            watch_settings(),
+            ParserSettings::default(),
+            Arc::clone(&PLUGIN_REGISTRY),
         )
     }
 
     /// Compare incremental analysis against a fresh full analysis.
     /// Panics with a detailed diff if they disagree.
     fn assert_matches_full(service: &IncrementalAnalysisService, db: &Database<'_>, context: &str) {
+        assert_matches_full_with(service, db, context, make_watch_service);
+    }
+
+    /// Compare incremental analysis against a fresh full analysis of a service `make` builds.
+    fn assert_matches_full_with(
+        service: &IncrementalAnalysisService,
+        db: &Database<'_>,
+        context: &str,
+        make: fn(&Database<'_>) -> IncrementalAnalysisService,
+    ) {
         let incremental_issues = service.collect_all_issues();
-        let mut fresh = make_watch_service(db);
+        let mut fresh = make(db);
         let full = fresh.analyze().expect("Full analysis failed.");
         let (only_incr, only_full) = diff_issues(&incremental_issues, &full.issues);
         assert!(
@@ -4985,6 +5013,156 @@ mod tests {
         service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
         assert_eq!(impure_laws(&service), 1);
         assert_matches_full(&service, &db, "Order gains discount");
+    }
+
+    /// The standard library's reflection classes, whose `attributes<T>()` and `defaultValue()` read the whole program,
+    /// and its `Json`, whose `decode<T>()` takes a type argument and reads no attributes.
+    const LIBRARY: [(&str, &str); 9] = [
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ClassMembers.sharp",
+            include_str!("../../../../../composer/library/Sharp/ClassMembers.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Field.sharp",
+            include_str!("../../../../../composer/library/Sharp/Field.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Method.sharp",
+            include_str!("../../../../../composer/library/Sharp/Method.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Parameter.sharp",
+            include_str!("../../../../../composer/library/Sharp/Parameter.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Property.sharp",
+            include_str!("../../../../../composer/library/Sharp/Property.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Visibility.sharp",
+            include_str!("../../../../../composer/library/Sharp/Visibility.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Internal/Builtins.sharp",
+            include_str!("../../../../../composer/library/Sharp/Internal/Builtins.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Json.sharp",
+            include_str!("../../../../../composer/library/Sharp/Encoding/Json.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/JsonValue.sharp",
+            include_str!("../../../../../composer/library/Sharp/Encoding/JsonValue.sharp"),
+        ),
+    ];
+
+    fn incompatible_effects(service: &IncrementalAnalysisService) -> Vec<String> {
+        service
+            .collect_all_issues()
+            .iter()
+            .filter(|issue| issue.code.as_deref() == Some("incompatible-effects"))
+            .map(|issue| issue.message.clone())
+            .collect()
+    }
+
+    fn add_file(db: &mut Database<'static>, name: &str, contents: &str) {
+        db.add(File::new(
+            Cow::Owned(name.as_bytes().to_vec()),
+            FileType::Host,
+            None,
+            Cow::Owned(contents.as_bytes().to_vec()),
+        ));
+    }
+
+    /// A database of `files` and the standard library's classes `LIBRARY` holds, each marked as the standard library's.
+    fn make_library_database(files: Vec<(&str, &str)>) -> Database<'static> {
+        let mut db = make_database(files);
+        for (name, contents) in LIBRARY {
+            let mut file =
+                File::new(Cow::Borrowed(name.as_bytes()), FileType::Host, None, Cow::Borrowed(contents.as_bytes()));
+            file.is_standard_library = true;
+            db.add(file);
+        }
+
+        db
+    }
+
+    /// Spec sections 1 and 25: `attributes<Column>()` of a PHP# attribute class is pure only while no plain PHP class
+    /// extends `Column`, so a plain PHP descendant added in another file refuses the pure caller in a watch, as a full
+    /// analysis refuses it, though the caller's file is unchanged. A call that takes a class as its type argument and
+    /// reads no attributes, as `Json.decode<Order>()`, keeps its file unanalyzed when the class gains a descendant.
+    #[test]
+    fn test_watch_a_plain_descendant_of_an_attribute_class_refuses_its_pure_reader() {
+        let column = "namespace App;\n\n[Attribute]\npublic class Column\n{\n    public Column(public string name { get; } = \"\") { }\n}\n";
+        let ledger = "namespace App;\n\npublic interface Ledger\n{\n    bool marked(Class<Object> type);\n}\n";
+        let entry = "namespace App;\n\n[Column(\"entries\")]\npublic class Entry : Ledger\n{\n    public bool marked(Class<Object> type) => type.attributes<Column>().count() > 0;\n}\n";
+        let order = "namespace App;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n}\n";
+        let orders = "namespace App;\n\nimport Sharp.Encoding.Json;\n\npublic class Orders\n{\n    public Order read(string json) => Json.decode<Order>(json);\n}\n";
+        let loud = "<?php\n\nnamespace Lib;\n\nclass LoudColumn extends \\App\\Column\n{\n    public function __construct()\n    {\n        echo \"loud\\n\";\n        parent::__construct(\"loud\");\n    }\n}\n";
+        let big_order = "<?php\n\nnamespace Lib;\n\nclass BigOrder extends \\App\\Order\n{\n}\n";
+        let files = [
+            ("src/App/Column.sharp", column),
+            ("src/App/Ledger.sharp", ledger),
+            ("src/App/Entry.sharp", entry),
+            ("src/App/Order.sharp", order),
+            ("src/App/Orders.sharp", orders),
+        ];
+        let mut db = make_library_database(files.to_vec());
+        let mut service = make_library_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(incompatible_effects(&service), Vec::<String>::new());
+
+        add_file(&mut db, "src/Lib/LoudColumn.php", loud);
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(
+            incompatible_effects(&service),
+            [
+                "`Entry.marked` reaches `ClassMembers.attributes`, which may have every effect, so the pure `Ledger.marked` cannot accept it."
+            ]
+        );
+        assert_matches_full_with(&service, &db, "a plain descendant of Column added", make_library_watch_service);
+
+        add_file(&mut db, "src/Lib/BigOrder.php", big_order);
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert!(!service.analyzed_files.contains(&FileId::new(b"src/App/Orders.sharp")));
+        assert_matches_full_with(&service, &db, "a plain descendant of Order added", make_library_watch_service);
+    }
+
+    /// Spec section 29: `defaultValue()` has the effects of every initial value the program declares that is not
+    /// constant, so a default added in another file that creates a `Stamp`, whose constructor reads the clock, refuses
+    /// the pure caller in a watch, as a full analysis refuses it, though the caller's file is unchanged.
+    #[test]
+    fn test_watch_an_initial_value_with_an_effect_refuses_a_pure_default_reader() {
+        let ledger = "namespace App;\n\npublic interface Ledger\n{\n    bool marked(Class<Object> type);\n}\n";
+        let values = "namespace App;\n\npublic class Values : Ledger\n{\n    public int count { get; set; } = 0;\n\n    public bool marked(Class<Object> type) => type.properties()[0].defaultValue() is int;\n}\n";
+        let stamp = "namespace App;\n\nimport Acme.Chrono;\n\npublic class Stamp\n{\n    public Stamp()\n    {\n        Chrono.now();\n    }\n}\n";
+        let clock = "namespace App.Stubs;\n\nimport Acme.Chrono;\n\nextern Chrono.now uses Clock;\n";
+        let now = "<?php\n\nnamespace Acme\\Chrono;\n\nfunction now(): int { return time(); }\n";
+        let kept = "namespace App;\n\npublic class Kept\n{\n    public Stamp stamp { get; set; } = new Stamp();\n}\n";
+        let files = [
+            ("src/App/Ledger.sharp", ledger),
+            ("src/App/Values.sharp", values),
+            ("src/App/Stamp.sharp", stamp),
+            ("src/App/Stubs/Clock.sharp", clock),
+            ("src/Acme/Chrono/now.php", now),
+        ];
+        let mut db = make_library_database(files.to_vec());
+        let mut service = make_library_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(incompatible_effects(&service), Vec::<String>::new());
+
+        add_file(&mut db, "src/App/Kept.sharp", kept);
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(
+            incompatible_effects(&service),
+            [
+                "`Values.marked` reaches `Stamp.Stamp`, which calls `Chrono.now` with the effect `Clock`, so the pure `Ledger.marked` cannot accept it."
+            ]
+        );
+        assert_matches_full_with(&service, &db, "an initial value creating a Stamp added", make_library_watch_service);
     }
 
     /// A library edit that adds or drops a member a project file calls changes that file's diagnostics, though nothing
