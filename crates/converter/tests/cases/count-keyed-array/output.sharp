@@ -1,0 +1,11 @@
+namespace App;
+
+// PHP's `count` of an array with string keys is the `Map`'s `count()`, which the engine reads in constant time
+// (spec section 12).
+internal final class Fields
+{
+    internal int size(Map<string, string> input)
+    {
+        return input.count();
+    }
+}

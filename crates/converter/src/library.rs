@@ -4,7 +4,9 @@
 //! The prelude's stub of a type test, whose return is `($value is T ? true : false)`, as `is_string`'s is, gives
 //! `value is T` (spec section 21). Every other built-in reaches PHP# only through a standard library member whose body
 //! is one call of that function with PHP's meaning, as `count()` of a `List` is `global.count(items)`: the bridge's
-//! inline forms say which function each member's body calls, and what it passes it.
+//! inline forms say which function each member's body calls, and what it passes it. A body that is one call of an
+//! engine function the prelude marks `RunsAs`, as `count()` of a `Map` is `Internal.size(map)`, runs the PHP function
+//! the mark names.
 //!
 //! A plain PHP library's function, constant or class of PHP's root namespace is reached through the namespace an
 //! `extern namespace` line gives its folder (spec section 23), and the library also says which namespace that is.
@@ -28,6 +30,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_database::loader::Manifests;
 use mago_database::loader::nearest_manifest;
+use mago_names::RUNS_AS;
 use mago_sharp_bridge::FixedArgument;
 use mago_sharp_bridge::InlineForms;
 use mago_sharp_bridge::PhpCall;
@@ -100,7 +103,8 @@ impl Library {
             } else {
                 continue;
             };
-            members.entry(call.function.as_bytes().to_ascii_lowercase()).or_default().push(Member {
+            let function = runs_as(codebase, call.function).unwrap_or(call.function);
+            members.entry(function.as_bytes().to_ascii_lowercase()).or_default().push(Member {
                 class: declaring.original_name,
                 name: method.original_name,
                 shape,
@@ -204,6 +208,18 @@ pub fn differs(member: &Member, function: &FunctionLikeMetadata, codebase: &Code
         }
         _ => None,
     })
+}
+
+/// The PHP function the engine function `function` gives the result of, as its [`RUNS_AS`] mark names it: `count` for
+/// `Sharp\Internal\size`.
+fn runs_as(codebase: &CodebaseMetadata, function: Word) -> Option<Word> {
+    codebase
+        .get_function(function)?
+        .attributes
+        .iter()
+        .find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(RUNS_AS.as_bytes()))?
+        .text_argument(0, b"function")
+        .map(word)
 }
 
 /// The namespace each folder that holds a plain PHP function, constant or class of PHP's root namespace takes: the

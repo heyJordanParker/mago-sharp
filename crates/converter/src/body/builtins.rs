@@ -33,6 +33,8 @@ use crate::library::Member;
 use crate::library::Shape;
 use crate::library::differs;
 use crate::library::short;
+use crate::types::Imports;
+use crate::types::type_text;
 
 /// A value a call of a built-in passes: the call's argument, or a parameter of the lambda a built-in's value becomes,
 /// which is no literal and runs nothing, of the type `union`.
@@ -270,7 +272,12 @@ impl<'input> Converter<'input, '_> {
             };
             let as_bytes = takes_bytes(&declared) && fits(&get_string());
             if !as_bytes && !fits(&declared) {
-                return Err(format!("takes `{}` where this call passes `{}`", declared.get_id(), passed.get_id()));
+                let class = member.class.as_str_lossy();
+                let namespace = class.rsplit_once('\\').map_or("", |(namespace, _)| namespace);
+                let mut own = Imports::new(namespace, codebase, self.input.library);
+                let written =
+                    type_text(&declared, codebase, &mut own).unwrap_or_else(|_| declared.get_id().to_string());
+                return Err(format!("takes `{written}` where this call passes `{}`", passed.get_id()));
             }
             // A value read after the form's first call, or out of order, runs in the form's order, not the call's.
             if index >= member.in_order && !arguments[*slot].argument.is_none_or(runs_nothing) {
