@@ -23765,7 +23765,7 @@ fn a_plain_php_result_keyed_by_array_key_arrives_keyed_by_int_or_string() {
     assert_eq!(issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(), Vec::<String>::new());
     assert_eq!(
         artifacts.expression_types.get(&(start, start + call.len() as u32)).map(|r#type| r#type.get_id().to_string()),
-        Some("list<mixed>|array<int|string, mixed>".to_owned())
+        Some("array<int|string, mixed>|list<mixed>".to_owned())
     );
     assert_eq!(
         recorded_type_arguments(("src/Demo/Report.sharp", sharp), &[SOURCES, source], "Report.counted(map.keys())"),
