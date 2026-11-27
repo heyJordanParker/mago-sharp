@@ -767,6 +767,12 @@ function enumBackingType(string $type): ?string {}
 function makeGenericType(string $type, array $arguments): string {}
 
 /**
+ * Whether a value of the type the class value `$type` holds fits the type the class value `$other` holds, as `is`
+ * answers it for such a value. The standard library's `Class<T>.isAssignableTo()` returns it.
+ */
+function isAssignable(string $type, string $other): bool {}
+
+/**
  * An object of the class the class value `$case` names, the standard library's `EnumCase`, for each case of the enum the
  * class value `$type` names, in the order they are declared, none for a class value that names no enum, which the
  * standard library's `Class<T>.enumCases()` gives.
