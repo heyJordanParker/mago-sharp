@@ -1208,7 +1208,7 @@ const PHPUNIT: [(&str, &str); 3] = [
 
 /// Eloquent's `Model`, the base class of a model, and its `Attribute` of an accessor, as a project's `vendor` folder
 /// holds them.
-const ELOQUENT: [(&str, &str); 2] = [
+const ELOQUENT_MODEL: [(&str, &str); 2] = [
     (
         "vendor/laravel/framework/src/Illuminate/Database/Eloquent/Model.php",
         "<?php\n\nnamespace Illuminate\\Database\\Eloquent;\n\nabstract class Model\n{\n}\n",
@@ -1250,7 +1250,7 @@ fn a_marked_base_class_reaches_public_and_protected_methods_of_its_subclasses() 
     let unmarked = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Model;\n\nextern Model uses none;\n";
     let offer = "namespace App.Store;\n\nimport Illuminate.Database.Eloquent.Casts.Attribute;\nimport Illuminate.Database.Eloquent.Model;\n\npublic final class CartOffer : Model\n{\n    public string offer() => \"offer\";\n\n    protected Attribute label() => Attribute.make(get: (string value) => value.trim());\n}\n";
     let files = |stubs: &'static str| {
-        let mut files = ELOQUENT.to_vec();
+        let mut files = ELOQUENT_MODEL.to_vec();
         files.extend([marker, ("src/App/Stubs/Stubs.sharp", stubs), ("src/App/Store/CartOffer.sharp", offer)]);
         files
     };
@@ -1291,7 +1291,7 @@ fn an_internal_class_or_member_a_framework_reaches_is_too_narrow() {
     let overrides = "namespace App.Hooks;\n\nimport Sharp.Interop.Export;\n\npublic static class Overrides\n{\n    [Export(\"app_title\")]\n    internal static string title(string text) => text;\n}\n";
     let import = "namespace App.Console;\n\npublic class Import\n{\n    internal int main() => 0;\n}\n";
     let mut files = PHPUNIT.to_vec();
-    files.extend(ELOQUENT);
+    files.extend(ELOQUENT_MODEL);
     files.extend([
         marker,
         export,
