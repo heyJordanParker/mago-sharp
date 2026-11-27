@@ -1194,6 +1194,19 @@ fn reassigning_a_parameter_is_an_error() {
     );
 }
 
+/// Spec section 2: a parameter never changes, so a reassignment of one is refused under `parameter-change`, the code
+/// the analyzer gives a change of the collection a parameter holds, so a project that sorts refusals by code finds both
+/// under the rule they break.
+#[test]
+fn a_reassigned_parameter_s_refusal_carries_parameter_change() {
+    let code = "namespace App.Tenant;\n\npublic class Mailer\n{\n    internal static string addressOf(string address)\n    {\n        address = address.trim();\n        return address;\n    }\n}\n";
+
+    assert_eq!(
+        check_in_type_file(code).into_iter().map(|issue| (issue.message, issue.code)).collect::<Vec<_>>(),
+        [("`address` is a parameter, so it never changes.".to_owned(), Some("parameter-change".to_owned()))]
+    );
+}
+
 #[test]
 fn redeclaring_a_name_an_enclosing_block_declares_is_an_error() {
     let code = leak(method(
