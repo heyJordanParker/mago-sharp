@@ -215,6 +215,15 @@ pub fn source_hash(source: &[u8]) -> [u8; 16] {
     xxh3_128(source).to_be_bytes()
 }
 
+/// The checker a compiled file of the standard library names: the PHP# release `version` that ships it.
+///
+/// It stands in place of a build ID, since PHP# compiles the library once, at its release, and every `mago` of that
+/// release on every platform keeps it.
+#[must_use]
+pub fn release_checker(version: &str) -> [u8; 16] {
+    xxh3_128(&[b"release ".as_slice(), version.as_bytes()].concat()).to_be_bytes()
+}
+
 /// The name of the code a check compiles.
 ///
 /// It is the hash of the magic, `SHARP_UNIT_ABI`, `checker`, the build ID of the checker that compiles it, the source's

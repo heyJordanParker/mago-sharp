@@ -738,6 +738,9 @@ pub(crate) fn mark_package(file: &mut File, workspace: &Path, manifests: &mut Ma
     };
 
     file.is_standard_library = manifest.is_standard_library;
+    if file.is_standard_library {
+        file.id = FileId::new(&File::logical_name(&manifest.directory, &path));
+    }
     file.folder_namespace = manifest
         .folders
         .iter()

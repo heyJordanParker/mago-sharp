@@ -117,6 +117,7 @@ use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::function_like::report_union_for_a_class_bound;
 use crate::statement::function_like::written_type;
 use crate::statement::module::check_program_services;
+use crate::statement::refuses_standard_library_namespace;
 use crate::utils::missing_type_hints;
 use crate::utils::names::and_list;
 use crate::utils::names::article;
@@ -157,6 +158,14 @@ fn report_duplicate_definition<A>(
 ) where
     A: Arena,
 {
+    // Spec section 23: a class-like a project declares in the standard library's namespace is refused for that, and the
+    // library's class-like keeps the name.
+    let full_name = name.as_bytes();
+    let namespace = full_name.iter().rposition(|&byte| byte == b'\\').map_or(&full_name[..0], |at| &full_name[..at]);
+    if refuses_standard_library_namespace(context, namespace) {
+        return;
+    }
+
     // Spec section 20: a case of an enum with a case that carries data runs as the class of its name.
     if let Some(case) = context.codebase.get_class_like(name).filter(|original| original.flags.is_enum_case_class()) {
         let full_name = case.original_name.as_bytes();
