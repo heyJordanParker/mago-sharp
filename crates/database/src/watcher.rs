@@ -2082,8 +2082,9 @@ mod tests {
         handler.lock().unwrap_or_else(PoisonError::into_inner).handle_event(Ok(Event::new(edit).add_path(path)));
     }
 
-    /// A stream of edits to another file never holds back the round of an earlier edit: the round that holds
-    /// `app/a.php` starts within 200 ms of its edit, while `app/b.php` changes every 100 ms for 2 s.
+    /// A stream of edits to another file never holds back the round of an earlier edit: `app/b.php` changes edit after
+    /// edit until the round that holds `app/a.php` is reported, so the round ends the stream. A watcher that held the
+    /// round back for as long as changes came would report it only once the stream ran out, at its minute.
     #[test]
     fn a_stream_of_edits_to_another_file_never_holds_back_the_round_of_an_earlier_edit() {
         let (_directory, root) = project();
@@ -2101,21 +2102,31 @@ mod tests {
         let app = root.join("app");
 
         write(&root, "app/a.php", "<?php echo 2;\n");
-        let edited = Instant::now();
         report(&app, app.join("a.php"));
-        let stream = std::thread::spawn(move || {
-            for count in 0..20 {
-                std::thread::sleep(Duration::from_millis(100));
-                std::fs::write(app.join("b.php"), format!("<?php echo {count};\n")).expect("b.php should be written");
-                report(&app, app.join("b.php"));
+        let reported = Arc::new(AtomicBool::new(false));
+        let stream = std::thread::spawn({
+            let reported = Arc::clone(&reported);
+            move || {
+                let deadline = Instant::now() + Duration::from_mins(1);
+                let mut count = 0;
+                while !reported.load(Ordering::Acquire) {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    count += 1;
+                    std::fs::write(app.join("b.php"), format!("<?php echo {count};\n"))
+                        .expect("b.php should be written");
+                    report(&app, app.join("b.php"));
+                }
+                true
             }
         });
         let round = watcher.wait().expect("the watcher should report its changes");
-        let started = edited.elapsed();
-        stream.join().expect("the stream of edits should end");
+        reported.store(true, Ordering::Release);
+        let ended_by_the_round = stream.join().expect("the stream of edits should end");
 
         assert!(round.contains(&FileId::new(b"app/a.php")), "{round:?}");
-        assert!(started <= Duration::from_millis(200), "the round of app/a.php started {started:?} after its edit");
+        assert!(ended_by_the_round, "app/b.php changed for a minute, and the round of app/a.php came only after");
     }
 
     /// A cookie the watcher has not reported is written again, as one a watcher missed while its stream started would
