@@ -15,6 +15,7 @@ use mago_word::word;
 
 use mago_codex::context::ScopeContext;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::TemplateTypes;
@@ -2574,6 +2575,9 @@ where
                 continue;
             }
             report_plain_named_constructor_argument(context, &generic_owner, *template_name, template, argument, span);
+            if is_sharp && let Some(found) = abstract_called_static(codebase, *template_name, template, argument) {
+                report_abstract_called_static(context, *template_name, found, span);
+            }
 
             continue;
         }
@@ -2684,6 +2688,82 @@ fn report_plain_named_constructor_argument<A>(
         ))
         .with_annotation(Annotation::primary(span).with_message(format!("`{argument_name}` is supplied for `{template_name}` here.")))
         .with_help(format!("Supply a PHP# class, which declares its own `{constructor}`.")),
+    );
+}
+
+/// The class `argument` names, and the first static the code that declares `template` calls through it as
+/// `template_name`, as the `wireName` of `T.wireName()`, that the class leaves abstract, spec section 11. The call runs
+/// the type argument's own static, so such a class can't stand for the type parameter, as C# refuses an interface
+/// whose static abstract members it leaves unimplemented as a type argument (CS8920).
+pub(crate) fn abstract_called_static(
+    codebase: &CodebaseMetadata,
+    template_name: Word,
+    template: &GenericTemplate,
+    argument: &TUnion,
+) -> Option<(Word, Word)> {
+    let (GenericParent::ClassLike(class) | GenericParent::FunctionLike((class, _))) = template.defining_entity;
+    let argument_class = argument.get_single_named_object()?.name;
+
+    codebase.get_class_like(class)?.type_parameter_static_calls.iter().find_map(|(entity, name, method)| {
+        if *entity != template.defining_entity || *name != template_name {
+            return None;
+        }
+        let declaring = codebase.get_declaring_method_identifier(&MethodIdentifier::new(argument_class, *method));
+        let metadata = codebase.get_method_by_id(&declaring)?;
+
+        metadata
+            .method_metadata
+            .as_ref()
+            .is_some_and(|method| method.is_static && method.is_abstract)
+            .then_some((argument_class, metadata.original_name))
+    })
+}
+
+/// Reports `argument_class` supplied at `span` for `template_name`, whose code calls the static `method` through it,
+/// which the class leaves abstract, as [`abstract_called_static`] finds it. The help names a class below it that
+/// declares the static, when one exists, to pass as itself.
+pub(crate) fn report_abstract_called_static<A>(
+    context: &mut Context<'_, '_, A>,
+    template_name: Word,
+    (argument_class, method): (Word, Word),
+    span: Span,
+) where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let mut declaring: Vec<Word> = codebase
+        .get_all_descendants(argument_class)
+        .into_iter()
+        .filter_map(|descendant| codebase.get_class_like(descendant))
+        .filter(|descendant| !descendant.flags.is_abstract())
+        .filter(|descendant| {
+            let found = codebase.get_declaring_method_identifier(&MethodIdentifier::new(descendant.name, method));
+            codebase
+                .get_method_by_id(&found)
+                .and_then(|metadata| metadata.method_metadata.as_ref())
+                .is_some_and(|metadata| !metadata.is_abstract)
+        })
+        .map(|descendant| descendant.original_name)
+        .collect();
+    declaring.sort_by(|first, second| first.as_bytes().cmp(second.as_bytes()));
+
+    let argument = display_class_like_name(context, argument_class);
+    let help = match declaring.first() {
+        Some(class) => format!(
+            "Pass the class itself, as `typeof({})`, or reach the static through `methods()` and `createInvoker`.",
+            display_class_like_name(context, *class)
+        ),
+        None => "Pass the class itself, or reach the static through `methods()` and `createInvoker`.".to_owned(),
+    };
+    context.collector.report_with_code(
+        IssueCode::TemplateConstraintViolation,
+        Issue::error(format!(
+            "`{argument}` leaves `{method}` abstract, so it can't stand for `{template_name}`, whose code calls `{template_name}.{method}()`."
+        ))
+        .with_annotation(
+            Annotation::primary(span).with_message(format!("`{argument}` is supplied for `{template_name}` here.")),
+        )
+        .with_help(help),
     );
 }
 

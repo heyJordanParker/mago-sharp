@@ -90,8 +90,10 @@ use crate::invocation::template_inference::widen_to_declared_templates;
 use crate::invocation::template_result::get_class_template_parameters_from_result;
 use crate::invocation::template_result::populate_template_result_from_invocation;
 use crate::invocation::template_result::refine_template_result_for_function_like;
+use crate::statement::function_like::abstract_called_static;
 use crate::statement::function_like::is_member_read;
 use crate::statement::function_like::known_type_or_error;
+use crate::statement::function_like::report_abstract_called_static;
 use crate::statement::function_like::takes_declared_type;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::names::and_list;
@@ -1435,6 +1437,14 @@ where
                 written_type_arguments.as_ref(),
                 &violated_templates,
             );
+            report_abstract_called_statics(
+                context,
+                invocation,
+                metadata,
+                template_types,
+                &type_arguments,
+                written_type_arguments.as_ref(),
+            );
         }
 
         artifacts.record_type_arguments(invocation.span, type_arguments.into_iter(), context.codebase);
@@ -2052,6 +2062,50 @@ pub(crate) fn report_type_arguments_without_equality<A>(
             .with_note(format!("Type parameter `{name}` is bounded by `{bound}`, which holds each type that has `==`."))
             .with_help("Pass values of a type that has `==`."),
         );
+    }
+}
+
+/// Spec section 11: a type argument the call's arguments fix, whose class leaves abstract a static the method's code
+/// calls through its type parameter, as [`abstract_called_static`] finds it, is refused at the first argument whose
+/// parameter names that type parameter, or at the call. One the call or its receiver writes, in `written`, is refused
+/// where it is written.
+fn report_abstract_called_statics<A>(
+    context: &mut Context<'_, '_, A>,
+    invocation: &Invocation<'_, '_, '_>,
+    metadata: &FunctionLikeMetadata,
+    template_types: &TemplateTypes,
+    type_arguments: &[Option<TUnion>],
+    written: Option<&TemplateResult>,
+) where
+    A: Arena,
+{
+    let arguments = invocation.arguments_source.get_arguments();
+    for ((name, template), type_argument) in template_types.iter().zip(type_arguments) {
+        let Some(type_argument) = type_argument else {
+            continue;
+        };
+        if written.is_some_and(|written| written.has_lower_bound(*name, &template.defining_entity)) {
+            continue;
+        }
+        let Some(found) = abstract_called_static(context.codebase, *name, template, type_argument) else {
+            continue;
+        };
+        let names_parameter = |atomic: &&TAtomic| match atomic {
+            TAtomic::GenericParameter(parameter) => parameter.parameter_name == *name,
+            _ => false,
+        };
+        let span = metadata
+            .parameters
+            .iter()
+            .position(|parameter| {
+                parameter
+                    .get_type_metadata()
+                    .is_some_and(|declared| declared.type_union.get_template_types().iter().any(names_parameter))
+            })
+            .and_then(|index| arguments.get(index))
+            .map_or(invocation.span, HasSpan::span);
+
+        report_abstract_called_static(context, *name, found, span);
     }
 }
 
