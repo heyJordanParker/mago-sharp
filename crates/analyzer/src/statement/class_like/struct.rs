@@ -503,7 +503,7 @@ where
     );
 }
 
-/// Reports `Order.parse`, or `Order.tryParse` when it does not `throws`, on a struct or a PHP# class with a field
+/// Reports `Order.parse` on a struct or a PHP# class with a field
 /// `parse` can't read from a value, spec section 10's language rule 11: an enum with no backing value, a function
 /// type, or a class no `parse` builds, also inside a collection or a nested struct or class. A generic type's field
 /// reads as the call's `type_arguments` give it, as `int` for `TFirst` of `Pair<int, string>.parse`, and one of a type
@@ -514,13 +514,12 @@ pub(crate) fn check_struct_parse<A>(
     context: &mut Context<'_, '_, A>,
     r#struct: &ClassLikeMetadata,
     type_arguments: &[TUnion],
-    throws: bool,
     span: Span,
 ) where
     A: Arena,
 {
     report_class_keys_read_twice(context, r#struct, span, &mut Vec::new());
-    let method = if throws { "parse" } else { "tryParse" };
+    let method = "parse";
     let class = display_class_like_name(context, r#struct.original_name);
     for (parsed, type_arguments) in parsed_classes(context.codebase, r#struct, type_arguments) {
         for field in context.codebase.struct_parse_fields(parsed.name) {
@@ -585,7 +584,7 @@ where
         .and_then(|named| Some((named, codebase.get_class_like(named.name)?)))
         .filter(|(_, class)| codebase.parses(class.name));
     if let Some((named, class)) = parsing {
-        check_struct_parse(context, class, named.type_parameters.as_deref().unwrap_or_default(), true, span);
+        check_struct_parse(context, class, named.type_parameters.as_deref().unwrap_or_default(), span);
 
         return;
     }

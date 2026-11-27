@@ -21,8 +21,8 @@ impl MetadataFlags {
     pub const ENUM_INTERFACE: MetadataFlags = MetadataFlags(1 << 5);
     pub const POPULATED: MetadataFlags = MetadataFlags(1 << 6);
     pub const INTERNAL: MetadataFlags = MetadataFlags(1 << 7);
-    /// A member no source declares, which the scanner adds, as a PHP# type's `parse` and `tryParse`, spec section 10,
-    /// or an enum's `cases` and `$name`.
+    /// A member no source declares, which the scanner adds, as a PHP# type's `parse`, spec section 10, or an enum's
+    /// `cases` and `$name`.
     pub const GENERATED: MetadataFlags = MetadataFlags(1 << 8);
     pub const CONSISTENT_CONSTRUCTOR: MetadataFlags = MetadataFlags(1 << 11);
     pub const CONSISTENT_TEMPLATES: MetadataFlags = MetadataFlags(1 << 12);

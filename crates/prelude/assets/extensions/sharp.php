@@ -302,26 +302,36 @@ function jsonDecode(string $json): mixed {}
 
 /**
  * The value of the type the class value `$type` holds that `$value` builds, as a struct's `parse` reads a field of that
- * type, each number and bool read from its text with `$text`. A struct's and a class's `parse`, and the standard
- * library's `Json.decode` and `Query.decode`, read by it.
+ * type, each number and bool read from its text with `$text`, as an `Ok`, or an `Err` whose `ParseError` lists every
+ * bad part under its path. A struct's and a class's `parse`, and the standard library's `Json.parse` and
+ * `Query.parse`, read by it.
  *
  * @template T
  *
  * @param class-string<T> $type
  *
- * @return T
- *
- * @throws \Sharp\InvalidFields
+ * @return \Sharp\Result<T, \Sharp\ParseError>
  */
-function parseAs(string $type, mixed $value, bool $text): mixed {}
+function parseAs(string $type, mixed $value, bool $text): object {}
 
 /**
- * The variant of the family `$family` that `$value` names under the family's key, read as `parseAs` reads it. With
- * `$throws` false, null wherever that throws a ValueError, as `tryParse` gives.
+ * The variant of the family `$family` that `$value` names under the family's key, read as `parseAs` reads it.
  *
- * @throws \Sharp\InvalidFields
+ * @return \Sharp\Result<object, \Sharp\ParseError>
  */
-function parseVariant(string $family, mixed $value, bool $throws = true): ?object {}
+function parseVariant(string $family, mixed $value): object {}
+
+/**
+ * A new `$class`, a backed struct, that holds `$value`, built through its constructor, as an `Ok`, or an `Err` whose
+ * `ParseError` holds the message of the `ValueError` the constructor threw, at "". A backed struct's `parse` reads by it.
+ *
+ * @template T
+ *
+ * @param class-string<T> $class
+ *
+ * @return \Sharp\Result<T, \Sharp\ParseError>
+ */
+function parseHeld(string $class, mixed $value): object {}
 
 /**
  * The class name of the variant of the family `$family` whose `[Key]` is `$tag`, or null. The standard library's

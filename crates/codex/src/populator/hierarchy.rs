@@ -364,12 +364,11 @@ fn inherit_exact_names(metadata: &mut ClassLikeMetadata, codebase: &mut Codebase
     }
 }
 
-/// Gives the `parse` and `tryParse` the scanner gives a PHP# class, spec section 10, up to the pair its parent class
-/// declares when the parent declares either, as a plain PHP date class declares `parse(string)`: the class then
-/// inherits the parent's pair, as it inherits any static method, and has no `tryParse` where the parent has none. The
-/// scanner's pair stays in the class's methods, so each population decides again.
+/// Gives the `parse` the scanner gives a PHP# class, spec section 10, up to the one its parent class declares, as a
+/// plain PHP date class declares `parse(string)`: the class then inherits the parent's, as it inherits any static
+/// method. The scanner's `parse` stays in the class's methods, so each population decides again.
 fn inherit_declared_parse(metadata: &mut ClassLikeMetadata, codebase: &CodebaseMetadata, parent_classname: Word) {
-    let names = [word("parse"), word("tryParse")];
+    let name = word("parse");
     let generated = |id: &MethodIdentifier| {
         codebase
             .function_likes
@@ -380,30 +379,27 @@ fn inherit_declared_parse(metadata: &mut ClassLikeMetadata, codebase: &CodebaseM
     let Some(parent) = codebase.get_class_like_by_word(parent_classname) else {
         return;
     };
-    let parent_declares = names
-        .iter()
-        .any(|name| parent.declaring_method_ids.get(&parent.method_key(*name)).is_some_and(|id| !generated(id)));
+    let parent_declares =
+        parent.declaring_method_ids.get(&parent.method_key(name)).is_some_and(|id| !generated(id));
     // The class being populated is out of the codebase until it is done.
     let own_generated = codebase
         .function_likes
-        .get(&(metadata.name, metadata.method_key(names[0])))
+        .get(&(metadata.name, metadata.method_key(name)))
         .is_some_and(|parse| parse.span == metadata.span);
     if !metadata.flags.is_sharp() || !own_generated || !parent_declares {
         return;
     }
 
-    for name in names {
-        let (key, parent_key) = (metadata.method_key(name), parent.method_key(name));
-        for (ids, parent_ids) in [
-            (&mut metadata.declaring_method_ids, &parent.declaring_method_ids),
-            (&mut metadata.appearing_method_ids, &parent.appearing_method_ids),
-            (&mut metadata.inheritable_method_ids, &parent.inheritable_method_ids),
-        ] {
-            match parent_ids.get(&parent_key) {
-                Some(id) => ids.insert(key, *id),
-                None => ids.remove(&key),
-            };
-        }
+    let (key, parent_key) = (metadata.method_key(name), parent.method_key(name));
+    for (ids, parent_ids) in [
+        (&mut metadata.declaring_method_ids, &parent.declaring_method_ids),
+        (&mut metadata.appearing_method_ids, &parent.appearing_method_ids),
+        (&mut metadata.inheritable_method_ids, &parent.inheritable_method_ids),
+    ] {
+        match parent_ids.get(&parent_key) {
+            Some(id) => ids.insert(key, *id),
+            None => ids.remove(&key),
+        };
     }
 }
 

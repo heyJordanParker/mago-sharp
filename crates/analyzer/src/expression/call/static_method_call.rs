@@ -204,15 +204,9 @@ where
         let method_name = resolved_method.method_identifier.get_method_name();
         if context.dialect.is_sharp()
             && context.codebase.parses(metadata.name)
-            && matches!(method_name.as_bytes(), b"parse" | b"tryParse")
+            && method_name.as_bytes() == b"parse"
         {
-            check_struct_parse(
-                context,
-                metadata,
-                class_type_arguments.as_deref().unwrap_or_default(),
-                method_name.as_bytes() == b"parse",
-                call.span,
-            );
+            check_struct_parse(context, metadata, class_type_arguments.as_deref().unwrap_or_default(), call.span);
             record_parse_fields(context.codebase, block_context, artifacts, metadata.name, &mut Vec::new());
         }
 

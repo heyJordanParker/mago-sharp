@@ -165,9 +165,9 @@ where
     finish_registration(codebase, class_like_metadata)
 }
 
-/// Registers a class. A PHP# class that can be created, neither abstract nor static, gets the `parse` and `tryParse`
-/// a struct gets, spec section 10, unless it declares a member of either name, and so does an abstract one marked
-/// `[Tag]`, a family, whose `parse` builds the variant its input's tag names.
+/// Registers a class. A PHP# class that can be created, neither abstract nor static, gets the `parse` a struct gets,
+/// spec section 10, unless it declares its own, and so does an abstract one marked `[Tag]`, a family, whose `parse`
+/// builds the variant its input's tag names.
 #[inline]
 pub fn register_class<'arena, A>(
     codebase: &mut CodebaseMetadata,
@@ -243,8 +243,8 @@ where
     if interface.sealed.is_some() {
         class_like_metadata.flags |= MetadataFlags::SEALED;
     }
-    // Spec section 10: a PHP# interface marked `[Tag]`, a family, gets the `parse` and `tryParse` that build the
-    // variant its input's tag names.
+    // Spec section 10: a PHP# interface marked `[Tag]`, a family, gets the `parse` that builds the variant its input's
+    // tag names.
     if context.program.dialect.is_sharp()
         && class_like_metadata.tag_key().is_some()
         && leaves_parse_free(&interface.members)
@@ -636,7 +636,7 @@ where
 }
 
 /// Registers a PHP# struct, spec section 10, as the final class it runs as, with the `operator ==` that compares it by
-/// value and the `parse` and `tryParse` that read it, each unless it declares its own.
+/// value and the `parse` that reads it, each unless it declares its own.
 #[inline]
 pub fn register_struct<'arena, A>(
     codebase: &mut CodebaseMetadata,
@@ -2342,9 +2342,9 @@ fn header_name(header: &WordSet, written: &[u8]) -> Option<Word> {
         .copied()
 }
 
-/// Whether `members` declare no member named `parse` or `tryParse`, whose name the generated pair would take: a type
-/// that declares either keeps its own and gets neither. A struct and a PHP# class have exact names, spec section 24, so
-/// a `Parse` of their own is another method and leaves `parse` free.
+/// Whether `members` declare no member named `parse`, whose name the generated `parse` would take: a type that declares
+/// its own keeps it. A struct and a PHP# class have exact names, spec section 24, so a `Parse` of their own is another
+/// method and leaves `parse` free.
 fn leaves_parse_free(members: &Sequence<ClassLikeMember<'_>>) -> bool {
     !members.iter().any(|member| {
         let name = match member {
@@ -2353,7 +2353,7 @@ fn leaves_parse_free(members: &Sequence<ClassLikeMember<'_>>) -> bool {
             _ => return false,
         };
 
-        name == b"parse" || name == b"tryParse"
+        name == b"parse"
     })
 }
 
@@ -2373,7 +2373,8 @@ fn declares_fields(members: &Sequence<ClassLikeMember<'_>>) -> bool {
 
 /// What a backed struct with no fields holds, spec section 10, at its backing type's `span`: the `public T value` it is
 /// stored as, which its constructor's one parameter sets before its body runs, as a promoted parameter does, the
-/// constructor that takes it when it `declares_constructor` none, and the `parse(T value)` that runs that constructor.
+/// constructor that takes it when it `declares_constructor` none, and the `parse(T value)` that runs that constructor and
+/// gives its `Result<Self, ParseError>`, spec section 31.
 fn create_held_value(
     codebase: &mut CodebaseMetadata,
     class_like: &mut ClassLikeMetadata,
@@ -2405,13 +2406,15 @@ fn create_held_value(
         add_method(codebase, b"__construct", class_like, constructor);
     }
     let instance = get_named_object(class_like.original_name, None);
-    let parse = create_static_method("parse", span, vec![create_parameter("$value", backing, span)], instance, vec![]);
+    let parse =
+        create_static_method("parse", span, vec![create_parameter("$value", backing, span)], parse_result(instance), vec![]);
     add_method(codebase, b"parse", class_like, parse);
 }
 
-/// A struct's or a PHP# class's `parse` and `tryParse`, spec section 10, which read a `Map<string, Any?>` or an
-/// object's public properties. Each spans the whole type, which no declared member does, and gives the type with its
-/// own type parameters, as `Pair<TFirst, TSecond>`, which a call such as `Pair<int, string>.parse(…)` fixes.
+/// A struct's or a PHP# class's `parse`, spec section 10, which reads a `Map<string, Any?>` or an object's public
+/// properties. It spans the whole type, which no declared member does, and gives `Result<Self, ParseError>`, spec section
+/// 31, the type with its own type parameters, as `Pair<TFirst, TSecond>`, which a call such as
+/// `Pair<int, string>.parse(…)` fixes.
 fn create_parse_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
     let own_type_parameters: Vec<TUnion> = class_like
         .template_types
@@ -2432,10 +2435,18 @@ fn create_parse_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassL
         let map = get_keyed_array(get_string(), get_mixed());
         create_parameter("$value", TUnion::from_vec([map.types.as_ref(), get_object().types.as_ref()].concat()), span)
     };
-    let parse = create_static_method("parse", span, vec![input()], instance.clone(), vec![]);
+    let parse = create_static_method("parse", span, vec![input()], parse_result(instance), vec![]);
     add_method(codebase, b"parse", class_like, parse);
-    let try_parse = create_static_method("tryParse", span, vec![input()], instance.as_nullable(), vec![]);
-    add_method(codebase, b"tryParse", class_like, try_parse);
+}
+
+/// `Result<T, ParseError>`, what a `parse` gives, spec sections 10 and 31: the `instance` it reads, or the problems.
+fn parse_result(instance: TUnion) -> TUnion {
+    let error = get_named_object(word("Sharp\\ParseError"), None);
+
+    wrap_atomic(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(
+        word("Sharp\\Result"),
+        Some(vec![instance, error]),
+    ))))
 }
 
 fn create_enum_methods(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {

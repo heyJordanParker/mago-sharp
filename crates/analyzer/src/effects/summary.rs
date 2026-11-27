@@ -175,11 +175,10 @@ pub(crate) fn record_behaviors<A>(
     }
 }
 
-/// Records the `parse` and `tryParse` spec section 10 gives the struct or PHP# class `class`, whose bodies the bridge
-/// writes, so each one's function type lists the effects of what it runs. `parse` calls the main constructor, writes
-/// each property field through its `set` accessor, and calls the `parse` of each struct or class a field's type holds,
-/// and `tryParse` calls `parse`. The `parse` of a family calls the `parse` of one of its variants. Each
-/// makes the object it gives, so neither changes state. A call that reaches an effect object has its class's effect,
+/// Records the `parse` spec section 10 gives the struct or PHP# class `class`, whose body the bridge writes, so its
+/// function type lists the effects of what it runs. It calls the main constructor, writes each property field through
+/// its `set` accessor, and calls the `parse` of each struct or class a field's type holds. The `parse` of a family calls
+/// the `parse` of one of its variants. It makes the object it gives, so it changes no state. A call that reaches an effect object has its class's effect,
 /// as a written call does.
 pub(crate) fn record_parse<A>(
     context: &Context<'_, '_, A>,
@@ -229,8 +228,6 @@ pub(crate) fn record_parse<A>(
     let parse = Body::Method(class.name, class.method_key(word("parse")));
 
     let mut parsing = summary(parse, b"parse");
-    let mut trying = summary(Body::Method(class.name, class.method_key(word("tryParse"))), b"tryParse");
-    reach(&mut trying, class.name, parse, b"parse");
     if class.tag_key().is_some() {
         for (_, variant) in codebase.variants(class) {
             // A case that carries no data is one object, which the family's `parse` gives as it is. A case is no
@@ -244,7 +241,6 @@ pub(crate) fn record_parse<A>(
             reach(&mut parsing, variant.name, Body::Method(variant.name, variant.method_key(word("parse"))), b"parse");
         }
         artifacts.effect_summaries.push(parsing);
-        artifacts.effect_summaries.push(trying);
 
         return;
     }
@@ -278,7 +274,6 @@ pub(crate) fn record_parse<A>(
     }
 
     artifacts.effect_summaries.push(parsing);
-    artifacts.effect_summaries.push(trying);
 }
 
 /// Pushes onto `parsed` each struct or PHP# class `r#type` holds, also as a collection's element, once each, whose
