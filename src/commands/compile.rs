@@ -928,22 +928,7 @@ fn write_hosts(
         written.insert(table);
     }
 
-    let (target, report) = ReportingTarget::buffer();
-    Reporter::new(
-        database.read_only(),
-        ReporterConfig {
-            target,
-            format: ReportingFormat::Json,
-            color_choice: ReportingColorChoice::Never,
-            filter_fixable: false,
-            sort: false,
-            minimum_report_level: None,
-            editor_url: None,
-            tool_version: VERSION,
-        },
-    )
-    .report(refused, None)?;
-    let report = report.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let report = host_report(database.read_only(), refused)?;
     let path = folder.join(HOST_REPORT);
     keep(&path, unit::source_hash(&report), write_if_changed(&path, &report)?);
     written.insert(path);
@@ -1221,7 +1206,8 @@ fn holds_compiled(
 /// Lowers what the extension hosts of `hosts` load as their workers start, [`hosts_reach`], alone into their folder of
 /// the project at `root`, whose source files are `sources`, against `library` and its codex `codex`, unless the folder
 /// holds a current compiled file of each of those files already: the compiled file of each of those files of
-/// `database`, the project's database as [`with_packages`] gives it, written only when its bytes changed, and no other
+/// `database`, the project's database as [`with_packages`] gives it, written only when its bytes changed, and the
+/// folder's [`HOST_REPORT`] of those it refuses, so a worker that loads one gets the checker's errors, and no other
 /// file, so the compile of the whole project that follows writes the rest of the folder and its record. Those files name no file outside them, so
 /// their analysis holds them and Composer's packages alone, and runs as the hosts' compile does, without the hosts, on
 /// an orchestrator of its own, since the compile's orchestrator records what the hosts are asked. Returns that reach.
@@ -1274,13 +1260,45 @@ fn write_hosts_reach(
     );
     std::panic::set_hook(printing);
     let ((compilations, _), _) = compilations?;
+    let mut refused = IssueCollection::default();
     for (_, compilation) in compilations {
-        if let Compilation::Accepted(written) = compilation {
-            written?;
+        match compilation {
+            Compilation::Accepted(written) => {
+                written?;
+            }
+            Compilation::Refused(issues) => refused.extend(issues),
+            Compilation::Kept => {}
         }
     }
+    write_if_changed(&folder.join(HOST_REPORT), &host_report(held, refused)?)?;
 
     Ok(reach)
+}
+
+/// The checker's report of `refused`, the issues of each file a hosts' compile refused, with the files of `database`
+/// they point into, as the folder's [`HOST_REPORT`] holds it.
+///
+/// # Errors
+///
+/// Returns the error of writing the report.
+fn host_report(database: ReadDatabase, refused: IssueCollection) -> Result<Vec<u8>, Error> {
+    let (target, report) = ReportingTarget::buffer();
+    Reporter::new(
+        database,
+        ReporterConfig {
+            target,
+            format: ReportingFormat::Json,
+            color_choice: ReportingColorChoice::Never,
+            filter_fixable: false,
+            sort: false,
+            minimum_report_level: None,
+            editor_url: None,
+            tool_version: VERSION,
+        },
+    )
+    .report(refused, None)?;
+
+    Ok(report.lock().unwrap_or_else(PoisonError::into_inner).clone())
 }
 
 /// The project's database: every file the analyzer loads with the prelude, each `.sharp` file of a package as a file of

@@ -839,6 +839,29 @@ fn a_compile_error_in_a_file_no_host_reaches_reports_that_file_and_every_host_ru
     assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\n");
 }
 
+/// A rule a host asks as it loads, whose lowering fails on its errors, is refused in the hosts' folder before the hosts
+/// start, so the first compile with an empty cache names the rule's errors, as every later compile does, and never
+/// says the rule isn't compiled yet.
+#[test]
+fn a_host_that_loads_a_refused_rule_gets_its_errors_on_the_first_compile_with_an_empty_cache() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the refused rule host test") {
+        return;
+    }
+    let directory = project_with_a_host_asking_a_rule();
+    let root = directory.path();
+    let refused = "namespace App.Rules;\n\nimport Sharp.Encoding.Missing;\n\npublic class Naming\n{\n    public static string message() => Missing.of(\"x\");\n}\n";
+    write(root, "app/Rules/Naming.sharp", refused);
+    let cache = tempfile::tempdir().unwrap();
+
+    let first = process::output(command(root, "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
+    let second = process::output(command(root, "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
+
+    assert!(!printed(&first).contains("isn't compiled for the extension hosts yet"), "{}", printed(&first));
+    assert!(printed(&second).contains("app/Rules/Naming.sharp has"), "{}", printed(&second));
+    assert!(printed(&first).contains("app/Rules/Naming.sharp has"), "{}", printed(&first));
+}
+
 /// The `extern` lines of a file nothing names apply to every file, as an analysis of the whole project applies them, so
 /// a rule a host asks as it loads that calls a Composer `files` helper an `extern` line declares compiles before the
 /// hosts start, and the first compile with the host passes.
