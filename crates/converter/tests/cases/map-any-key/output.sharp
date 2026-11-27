@@ -17,9 +17,10 @@ internal final class Input
 
     internal string email(Map<int|string, Any?> input)
     {
-        input[0] = 'form';
+        let changedInput = input;
+        changedInput[0] = 'form';
 
-        return input.get(1) != null ? 'given' : 'missing';
+        return changedInput.get(1) != null ? 'given' : 'missing';
     }
 
     internal int|string same(int|string id)
