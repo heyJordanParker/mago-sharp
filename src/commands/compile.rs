@@ -416,7 +416,11 @@ impl HostsCompile {
         let (compiled, last) = match compiled {
             Some((compiled, last)) => (Some(compiled), keeping.then_some(last)),
             None if keeping => {
-                let outputs = Record::read(&folder.join(INPUTS)).map(|mut record| std::mem::take(&mut record.outputs));
+                let record = Record::read(&folder.join(INPUTS));
+                let analysis = record.as_ref().and_then(|record| {
+                    Some((std::fs::read(folder.join(ANALYSIS)).ok()?, analysis_key(configuration, record.marker)))
+                });
+                let outputs = record.map(|mut record| std::mem::take(&mut record.outputs));
                 let last = LastCompile::analyzed(
                     configuration,
                     root,
@@ -426,6 +430,7 @@ impl HostsCompile {
                     &sources,
                     filesystems,
                     outputs.unwrap_or_default(),
+                    analysis.as_ref(),
                 )?;
                 (None, Some(last))
             }
@@ -598,14 +603,33 @@ fn compile_into(
     filesystems: Filesystems,
 ) -> Result<(Option<Recompiled>, LastCompile), Error> {
     let record_path = folder.join(INPUTS);
+    let mut filesystems = filesystems;
+    let last_record = Record::read(&record_path);
+    // A record that holds in all but the source files names the analysis its compile left, which this compile restores
+    // and rechecks the changed files from, as the project's own compile does.
+    let analysis = last_record
+        .as_ref()
+        .filter(|record| every_input_but_the_sources_is_current(record, configuration, root, &mut filesystems))
+        .and_then(|record| {
+            Some((std::fs::read(folder.join(ANALYSIS)).ok()?, analysis_key(configuration, record.marker)))
+        });
     // The last compile's outputs, which it keeps unread while their status holds.
-    let outputs = Record::read(&record_path).map(|mut record| std::mem::take(&mut record.outputs)).unwrap_or_default();
+    let outputs = last_record.map(|mut record| std::mem::take(&mut record.outputs)).unwrap_or_default();
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
     let _ = std::fs::remove_file(&record_path);
     let record =
         Record::start(configuration, root, sources, folder, filesystems.clone(), orchestrator.autoloader().as_deref());
-    let mut last =
-        LastCompile::analyzed(configuration, root, folder, orchestrator, listing, sources, filesystems, outputs)?;
+    let mut last = LastCompile::analyzed(
+        configuration,
+        root,
+        folder,
+        orchestrator,
+        listing,
+        sources,
+        filesystems,
+        outputs,
+        analysis.as_ref(),
+    )?;
     let compiled = write_hosts_folder(configuration, root, folder, &mut last, record)?;
 
     Ok((compiled, last))
@@ -668,7 +692,8 @@ impl LastCompile {
     /// What a compile into `folder` for the hosts of the project at `root` starts from: the analysis of the project
     /// without the hosts, of the files `listing` names, which `orchestrator` listed, whose source files are `sources`, as
     /// [`source_files`] found them with `filesystems`, the record of the compiled files the folder holds, and
-    /// `outputs`, the status and hash of each file the folder's record names as written.
+    /// `outputs`, the status and hash of each file the folder's record names as written. The analysis starts from
+    /// `analysis`, the bytes of the folder's last analysis and the key they were written under, when they restore.
     #[allow(clippy::too_many_arguments)]
     fn analyzed(
         configuration: &Configuration,
@@ -679,6 +704,7 @@ impl LastCompile {
         sources: &BTreeMap<String, Found>,
         filesystems: Filesystems,
         outputs: Outputs,
+        analysis: Option<&(Vec<u8>, Vec<u8>)>,
     ) -> Result<Self, Error> {
         let (database, _) =
             with_packages(orchestrator.load_listed(&configuration.source.workspace, listing)?.into_static());
@@ -687,7 +713,10 @@ impl LastCompile {
         let mut server = Server::new(database.into_static(), decode_prelude, server_settings(orchestrator))
             .with_library(codex)
             .keeping_lowering_inputs();
-        server.analyze()?;
+        if let Some((bytes, key)) = analysis {
+            server.restore(bytes, key)?;
+        }
+        server.analyze_changed()?;
 
         Ok(Self {
             server,
@@ -929,6 +958,13 @@ fn write_hosts(
     let next_outputs = record.as_ref().map(|record| record.outputs.clone()).unwrap_or_default();
     written.extend(record.as_ref().and_then(Record::marker_path));
     written.insert(folder.join(COMPILE_LOCK));
+    let analysis = folder.join(ANALYSIS);
+    if let Some(record) = record.as_ref()
+        && let Some(bytes) = server.persist(&analysis_key(configuration, record.marker))?
+    {
+        write_by_rename(&analysis, &bytes)?;
+    }
+    written.insert(analysis);
     let deleted = delete_all_but(folder, &written, &folder.join(PACKAGE_FOLDER))?;
     if let Some(record) = record {
         let listed = inputs.iter().map(|input| recorded(&input.path, Some(input)));
@@ -3502,6 +3538,42 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
         assert_eq!(written_under(&hosts, mago_compile), BTreeSet::new());
     }
 
+    /// The hosts' compile keeps its analysis in the hosts' folder, and the compile after an edit that fixes the file it
+    /// refused restores that analysis and leaves the hosts' folder with the report and the compiled files a compile of
+    /// the edited files from scratch leaves.
+    #[test]
+    fn a_hosts_compile_after_an_edit_restores_its_analysis_and_compiles_what_a_compile_from_scratch_compiles() {
+        if !php_sdk() {
+            return;
+        }
+        const BROKEN: &str = "namespace App;\n\npublic class Broken\n{\n    public int count( => 1;\n}\n";
+        const FIXED: &str = "namespace App;\n\npublic class Broken\n{\n    public int count() => 1;\n}\n";
+        let hosts_folder = |root: &Path, configuration: &Configuration| {
+            compile(configuration, ColorChoice::Never).unwrap();
+            let folder = HostsCompile::new(configuration).unwrap().folder;
+            let report = std::fs::read_to_string(folder.join(HOST_REPORT)).unwrap();
+            let compiled: BTreeSet<PathBuf> = files_as_written(&folder)
+                .into_keys()
+                .filter(|path| path.extension().is_some_and(|extension| extension == "sharpc"))
+                .map(|path| path.strip_prefix(&folder).map_or(path.clone(), Path::to_path_buf))
+                .collect();
+
+            (folder, report.replace(&root.display().to_string(), "<root>"), compiled)
+        };
+        let (_directory, root, configuration) = boxed_project();
+        write(&root, "app/Broken.sharp", BROKEN);
+        let (folder, _, _) = hosts_folder(&root, &configuration);
+        assert!(folder.join(ANALYSIS).is_file(), "the hosts' folder holds no analysis");
+        write(&root, "app/Broken.sharp", FIXED);
+        let seeded = hosts_folder(&root, &configuration);
+
+        let (_scratch_directory, scratch_root, scratch_configuration) = boxed_project();
+        write(&scratch_root, "app/Broken.sharp", FIXED);
+        let scratch = hosts_folder(&scratch_root, &scratch_configuration);
+
+        assert_eq!((seeded.1, seeded.2), (scratch.1, scratch.2));
+    }
+
     /// A `vendor/` file a PHP# file calls is no input of its compiled file, which `composer.lock` stands for, so the
     /// record of the hosts' compile's source files is what sees an edit of it.
     #[test]
@@ -3556,7 +3628,8 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
         assert!(!folder.path().join("app/Order.sharpc").exists());
     }
 
-    /// Each file of a hosts' folder but its record of inputs, by its path in the folder.
+    /// Each file of a hosts' folder but its record of inputs and the analysis kept under that record's marker, by its
+    /// path in the folder.
     fn folder_files(folder: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut files = BTreeMap::new();
         let mut folders = vec![folder.to_path_buf()];
@@ -3565,7 +3638,7 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
                 let path = entry.unwrap().path();
                 if path.is_dir() {
                     folders.push(path);
-                } else if path != folder.join(INPUTS) {
+                } else if path != folder.join(INPUTS) && path != folder.join(ANALYSIS) {
                     files.insert(path.strip_prefix(folder).unwrap().to_path_buf(), std::fs::read(&path).unwrap());
                 }
             }
