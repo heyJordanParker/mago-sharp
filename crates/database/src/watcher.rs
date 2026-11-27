@@ -2082,9 +2082,10 @@ mod tests {
         handler.lock().unwrap_or_else(PoisonError::into_inner).handle_event(Ok(Event::new(edit).add_path(path)));
     }
 
-    /// A stream of edits to another file never holds back the round of an earlier edit: `app/b.php` changes edit after
-    /// edit until the round that holds `app/a.php` is reported, so the round ends the stream. A watcher that held the
-    /// round back for as long as changes came would report it only once the stream ran out, at its minute.
+    /// A stream of edits to another file never holds back the round of an earlier edit: `app/b.php` changes at each look
+    /// of a `poll_until`, at most 100 ms apart, until the round that holds `app/a.php` is reported, so the round ends the
+    /// stream. A watcher that held the round back for as long as changes came would report it only once the stream ran
+    /// out, at its minute.
     #[test]
     fn a_stream_of_edits_to_another_file_never_holds_back_the_round_of_an_earlier_edit() {
         let (_directory, root) = project();
@@ -2107,18 +2108,17 @@ mod tests {
         let stream = std::thread::spawn({
             let reported = Arc::clone(&reported);
             move || {
-                let deadline = Instant::now() + Duration::from_mins(1);
                 let mut count = 0;
-                while !reported.load(Ordering::Acquire) {
-                    if Instant::now() >= deadline {
-                        return false;
+                poll_until(Duration::from_mins(1), || {
+                    if reported.load(Ordering::Acquire) {
+                        return true;
                     }
                     count += 1;
                     std::fs::write(app.join("b.php"), format!("<?php echo {count};\n"))
                         .expect("b.php should be written");
                     report(&app, app.join("b.php"));
-                }
-                true
+                    false
+                })
             }
         });
         let round = watcher.wait().expect("the watcher should report its changes");
