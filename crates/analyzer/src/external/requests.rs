@@ -1,6 +1,7 @@
 //! The return-type requests an analysis with no extension host would have sent one, each kept as bytes in the file
 //! that makes it, so the hosts answer them once they start without the file being analyzed again.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -29,7 +30,7 @@ use crate::invocation::Invocation;
 #[derive(Debug, Default)]
 pub struct ReturnTypeRequests {
     files: HashMap<FileId, Box<[u8]>>,
-    names: Arc<[&'static str]>,
+    names: Arc<[Cow<'static, str>]>,
 }
 
 /// One recorded request: its target, and the invocation it sends, or none when the analysis could not make it, which
@@ -105,11 +106,11 @@ impl ReturnTypeRequests {
         })
     }
 
-    fn name(&self, bytes: &mut &[u8]) -> Result<&'static str, ExternalAnalyzerError> {
+    fn name(&self, bytes: &mut &[u8]) -> Result<Cow<'static, str>, ExternalAnalyzerError> {
         let index = take_number(bytes)?;
         usize::try_from(index)
             .ok()
-            .and_then(|index| self.names.get(index).copied())
+            .and_then(|index| self.names.get(index).cloned())
             .ok_or_else(|| protocol(format!("a recorded value names the unknown name {index}")))
     }
 }
@@ -200,20 +201,25 @@ const CASE: u8 = 9;
 
 /// The protocol's class, property, enum and case names a recorded value names, by the index the value holds. The
 /// protocol writes each as a literal, so the table holds each of a few hundred names once.
-static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+static NAMES: Mutex<Vec<Cow<'static, str>>> = Mutex::new(Vec::new());
 
 thread_local! {
-    /// The index in [`NAMES`] of each name this thread recorded, by the name's address and length.
-    static NAME_INDEX: RefCell<HashMap<(usize, usize), u64>> = RefCell::default();
+    /// The index in [`NAMES`] of each name this thread recorded, by the name.
+    static NAME_INDEX: RefCell<HashMap<Cow<'static, str>, u64>> = RefCell::default();
 }
 
-fn put_name(name: &'static str, bytes: &mut Vec<u8>) {
+fn put_name(name: Cow<'static, str>, bytes: &mut Vec<u8>) {
     let index = NAME_INDEX.with(|index| {
-        *index.borrow_mut().entry((name.as_ptr().addr(), name.len())).or_insert_with(|| {
-            let mut names = NAMES.lock().unwrap_or_else(PoisonError::into_inner);
-            names.push(name);
-            (names.len() - 1) as u64
-        })
+        let mut index = index.borrow_mut();
+        if let Some(found) = index.get(name.as_ref()) {
+            return *found;
+        }
+        let mut names = NAMES.lock().unwrap_or_else(PoisonError::into_inner);
+        names.push(name.clone());
+        let found = (names.len() - 1) as u64;
+        index.insert(name, found);
+
+        found
     });
     put_number(index, bytes);
 }
@@ -265,17 +271,17 @@ fn put_value(value: &Value, bytes: &mut Vec<u8>) {
         }
         Value::Object { class, properties } => {
             bytes.push(OBJECT);
-            put_name(class, bytes);
+            put_name(class.clone(), bytes);
             put_number(properties.len() as u64, bytes);
             for (property, item) in properties {
-                put_name(property, bytes);
+                put_name(property.clone(), bytes);
                 put_value(item, bytes);
             }
         }
         Value::Case { enumeration, case } => {
             bytes.push(CASE);
-            put_name(enumeration, bytes);
-            put_name(case, bytes);
+            put_name(enumeration.clone(), bytes);
+            put_name(case.clone(), bytes);
         }
     }
 }

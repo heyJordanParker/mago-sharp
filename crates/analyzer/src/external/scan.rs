@@ -152,7 +152,7 @@ impl CodebaseScanPlan {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct CodebaseScanRoute {
     backend: u16,
     hooks: Box<[u16]>,
@@ -168,11 +168,37 @@ pub struct CodebaseScanFile {
     scan: Option<Arc<CodebaseMetadata>>,
 }
 
+/// What a [`CodebaseScanFile`] holds but its file, which a stored analysis keeps by the file's id.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StoredCodebaseScanFile {
+    declarations: Arc<[Value]>,
+    routes: Box<[CodebaseScanRoute]>,
+    scan: Option<Arc<CodebaseMetadata>>,
+}
+
 impl CodebaseScanFile {
     #[inline]
     #[must_use]
     pub fn file_id(&self) -> FileId {
         self.file.id
+    }
+
+    /// What the scan of the file holds, for a stored analysis to keep.
+    #[must_use]
+    pub fn stored(&self) -> StoredCodebaseScanFile {
+        StoredCodebaseScanFile {
+            declarations: Arc::clone(&self.declarations),
+            routes: self.routes.clone(),
+            scan: self.scan.clone(),
+        }
+    }
+
+    /// The scan `stored` holds of `file`.
+    #[must_use]
+    pub fn restored(file: Arc<File>, stored: StoredCodebaseScanFile) -> Self {
+        let StoredCodebaseScanFile { declarations, routes, scan } = stored;
+
+        Self { file, declarations, routes, scan }
     }
 
     /// Whether the file's attributes hold a PHP# member read, as `Pdf.DEFAULT_DPI`, which only the merged scan of every
