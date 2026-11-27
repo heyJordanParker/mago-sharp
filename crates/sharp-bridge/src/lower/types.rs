@@ -2046,15 +2046,23 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The inline form of a call of the method `declaration` names that passes `arity` values, the receiver counted,
-    /// and leaves out the rest, which folds what their defaults decide. Else the form of a call that passes them all.
-    pub(crate) fn inline_form_passing(&self, declaration: &Declaration, arity: usize) -> Option<&'analysis InlineForm> {
+    /// and leaves out the rest, which folds what their defaults decide, else the form of a call that passes them all,
+    /// with the name the standard library gives that form, which a compile looks its fingerprint up by.
+    pub(crate) fn inline_form_passing(
+        &self,
+        declaration: &Declaration,
+        arity: usize,
+    ) -> Option<(Vec<u8>, &'analysis InlineForm)> {
         if !matches!(declaration.kind, DeclarationKind::Method { .. } | DeclarationKind::StaticMethod) {
             return None;
         }
+        let (class, method) = (declaration.class.as_bytes(), declaration.name.as_bytes());
+        let folded = folded_key(class, method, arity);
+        if let Some(form) = self.inline_forms.get(&folded) {
+            return Some((folded, form));
+        }
 
-        self.inline_forms
-            .get(&folded_key(declaration.class.as_bytes(), declaration.name.as_bytes(), arity))
-            .or_else(|| self.inline_form(declaration))
+        self.inline_form(declaration).map(|form| (key(class, method), form))
     }
 
     /// The declaration of what the analysis recorded a method call runs. A method `__call` or `__callStatic` serves is

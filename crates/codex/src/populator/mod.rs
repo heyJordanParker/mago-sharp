@@ -306,9 +306,7 @@ fn populate_codebase_inner(
         docblock::inherit_property_docblocks(codebase, &safe_symbols, dirty_classes);
     }
     populate_extern_signatures(codebase, symbol_references);
-    codebase.populate_import_cycles();
-    codebase.populate_short_names();
-    codebase.populate_interop_names();
+    codebase.populate_derived_maps();
     populate_service_ids(codebase);
 
     codebase.safe_symbols = safe_symbols;

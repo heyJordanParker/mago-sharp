@@ -546,8 +546,9 @@ final class RunsInitialValues {}
 final class DispatchesEmits {}
 
 /**
- * Marks a standard library generic method that parses a value into its type argument with the type's `parse`, as
- * `Json.decode<T>` does, so the checker gives each call's type argument the struct parse check.
+ * Marks a standard library generic method that reads its text with its class's `read`, then parses the value into
+ * its type argument with the type's `parse`, as `Json.decode<T>` does. The checker gives each call's type argument the
+ * struct parse check, and the call the effects of that `read` and of the readers the type argument holds.
  */
 #[\Attribute(\Attribute::TARGET_METHOD)]
 final class ParsesTypeArgument {}

@@ -20,9 +20,11 @@ use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::Ordering;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
-#[cfg(target_os = "macos")]
-use std::time::Instant;
 
+#[cfg(target_os = "macos")]
+use mago_database::clock::Clock;
+#[cfg(target_os = "macos")]
+use mago_database::clock::SystemClock;
 use mago_database::process;
 
 /// The first and the longest pause before `ProcessGroup::end` signals a group again whose processes still run, as they
@@ -118,35 +120,48 @@ impl ProcessGroup {
     /// kind `TimedOut` that names the group when a process of it still runs `END_TIMEOUT` after the first signal. Once
     /// an end timed out, each later one that still finds a process of the group returns that error at once.
     pub fn end(&mut self) -> io::Result<()> {
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         {
-            let group = libc::pid_t::try_from(self.leader.id()).map_err(io::Error::other)?;
-            // SAFETY: `killpg` only sends a signal, to the group the leader leads since it started with `process_group(0)`.
-            // The leader is not waited for yet, so its id still names the group.
-            let signal = || unsafe { libc::killpg(group, libc::SIGKILL) } == 0;
-            #[cfg(test)]
-            let signal = || signal() || unending(group);
-            if !signal() {
-                return Err(io::Error::last_os_error());
-            }
-            // macOS gives a process that a process of the group starts while the signal goes out none of it, so it would
-            // live on with what the group held, as a worker's pipes, and Mago would wait for them to close forever.
-            // Linux hands such a process the signal too.
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(outlived) = &self.outlived {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, outlived.clone()));
-                }
-                signal_until_ended(group, END_TIMEOUT, signal)
-                    .inspect_err(|error| self.outlived = Some(error.to_string()))?;
-            }
-
-            Ok(())
+            self.end_on(&SystemClock)
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            self.signal_group().map(drop)
         }
         #[cfg(not(unix))]
         {
             self.leader.kill()
         }
+    }
+
+    /// [`Self::end`] on macOS, counting `END_TIMEOUT` and pausing between signals on `clock`. macOS gives a process
+    /// that a process of the group starts while the signal goes out none of it, so it would live on with what the
+    /// group held, as a worker's pipes, and Mago would wait for them to close forever. Linux hands such a process the
+    /// signal too.
+    #[cfg(target_os = "macos")]
+    fn end_on(&mut self, clock: &dyn Clock) -> io::Result<()> {
+        let group = self.signal_group()?;
+        if let Some(outlived) = &self.outlived {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, outlived.clone()));
+        }
+
+        signal_until_ended(group, END_TIMEOUT, clock, || signal(group))
+            .inspect_err(|error| self.outlived = Some(error.to_string()))
+    }
+
+    /// Sends `SIGKILL` to the group once, and returns its id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signal cannot be sent, as when every process of the group has ended.
+    #[cfg(unix)]
+    fn signal_group(&self) -> io::Result<libc::pid_t> {
+        let group = libc::pid_t::try_from(self.leader.id()).map_err(io::Error::other)?;
+        if !signal(group) {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(group)
     }
 
     /// Whether the leader has exited, without waiting for it: an error once Mago waited for it.
@@ -173,24 +188,29 @@ impl ProcessGroup {
 }
 
 /// Sends SIGKILL to the group `group` again while `signal`, which sends it, says a process of the group still ran, for
-/// at most `timeout`. `killpg` succeeds while a process of the group still runs, and fails once only exited ones are
-/// left.
+/// at most `timeout` of `clock`, which it pauses on between signals. `killpg` succeeds while a process of the group
+/// still runs, and fails once only exited ones are left.
 ///
 /// # Errors
 ///
 /// Returns an error of kind `TimedOut` that names the group when a process of it still runs after `timeout`.
 #[cfg(target_os = "macos")]
-fn signal_until_ended(group: libc::pid_t, timeout: Duration, mut signal: impl FnMut() -> bool) -> io::Result<()> {
-    let started = Instant::now();
+fn signal_until_ended(
+    group: libc::pid_t,
+    timeout: Duration,
+    clock: &dyn Clock,
+    mut signal: impl FnMut() -> bool,
+) -> io::Result<()> {
+    let started = clock.now();
     let mut poll_interval = INITIAL_END_POLL_INTERVAL;
     while signal() {
-        if started.elapsed() >= timeout {
+        if clock.now().duration_since(started) >= timeout {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("process group {group} still ran {} ms after SIGKILL", timeout.as_millis()),
             ));
         }
-        std::thread::sleep(poll_interval);
+        clock.sleep(poll_interval);
         poll_interval = (poll_interval * 2).min(MAXIMUM_END_POLL_INTERVAL);
     }
 
@@ -211,6 +231,19 @@ impl Drop for ProcessGroup {
         }
         self.slot.group.store(0, Ordering::SeqCst);
     }
+}
+
+/// Sends `SIGKILL` to the group `group`, and whether a process of it still ran: `killpg` succeeds while one does, and
+/// fails once only exited ones are left.
+#[cfg(unix)]
+fn signal(group: libc::pid_t) -> bool {
+    // SAFETY: `killpg` only sends a signal, to the group the leader leads since it started with `process_group(0)`. The
+    // leader is not waited for yet, so its id still names the group.
+    let sent = unsafe { libc::killpg(group, libc::SIGKILL) } == 0;
+    #[cfg(test)]
+    let sent = sent || unending(group);
+
+    sent
 }
 
 /// The groups a test says SIGKILL cannot end, as the kernel cannot end a process it holds on a stalled disk.
@@ -370,20 +403,37 @@ extern "C" fn forward(signal: libc::c_int) {
 #[cfg(all(test, target_os = "macos"))]
 #[allow(clippy::expect_used)]
 mod tests {
+    use mago_database::clock::FakeClock;
+    use mago_database::clock::poll_until;
+
     use super::*;
 
     /// A process that SIGKILL cannot end keeps `signal` saying a process of the group runs, and the end stops at its
-    /// timeout with the group's id.
+    /// first look past its timeout, with the group's id. The pauses double from 50 µs to 1 ms, so the looks come at
+    /// 1.55 ms and every 1 ms after, and a 20 ms timeout stops the end at its look at 20.55 ms.
     #[test]
     fn a_group_whose_process_never_ends_stops_its_end_at_the_timeout_and_names_the_group() {
-        const TIMEOUT: Duration = Duration::from_millis(20);
-        let started = Instant::now();
+        let clock = FakeClock::new();
 
-        let error = signal_until_ended(4321, TIMEOUT, || true).expect_err("the end should stop at its timeout");
+        let error = signal_until_ended(4321, Duration::from_millis(20), &clock, || true)
+            .expect_err("the end should stop at its timeout");
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert_eq!(error.to_string(), "process group 4321 still ran 20 ms after SIGKILL");
-        assert!(started.elapsed() >= TIMEOUT, "the end stopped after {:?}", started.elapsed());
+        assert_eq!(clock.moved(), Duration::from_micros(20_550));
+    }
+
+    /// A group whose last process has ended by the end's last look before its timeout, at 19.55 ms of a 20 ms timeout,
+    /// ends without an error at that look.
+    #[test]
+    fn a_group_that_ends_by_the_last_look_before_its_timeout_ends_at_that_look() {
+        let clock = FakeClock::new();
+        let last_look = Duration::from_micros(19_550);
+
+        signal_until_ended(4321, Duration::from_millis(20), &clock, || clock.moved() < last_look)
+            .expect("the group should end before its timeout");
+
+        assert_eq!(clock.moved(), last_look);
     }
 
     /// A group whose end timed out answers each later end at once with the same error, and dropping it reaps a leader
@@ -391,22 +441,21 @@ mod tests {
     #[test]
     fn a_group_that_outlived_its_end_ends_again_at_once_and_its_drop_reaps_an_exited_leader() {
         let mut group = ProcessGroup::spawn(&mut Command::new("true")).expect("true should start");
-        while !group.leader_exited() {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        assert!(poll_until(Duration::from_mins(1), || group.leader_exited()), "true should exit");
         let id = libc::pid_t::try_from(group.leader().id()).expect("a process id fits a pid_t");
         UNENDING.lock().expect("no test panics with the list held").push(id);
+        let clock = FakeClock::new();
 
-        let first = group.end().expect_err("the end should time out");
-        let started = Instant::now();
-        let again = group.end().expect_err("the end should time out again");
-        let ended_again_after = started.elapsed();
+        let first = group.end_on(&clock).expect_err("the end should time out");
+        let timed_out_at = clock.moved();
+        let again = group.end_on(&clock).expect_err("the end should time out again");
         drop(group);
         UNENDING.lock().expect("no test panics with the list held").retain(|unending| *unending != id);
 
         assert_eq!(first.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(timed_out_at, Duration::from_micros(10_000_550), "the first end stops at its look past END_TIMEOUT");
         assert_eq!((again.kind(), again.to_string()), (first.kind(), first.to_string()));
-        assert!(ended_again_after < END_TIMEOUT, "the second end took {ended_again_after:?}");
+        assert_eq!(clock.moved(), timed_out_at, "the second end answers without a pause");
         // SAFETY: `siginfo_t` is plain data, which zeroes make valid, and `waitid` only fills it.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         // SAFETY: as for `info`; `WNOWAIT` leaves a leader that is still there to be waited for.

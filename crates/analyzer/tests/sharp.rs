@@ -33386,6 +33386,55 @@ fn decode_of_a_list_takes_its_elements_readers_effects() {
     );
 }
 
+/// The standard library's `Json`, `JsonValue`, `Query` and `Url`, which `Json.decode<T>` and `Query.decode<T>` run.
+const TEXT_READERS: [(&str, &str); 4] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Json.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/Json.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/JsonValue.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/JsonValue.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Query.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/Query.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Net/Url.sharp",
+        include_str!("../../../../composer/library/Sharp/Net/Url.sharp"),
+    ),
+];
+
+/// Spec sections 23, 24 and 29, the program on #1090: `Json.decode<T>` and `Query.decode<T>` read their text, then
+/// build `T` as `typeof(T).decode` does, so each has the effects of its text read and of the readers `T` holds. A
+/// struct, which has no effects, calls them for a `Map<string, string>`. A pure method that decodes a `Saved`, whose
+/// constructor writes to the database, is refused as `typeof(Saved).decode` is.
+#[test]
+fn json_and_query_decode_have_the_effects_of_the_readers_their_type_argument_holds() {
+    let probe = (
+        "app/Shop/DecodeProbe.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\nimport Sharp.Encoding.Query;\n\ninternal struct DecodeProbe\n{\n    internal int count() => this.byJson().count() + this.byType().count() + this.byQuery().count();\n\n    private Map<string, string> byJson() => Json.decode<Map<string, string>>(\"{\\\"name\\\":\\\"ada\\\"}\");\n\n    private Map<string, string> byType() => typeof(Map<string, string>).decode([\"name\": \"ada\"]) as Map<string, string> ?? throw new LogicException(\"decode built no map.\");\n\n    private Map<string, string> byQuery() => Query.decode<Map<string, string>>(\"name=ada\");\n}\n",
+    );
+    let saved_json = (
+        "app/Shop/SavedJsonReader.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class SavedJsonReader : Reading\n{\n    public Any? read(Any? row) => Json.decode<Saved>(\"{}\");\n}\n",
+    );
+    let [disk, stub, saved, note] = BUILT;
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+    let [json, json_value, query, url] = TEXT_READERS;
+
+    assert_eq!(
+        effect_issues(&[
+            probe, saved_json, reading, disk, stub, saved, note, json, json_value, query, url, a, b, c, d, e, f, g
+        ]),
+        [
+            "app/Shop/SavedJsonReader.sharp:7:35 incompatible-effects: `SavedJsonReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
 /// Spec sections 25 and 29: `attributeData<T>()` reads attributes as written and builds none, so the pure `Counting.count`
 /// accepts a method that reads them, and rebuilding one from its data goes through `createInstance`, which may have
 /// every effect, so the pure `Rebuilding.rebuild` refuses a method that does it and a method no `uses` limits does it.
@@ -37974,6 +38023,25 @@ const PAYMENTS: [(&str, &str); 3] = [
 /// The section 31 tests' other files: the standard library's `Result` and `Error`, then `PAYMENTS`.
 fn payments() -> Vec<(&'static str, &'static str)> {
     RESULT_LIBRARY.iter().chain(&PAYMENTS).copied().collect()
+}
+
+/// Spec section 31, as Rust's `#[must_use]` on `Result`: a `Result` holds a failure the caller must handle, so a
+/// statement that discards one is refused, a call's and a case's alike. A `Result` the code keeps, and the `Ok` value
+/// `try` gives, are never refused.
+#[test]
+fn a_statement_that_discards_a_result_is_refused() {
+    let code = "namespace App;\n\nclass Checkout\n{\n    public Checkout(private Gateway gateway) { }\n\n    public Result<int, PaymentError> run()\n    {\n        this.gateway.charge();\n        const order = try this.gateway.charge();\n        const kept = this.gateway.charge();\n        Result<int, PaymentError>.Ok(order.total);\n        try this.gateway.charge();\n        return Result.Ok(order.total);\n    }\n}\n";
+
+    let refused = |line: u32, written: &str| {
+        format!(
+            "{line}:9 discarded-result `{written}` returns a Result: handle it with try, match, ok() or unwrap(). | A dropped Result loses its failure: pass it up with `try`, or keep the Result in a `const`."
+        )
+    };
+
+    assert_eq!(
+        refusals(("src/App/Checkout.sharp", code), &payments()),
+        [refused(9, "this.gateway.charge"), refused(12, "Result<int, PaymentError>.Ok")]
+    );
 }
 
 /// Spec section 31: `try` gives the `Ok` value, and on `Err` the method returns an `Err` holding the same error. It is a

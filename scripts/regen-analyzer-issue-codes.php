@@ -405,6 +405,7 @@ final class AnalyzerCodeModuleGenerator
         'method-name-case',
         'test-class-super-call',
         'test-method-parameter',
+        'discarded-result',
     ];
 
     /**
