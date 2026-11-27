@@ -420,7 +420,7 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert_eq!(error.to_string(), "process group 4321 still ran 20 ms after SIGKILL");
-        assert_eq!(clock.elapsed(), Duration::from_micros(20_550));
+        assert_eq!(clock.moved(), Duration::from_micros(20_550));
     }
 
     /// A group whose last process has ended by the end's last look before its timeout, at 19.55 ms of a 20 ms timeout,
@@ -430,10 +430,10 @@ mod tests {
         let clock = FakeClock::new();
         let last_look = Duration::from_micros(19_550);
 
-        signal_until_ended(4321, Duration::from_millis(20), &clock, || clock.elapsed() < last_look)
+        signal_until_ended(4321, Duration::from_millis(20), &clock, || clock.moved() < last_look)
             .expect("the group should end before its timeout");
 
-        assert_eq!(clock.elapsed(), last_look);
+        assert_eq!(clock.moved(), last_look);
     }
 
     /// A group whose end timed out answers each later end at once with the same error, and dropping it reaps a leader
@@ -447,7 +447,7 @@ mod tests {
         let clock = FakeClock::new();
 
         let first = group.end_on(&clock).expect_err("the end should time out");
-        let timed_out_at = clock.elapsed();
+        let timed_out_at = clock.moved();
         let again = group.end_on(&clock).expect_err("the end should time out again");
         drop(group);
         UNENDING.lock().expect("no test panics with the list held").retain(|unending| *unending != id);
@@ -455,7 +455,7 @@ mod tests {
         assert_eq!(first.kind(), io::ErrorKind::TimedOut);
         assert_eq!(timed_out_at, Duration::from_micros(10_000_550), "the first end stops at its look past END_TIMEOUT");
         assert_eq!((again.kind(), again.to_string()), (first.kind(), first.to_string()));
-        assert_eq!(clock.elapsed(), timed_out_at, "the second end answers without a pause");
+        assert_eq!(clock.moved(), timed_out_at, "the second end answers without a pause");
         // SAFETY: `siginfo_t` is plain data, which zeroes make valid, and `waitid` only fills it.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         // SAFETY: as for `info`; `WNOWAIT` leaves a leader that is still there to be waited for.

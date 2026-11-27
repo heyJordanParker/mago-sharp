@@ -37,7 +37,7 @@ impl Clock for SystemClock {
 #[derive(Debug)]
 pub struct FakeClock {
     started: Instant,
-    elapsed: std::sync::Mutex<Duration>,
+    moved: std::sync::Mutex<Duration>,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -45,18 +45,18 @@ impl FakeClock {
     /// A clock at the instant it is made.
     #[must_use]
     pub fn new() -> Self {
-        Self { started: Instant::now(), elapsed: std::sync::Mutex::new(Duration::ZERO) }
+        Self { started: Instant::now(), moved: std::sync::Mutex::new(Duration::ZERO) }
     }
 
     /// Moves the clock `duration` forward.
     pub fn advance(&self, duration: Duration) {
-        *self.elapsed.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += duration;
+        *self.moved.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += duration;
     }
 
     /// How far the clock has moved since it was made.
     #[must_use]
-    pub fn elapsed(&self) -> Duration {
-        *self.elapsed.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    pub fn moved(&self) -> Duration {
+        *self.moved.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -70,7 +70,7 @@ impl Default for FakeClock {
 #[cfg(any(test, feature = "test-util"))]
 impl Clock for FakeClock {
     fn now(&self) -> Instant {
-        self.started + self.elapsed()
+        self.started + self.moved()
     }
 
     fn sleep(&self, duration: Duration) {
@@ -117,7 +117,7 @@ mod tests {
         clock.sleep(Duration::from_micros(50));
 
         assert_eq!(clock.now().duration_since(started), Duration::from_micros(3_050));
-        assert_eq!(clock.elapsed(), Duration::from_micros(3_050));
+        assert_eq!(clock.moved(), Duration::from_micros(3_050));
     }
 
     /// A condition that holds from the start ends the poll at its first look, and one that never holds ends it at its
