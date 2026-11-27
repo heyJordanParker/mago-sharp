@@ -29,6 +29,9 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::time::Duration;
 
+use crate::clock::Clock;
+use crate::clock::SystemClock;
+
 /// Held while a process starts, so no process starts while another one's pipes are created.
 static SPAWNING: Mutex<()> = Mutex::new(());
 
@@ -56,7 +59,7 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
         };
         match started {
             Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy && tries < BUSY_TRIES => {
-                std::thread::sleep(pause);
+                SystemClock.sleep(pause);
                 pause *= 2;
                 tries += 1;
             }

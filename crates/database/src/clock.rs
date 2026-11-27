@@ -26,6 +26,10 @@ impl Clock for SystemClock {
         Instant::now()
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the system clock's sleep is the one real sleep, which every wait reaches"
+    )]
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
     }

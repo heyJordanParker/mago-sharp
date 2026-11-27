@@ -2,4 +2,5 @@ disallowed-methods = [
     { path = "std::process::Command::spawn", reason = "start processes through mago_database::process, which holds SPAWNING" },
     { path = "std::process::Command::output", reason = "start processes through mago_database::process, which holds SPAWNING" },
     { path = "std::process::Command::status", reason = "start processes through mago_database::process, which holds SPAWNING" },
+    { path = "std::thread::sleep", reason = "wait through mago_database::clock: a Clock's sleep, a FakeClock in a test of a deadline, or poll_until for another process's event (#958)" },
 ]
