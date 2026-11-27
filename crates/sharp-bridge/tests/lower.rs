@@ -6059,7 +6059,7 @@ fn a_nullable_type_is_its_type_with_the_nullable_flag() {
 }
 
 /// ```php
-/// public function group(array $items, \Sharp\Map|array|null $sizes = (static function () { return new \Sharp\Map<string, int>(['a', 1]); })()): \Sharp\Map|array|null { return null; }
+/// public function group(array $items, \Sharp\Map|array|null $sizes = new \Sharp\Map<string, int>(['a', 1])): \Sharp\Map|array|null { return null; }
 /// ```
 ///
 /// A `List` is a PHP array, so its type is `array`: a `TYPE` with `IS_ARRAY`, which is 7, as php-src's grammar builds
@@ -6091,27 +6091,18 @@ fn a_list_type_is_the_array_type_and_a_map_type_its_class() {
                   TYPE [7]
                   ZVAL [1] "null"
                 ZVAL "sizes"
-                CALL
-                  CLOSURE [16] "" @5-5
-                    PARAM_LIST
-                    null
-                    STMT_LIST
-                      RETURN
-                        SHARP_TYPE_ARGS
-                          NEW
-                            ZVAL "Sharp\\Map"
-                            ARG_LIST
-                              ARRAY [3]
-                                ARRAY_ELEM
-                                  ZVAL "a"
-                                  null
-                                ARRAY_ELEM
-                                  ZVAL 1
-                                  null
-                          ZVAL "string, int"
-                    null
-                    null
-                  ARG_LIST
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Map"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "a"
+                          null
+                        ARRAY_ELEM
+                          ZVAL 1
+                          null
+                  ZVAL "string, int"
                 null
                 null
                 null
@@ -7604,11 +7595,11 @@ fn a_list_literal_returned_where_a_set_is_declared_is_a_set() {
 }
 
 /// ```php
-/// public function run(\Sharp\Set|array $seed = (static function () { return new \Sharp\Set<string>(["a"]); })()): int { … }
+/// public function run(\Sharp\Set|array $seed = new \Sharp\Set<string>(["a"])): int { … }
 /// ```
 ///
 /// A list literal that is the default of a parameter declared `Set` is that `Set`, made with its type arguments, which
-/// no constant expression spells, so it runs in a closure.
+/// the engine takes as a parameter's constant expression, so reflection reads it, spec section 25.
 #[test]
 fn a_list_literal_default_of_a_set_parameter_is_a_set() {
     let lowered = Lowered::new("class Report\n{\n    public int run(Set<string> seed = [\"a\"]) => seed.count();\n}\n");
@@ -7622,24 +7613,15 @@ fn a_list_literal_default_of_a_set_parameter_is_a_set() {
                   ZVAL "Sharp\\Set"
                   TYPE [7]
                 ZVAL "seed"
-                CALL
-                  CLOSURE [16] "" @3-3
-                    PARAM_LIST
-                    null
-                    STMT_LIST
-                      RETURN
-                        SHARP_TYPE_ARGS
-                          NEW
-                            ZVAL "Sharp\\Set"
-                            ARG_LIST
-                              ARRAY [3]
-                                ARRAY_ELEM
-                                  ZVAL "a"
-                                  null
-                          ZVAL "string"
-                    null
-                    null
-                  ARG_LIST
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "a"
+                          null
+                  ZVAL "string"
                 null
                 null
                 null
