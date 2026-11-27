@@ -33137,6 +33137,133 @@ fn create_instance_may_have_every_effect() {
     );
 }
 
+/// The pure `Reading.read` and the `Storing.read` that may write to the database, which each reader below implements.
+const READING: [(&str, &str); 2] = [
+    ("app/Shop/Reading.sharp", "namespace App.Shop;\n\npublic interface Reading\n{\n    Any? read(Any? row);\n}\n"),
+    (
+        "app/Shop/Storing.sharp",
+        "namespace App.Shop;\n\npublic interface Storing\n{\n    Any? read(Any? row) uses Database;\n}\n",
+    ),
+];
+
+/// A reader of `app/Shop/{name}.sharp` that implements `interface` with `decode`, a `typeof(…).decode(row)` call.
+fn decoding(name: &str, interface: &str, decode: &str) -> (&'static str, &'static str) {
+    (
+        leak(format!("app/Shop/{name}.sharp")),
+        leak(format!(
+            "namespace App.Shop;\n\npublic class {name} : {interface}\n{{\n    public Any? read(Any? row) => {decode};\n}}\n"
+        )),
+    )
+}
+
+/// Spec sections 10, 25 and 29: `decode` runs the reader of the class its class value holds, its `parse`, which runs
+/// its constructor, so a pure method that decodes a `Saved`, whose `required` constructor writes to the database, is
+/// refused as `new Saved()` is, and one whose `uses` lists `Database` compiles.
+#[test]
+fn decode_has_the_effects_of_the_reader_it_runs() {
+    let pure = decoding("SavedReader", "Reading", "typeof(Saved).decode(row)");
+    let storing = decoding("StoredReader", "Storing", "typeof(Saved).decode(row)");
+    let [disk, stub, saved, note] = BUILT;
+    let [reading, storing_interface] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[pure, storing, reading, storing_interface, disk, stub, saved, note, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/SavedReader.sharp:5:35 incompatible-effects: `SavedReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
+/// A `final` class whose constructor has no effect, so no subclass's reader can run in its place.
+const MEMO: (&str, &str) = (
+    "app/Shop/Memo.sharp",
+    "namespace App.Shop;\n\npublic final class Memo\n{\n    public Memo(public string text { get; }) { }\n}\n",
+);
+
+/// Spec section 29: no class extends a `final` class, so `decode` of it runs its own reader alone, and one with no
+/// effect keeps a pure method pure.
+#[test]
+fn decode_of_a_final_class_with_no_effects_is_pure() {
+    let memo_reader = decoding("MemoReader", "Reading", "typeof(Memo).decode(row)");
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(effect_issues(&[memo_reader, MEMO, reading, a, b, c, d, e, f, g]), Vec::<String>::new());
+}
+
+/// Spec section 29: an open class whose constructor is not `required` may be any subclass whose constructor differs, so
+/// `decode` of it may have every effect, as `createInstance` may. Once the class is `final` its reader is known.
+#[test]
+fn decode_of_an_open_class_may_have_every_effect() {
+    let ledger_reader = decoding("LedgerReader", "Reading", "typeof(Ledger).decode(row)");
+    let open = (
+        "app/Shop/Ledger.sharp",
+        "namespace App.Shop;\n\npublic class Ledger\n{\n    public Ledger(public int total { get; }) { }\n}\n",
+    );
+    let closed = (
+        "app/Shop/Ledger.sharp",
+        "namespace App.Shop;\n\npublic final class Ledger\n{\n    public Ledger(public int total { get; }) { }\n}\n",
+    );
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[ledger_reader, open, reading, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/LedgerReader.sharp:5:35 incompatible-effects: `LedgerReader.read` reaches `ClassMembers.decode`, which may have every effect, so the pure `Reading.read` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects."
+        ]
+    );
+    assert_eq!(effect_issues(&[ledger_reader, closed, reading, a, b, c, d, e, f, g]), Vec::<String>::new());
+}
+
+/// Spec section 10: a family's `parse` reads one of its declared variants, so `decode` of the family has the effects of
+/// each variant's reader, and a variant whose constructor writes to the database makes a pure method's `decode` of the
+/// family refused.
+#[test]
+fn decode_of_a_family_has_its_variants_readers_effects() {
+    let entry =
+        ("app/Shop/Entry.sharp", "namespace App.Shop;\n\n[Tag(\"type\")]\npublic sealed interface Entry\n{\n}\n");
+    let stored = (
+        "app/Shop/StoredEntry.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\n[Key(\"stored\")]\npublic final class StoredEntry : Entry\n{\n    public StoredEntry() { Disk.save(); }\n}\n",
+    );
+    let noted = (
+        "app/Shop/NotedEntry.sharp",
+        "namespace App.Shop;\n\n[Key(\"noted\")]\npublic final class NotedEntry : Entry\n{\n    public NotedEntry(public string text { get; }) { }\n}\n",
+    );
+    let entry_reader = decoding("EntryReader", "Reading", "typeof(Entry).decode(row)");
+    let [disk, stub, _, _] = BUILT;
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[entry_reader, entry, stored, noted, reading, disk, stub, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/EntryReader.sharp:5:35 incompatible-effects: `EntryReader.read` reaches `StoredEntry.StoredEntry`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
+/// Spec sections 10 and 29: a type that is no class runs only the readers of the classes inside it, so `decode` of a
+/// `List<Memo>` or of an `int` keeps a pure method pure, and `decode` of a `List<Saved>` has `Saved`'s reader's effects.
+#[test]
+fn decode_of_a_list_takes_its_elements_readers_effects() {
+    let memos = decoding("MemosReader", "Reading", "typeof(List<Memo>).decode(row)");
+    let count = decoding("CountReader", "Reading", "typeof(int).decode(row)");
+    let saved_list = decoding("SavedListReader", "Reading", "typeof(List<Saved>).decode(row)");
+    let [disk, stub, saved, note] = BUILT;
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[memos, count, saved_list, MEMO, reading, disk, stub, saved, note, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/SavedListReader.sharp:5:35 incompatible-effects: `SavedListReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
 /// Spec sections 25 and 29: `attributeData<T>()` reads attributes as written and builds none, so the pure `Counting.count`
 /// accepts a method that reads them, and rebuilding one from its data goes through `createInstance`, which may have
 /// every effect, so the pure `Rebuilding.rebuild` refuses a method that does it and a method no `uses` limits does it.
