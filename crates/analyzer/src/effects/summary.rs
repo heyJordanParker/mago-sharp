@@ -76,6 +76,7 @@ use crate::effects::Runs;
 use crate::effects::member_of_effect_class;
 use crate::effects::sharp_attributes;
 use crate::external::Listing;
+use crate::resolver::class_name::class_value_classes;
 use crate::resolver::static_property::StaticProperty;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_holder;
@@ -1503,13 +1504,26 @@ where
     /// class's own, spec section 9.1, and its body runs on the object its `: this(…)` creates.
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
-        let class_name = match instantiation.class.unparenthesized() {
-            Expression::Identifier(identifier) => resolved_names.resolve(identifier),
-            Expression::ConstantAccess(name) => resolved_names.resolve(&name.name),
-            _ => None,
+        let classes: Vec<Word> = match instantiation.class.unparenthesized() {
+            Expression::Identifier(identifier) => resolved_names.resolve(identifier).map(word).into_iter().collect(),
+            Expression::ConstantAccess(name) => resolved_names.resolve(&name.name).map(word).into_iter().collect(),
+            // `new (type)(…)` builds the class `type`'s `Class<T>` names or a subclass, whose constructor below a
+            // `required` one may add no effect to it, so it has the effects of `T`'s constructor, spec sections 25 and
+            // 29, as `new T(…)` has them.
+            class_value if matches!(instantiation.class, Expression::Parenthesized(_)) => {
+                self.artifacts.get_expression_type(class_value).and_then(class_value_classes).unwrap_or_default()
+            }
+            _ => Vec::new(),
         };
+        for class in classes {
+            self.instantiate_class(class, instantiation);
+        }
+    }
+
+    /// Records the `new` `instantiation` of `class_name`, as [`Self::instantiate`] says.
+    fn instantiate_class(&mut self, class_name: Word, instantiation: &'ast Instantiation<'arena>) {
         let codebase = self.codebase();
-        let Some(class) = class_name.and_then(|class_name| codebase.get_class_like(word(class_name))) else {
+        let Some(class) = codebase.get_class_like(class_name) else {
             return;
         };
 
