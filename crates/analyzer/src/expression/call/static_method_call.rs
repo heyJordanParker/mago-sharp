@@ -144,6 +144,7 @@ where
         && !context.codebase.class_like_exists(word(context.resolved_names.get(&class.name)))
     {
         report_unknown_member_owner(context, &class.name);
+        call.argument_list.analyze(context, block_context, artifacts)?;
         artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));
 
         return Ok(());
@@ -153,6 +154,7 @@ where
         resolve_static_method_targets(context, block_context, artifacts, call.class, call.method, call.span)?;
     // A refused class, as `Missing<Order>`, reported itself, so the call reports nothing again.
     if artifacts.get_expression_type(call.class).is_some_and(is_refused_type) {
+        call.argument_list.analyze(context, block_context, artifacts)?;
         artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));
 
         return Ok(());
@@ -272,6 +274,7 @@ where
         && !method_resolution.called_properties.is_empty()
         && method_resolution.called_properties.iter().all(|property| is_refused_type(&property.property_type))
     {
+        call.argument_list.analyze(context, block_context, artifacts)?;
         artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));
 
         return Ok(());
