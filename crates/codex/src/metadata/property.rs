@@ -2,8 +2,10 @@ use mago_php_version::PHPVersion;
 use mago_php_version::PHPVersionRange;
 
 use mago_span::Span;
+use mago_word::Word;
 use mago_word::WordMap;
 
+use crate::metadata::CodebaseMetadata;
 use crate::metadata::attribute::AttributeMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::property_hook::PropertyHookMetadata;
@@ -161,6 +163,16 @@ impl PropertyMetadata {
     #[must_use]
     pub fn get_name(&self) -> &VariableIdentifier {
         &self.name
+    }
+
+    /// Whether an attribute of the class-like the full name `name` names marks the property, by `codebase`'s key, spec
+    /// section 24: a PHP# attribute only as written, and a plain PHP one in any case.
+    #[inline]
+    #[must_use]
+    pub fn has_attribute(&self, codebase: &CodebaseMetadata, name: Word) -> bool {
+        let name = codebase.class_key(name);
+
+        self.attributes.iter().any(|attribute| codebase.class_key(attribute.name) == name)
     }
 
     /// Checks if the property is effectively final (private read access).
