@@ -28963,6 +28963,31 @@ fn an_extern_property_read_through_a_compound_assignment_or_a_null_safe_access_c
     assert!(lowered.body().contains("ZVAL \"__set\""), "{}", lowered.body());
 }
 
+/// ```php
+/// [${'receiver#1'} = \Sharp\Internal\returned($this->__get('counts'), null, '', 'Map<string, int>', …),
+///     ${'kept#2'} = ${'receiver#1'}, \Sharp\Internal\put(${'receiver#1'}, $key, 5),
+///     ${'receiver#1'} === ${'kept#2'} || ($this->__set('counts', $value#3 = ${'receiver#1'}) ?? $value#3)][2];
+/// ```
+///
+/// A key write into an `extern` `Map` property, spec section 14.3, reads the property once through `__get` into a hidden
+/// copy, writes the key into the copy, and stores the copy back through `__set`, as a write into a computed property's
+/// value does in Swift. A write that changes nothing stores nothing.
+#[test]
+fn a_key_write_into_an_extern_map_property_changes_a_copy_that_set_stores() {
+    let model = (
+        "src/Lib/Model.php",
+        "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    /** @var array<string, mixed> */\n    private array $attributes = [];\n\n    public function __get(string $key): mixed\n    {\n        return $this->attributes[$key] ?? null;\n    }\n\n    public function __set(string $key, mixed $value): void\n    {\n        $this->attributes[$key] = $value;\n    }\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Row : Model\n{\n    public extern Map<string, int> counts { get; set; }\n\n    public Row() : super() { }\n\n    public void run(string key)\n    {\n        this.counts[key] = 5;\n    }\n}\n";
+    let body = Lowered::with(code, &[model]).body();
+
+    assert_eq!(body.matches("ZVAL \"__get\"").count(), 1, "{body}");
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 1, "{body}");
+    assert_eq!(body.matches("ZVAL \"__set\"").count(), 1, "{body}");
+    assert!(body.contains("ZVAL \"receiver#1\""), "{body}");
+    assert!(body.contains("ZVAL \"kept#2\""), "{body}");
+}
+
 /// An `extern` property of a PHP# class whose plain PHP parent defines `__get` is the property `__get` gives, spec
 /// section 14.3: the class declares no PHP property of its name, only the hidden static `owner#extern` that holds its key
 /// and its access, beside its line `$owner extern: string`, by which reflection lists it. The read calls `__get` with
