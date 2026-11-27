@@ -254,6 +254,11 @@ where
         {
             report_captive(context, binding, captive, at);
         }
+        if let Some((transient, class, at)) = walk.owner
+            && first(IssueCode::UnownedDisposable, at)
+        {
+            report_undisposed_owner(context, transient, class, at);
+        }
         (seen, classes) = (walk.seen, walk.classes);
     }
     for class in classes {
@@ -644,6 +649,9 @@ struct Walk<'services, 'ctx> {
     classes: HashSet<Word>,
     cycle: Option<(Vec<Word>, &'ctx BindingMetadata)>,
     captive: Option<(&'ctx BindingMetadata, &'ctx BindingMetadata)>,
+    /// A transient `Disposable` service, the class that takes it and so owns it but isn't `Disposable`, and where it
+    /// is reported.
+    owner: Option<(&'ctx BindingMetadata, &'ctx ClassLikeMetadata, &'ctx BindingMetadata)>,
 }
 
 impl<'services, 'ctx> Walk<'services, 'ctx> {
@@ -667,6 +675,7 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
             classes,
             cycle: None,
             captive: None,
+            owner: None,
         }
     }
 
@@ -699,12 +708,34 @@ impl<'services, 'ctx> Walk<'services, 'ctx> {
                 self.path.push(class.original_name);
             }
             for served in &built.served {
+                if let Some(class) = built.class
+                    && self.owner.is_none()
+                    && self.owns_undisposed(class, served.1)
+                    && let Some(at) = self.reported_at(Some(served.1))
+                {
+                    self.owner = Some((served.1, class, at));
+                }
                 self.visit(*served, held);
             }
             if built.class.is_some() {
                 self.path.pop();
             }
         }
+    }
+
+    /// Spec sections 2 and 32: whether `class` takes the service of the transient `binding`, a `Disposable` one, and
+    /// isn't `Disposable` itself. A transient service is the class's own, so it owns the value, and only a
+    /// `Disposable` class can dispose a value it holds.
+    fn owns_undisposed(&self, class: &ClassLikeMetadata, binding: &BindingMetadata) -> bool {
+        let codebase = self.services.codebase;
+        let disposable = word(b"Sharp\\Disposable");
+
+        binding.lifetime == Lifetime::Transient
+            && binding.service.type_union.types.iter().any(|atomic| match atomic {
+                TAtomic::Object(TObject::Named(named)) => codebase.is_instance_of(named.name, disposable),
+                _ => false,
+            })
+            && !codebase.is_instance_of(class.name, disposable)
     }
 
     /// Visits `binding`, which serves a service the walk reached.
@@ -1059,6 +1090,30 @@ where
             .with_annotation(Annotation::primary(at.span).with_message("Bound here."))
             .with_help("Break the cycle: one of these services must not take the next one."),
     );
+}
+
+/// Reports that `class` takes the transient `Disposable` service of `transient`, and so owns it, without being
+/// `Disposable`, at the binding `at`.
+fn report_undisposed_owner<A>(
+    context: &mut Context<'_, '_, A>,
+    transient: &BindingMetadata,
+    class: &ClassLikeMetadata,
+    at: &BindingMetadata,
+) where
+    A: Arena,
+{
+    let service_name = display_sharp_type(context, &transient.service.type_union);
+    let class_name = display_class_like_name(context, class.original_name);
+    let mut issue = Issue::error(format!(
+        "The transient `{service_name}` is `Disposable`, so `{class_name}`, which takes it, owns it, and only a `Disposable` class can dispose it."
+    ))
+    .with_annotation(Annotation::primary(at.span).with_message("Bound here."))
+    .with_help(format!("Make `{class_name}` `Disposable` and dispose it there, or make `{service_name}` scoped."));
+    if !std::ptr::eq(transient, at) {
+        issue = issue.with_annotation(Annotation::secondary(transient.span).with_message("Transient here."));
+    }
+
+    context.collector.report_with_code(IssueCode::UnownedDisposable, issue);
 }
 
 /// Reports that the singleton `binding` holds the scoped `captive`, at the binding `at`.

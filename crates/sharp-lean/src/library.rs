@@ -20,6 +20,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use mago_database::clock::Clock;
+use mago_database::clock::SystemClock;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use mago_database::lock;
@@ -695,7 +697,7 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
             Ok(()) => break fs::rename(staging.join(archive.name), &lean).and_then(|()| remove_folder(&staging)),
             Err(InstallFailure::Transient(cause)) if downloads < DOWNLOADS => {
                 tracing::info!("The law checker's download failed ({cause}), so it downloads again.");
-                thread::sleep(DOWNLOAD_PAUSE * downloads);
+                SystemClock.sleep(DOWNLOAD_PAUSE * downloads);
                 downloads += 1;
             }
             Err(InstallFailure::Transient(cause)) => {

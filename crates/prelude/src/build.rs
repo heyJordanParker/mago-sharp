@@ -132,13 +132,14 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
-    use std::time::Duration;
-    use std::time::Instant;
 
     use crate::Prelude;
 
     /// The other jobs the pool holds at most at once, so its threads always find one and the queue stays short.
     const QUEUED_AT_MOST: usize = 64;
+
+    /// The work of each other job, a fixed count of spins that no load changes.
+    const OTHER_JOB_SPINS: usize = 20_000;
 
     /// The builds the test runs. With the build on the caller's pool, another job ran on the building thread in 16 of 20
     /// runs of one build, and in 20 of 20 runs of three.
@@ -150,12 +151,11 @@ mod tests {
     static DURING_THE_BUILD: AtomicUsize = AtomicUsize::new(0);
     static ON_THE_BUILDER: AtomicUsize = AtomicUsize::new(0);
 
-    /// A job of the pool other than the build, which works for 50 microseconds and counts whether it ran during the
-    /// build and on the building thread.
+    /// A job of the pool other than the build, which works through `OTHER_JOB_SPINS` spins and counts whether it ran
+    /// during the build and on the building thread.
     fn other_job() {
         QUEUED.fetch_sub(1, Ordering::SeqCst);
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_micros(50) {
+        for _ in 0..OTHER_JOB_SPINS {
             std::hint::spin_loop();
         }
         if BUILDING.load(Ordering::SeqCst) {

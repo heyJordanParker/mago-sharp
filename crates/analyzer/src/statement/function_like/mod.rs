@@ -124,6 +124,7 @@ use crate::utils::report_int_for_float;
 
 pub mod function;
 pub mod rejected_nullable_parameter;
+pub mod unowned_disposable;
 pub mod unused_parameter;
 pub mod write_only_local;
 
