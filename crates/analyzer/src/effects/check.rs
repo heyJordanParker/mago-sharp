@@ -75,6 +75,7 @@ use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
 use crate::effects::Runs;
+use crate::effects::WidenedConstructor;
 use crate::effects::events;
 use crate::effects::holding_declaration;
 use crate::effects::is_effect;
@@ -364,6 +365,54 @@ pub(crate) fn implementations_must_fit_their_declarations(
                 &code_class_name,
                 &missing_import,
             )
+        })
+        .collect()
+}
+
+/// Spec section 29: `new (type)(…)` of a `Class<Saved>` may build any subclass of `Saved` with the effects of `Saved`'s
+/// `required` constructor alone, spec section 25, so a constructor below a `required` one may add no effect to it, as an
+/// implementation adds none to its interface method. The refusal names the effect it adds and the `required`
+/// constructor's effects.
+pub(crate) fn required_constructors_add_no_effect(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
+    effects
+        .widened_constructors(codebase)
+        .map(|WidenedConstructor { member: (class, member), required, allowed, imports, scope, impurity }| {
+            let (required_class, required_member) = required;
+            let class_name = |class| sharp_class_like_name(codebase, imports, class);
+            let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
+            let code_class_name = |class| sharp_code_class_name(codebase, imports, scope, class);
+            let file = impurity.span.file_id;
+            let missing_import = |class| sharp_missing_imports(codebase, file, imports, scope, [class]);
+            let required_class = class_name(required_class);
+            let required = display_sharp_member(&required_class, required_member);
+            let allowed: Vec<String> = allowed.iter().map(|effect| effect_name(*effect)).collect();
+            let has = match allowed.as_slice() {
+                [] => "has no effect".to_owned(),
+                [effect] => format!("has the effect `{effect}`"),
+                effects => format!("has the effects `{}`", effects.join("`, `")),
+            };
+            let issue = impure(
+                IssueCode::IncompatibleEffects,
+                format!(
+                    "`{}` {}, so it adds an effect to the `required` constructor `{required}`, which {has}.",
+                    display_sharp_member(class_name(class), member),
+                    impurity.describe(&class_name, &effect_name)
+                ),
+                impurity.span,
+                "constructor",
+                &impurity,
+                &allowed,
+                &code_class_name,
+                &missing_import,
+            );
+            if issue.help.is_some() {
+                return issue;
+            }
+
+            issue.with_help(format!(
+                "`new (type)(…)` of a `Class<{}>` runs a subclass's constructor with the effects of `{required}` alone, so a subclass's constructor adds none. Do this work outside the constructor.",
+                short_name(&required_class)
+            ))
         })
         .collect()
 }
