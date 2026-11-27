@@ -13,7 +13,6 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::reference::ReferenceOrigin;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::template::TemplateResult;
-use mago_names::DYNAMICALLY_ACCESSED;
 use mago_names::short_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -88,24 +87,6 @@ where
 {
     if attribute_lists.iter().all(|list| list.attributes.is_empty()) {
         return Ok(());
-    }
-
-    // Spec section 5: the mark says a framework reads an attribute by reflection, so on a class-like that is no
-    // attribute class it would mark nothing.
-    if context.dialect.is_sharp() && class_like_metadata.attribute_flags.is_none() {
-        let mark = context.codebase.class_key(word(DYNAMICALLY_ACCESSED));
-        for attribute in attribute_lists.iter().flat_map(|list| list.attributes.iter()) {
-            if context.codebase.class_key(word(context.resolved_names.get(&attribute.name))) == mark {
-                let class = display_class_like_name(context, class_like_metadata.name);
-                context.collector.report_with_code(
-                    IssueCode::InvalidAttributeTarget,
-                    Issue::error(format!(
-                        "`[DynamicallyAccessed]` marks an attribute class, and `{class}` is not one. Mark the attribute that `{class}` carries."
-                    ))
-                    .with_annotation(Annotation::primary(attribute.name.span()).with_message("Written here.")),
-                );
-            }
-        }
     }
 
     let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, mago_word::empty_word())));

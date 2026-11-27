@@ -23,6 +23,7 @@ use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Constant;
@@ -44,6 +45,7 @@ use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
+use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Module;
 use mago_syntax::cst::NamedConstructor;
@@ -1218,6 +1220,26 @@ where
         let call = (template.defining_entity, *name, word(constructor.name.value));
         if let Some(class_like) = self.stack.last().and_then(|class| self.codebase.class_likes.get_mut(class)) {
             class_like.type_parameter_named_constructors.push(call);
+        }
+    }
+
+    /// Records `T.wireName()`, a static called through a type parameter, on the class-like the code is in, spec section
+    /// 11, so a type argument whose class leaves that static abstract is refused where it is bound.
+    #[inline]
+    fn walk_in_method_call(&mut self, call: &'arena MethodCall<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
+        let (Expression::ConstantAccess(access), ClassLikeMemberSelector::Identifier(method)) =
+            (call.object, &call.method)
+        else {
+            return;
+        };
+        let Some((name, template)) =
+            self.template_constraints.iter().rev().flatten().find(|(name, _)| name.as_bytes() == access.name.value())
+        else {
+            return;
+        };
+        let call = (template.defining_entity, *name, word(method.value));
+        if let Some(class_like) = self.stack.last().and_then(|class| self.codebase.class_likes.get_mut(class)) {
+            class_like.type_parameter_static_calls.push(call);
         }
     }
 

@@ -84,6 +84,10 @@ pub struct ClassLikeMetadata {
     /// `fromJson` of `new TItem.fromJson(json)`: each with the entity that declares the type parameter and its name.
     #[cfg_attr(feature = "serde", serde(default))]
     pub type_parameter_named_constructors: Vec<(GenericParent, Word, Word)>,
+    /// The statics this class-like's code calls through a type parameter, spec section 11, as the `wireName` of
+    /// `T.wireName()`: each with the entity that declares the type parameter and its name.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub type_parameter_static_calls: Vec<(GenericParent, Word, Word)>,
     /// Whether the class-like or an ancestor of it is PHP#'s, so it keys its methods by their exact names, as the
     /// engine's `SHARP_CLASS_EXACT_NAMES` does, spec section 24: `total` and `Total` are two methods, and each is found
     /// only as declared. Every other class-like keys a method by its lowercase name, as PHP does. The scanner sets it
@@ -290,6 +294,7 @@ impl ClassLikeMetadata {
             template_type_implements_count: WordMap::default(),
             template_type_uses_count: WordMap::default(),
             type_parameter_named_constructors: Vec::new(),
+            type_parameter_static_calls: Vec::new(),
             template_types: TemplateTypes::default(),
             used_traits: WordSet::default(),
             trait_alias_map: WordMap::default(),

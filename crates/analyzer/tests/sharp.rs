@@ -1162,22 +1162,22 @@ fn a_member_a_marked_class_inherits_and_a_test_folder_class_are_not_too_wide() {
     );
 }
 
-/// Spec section 5: `[DynamicallyAccessed]` marks an attribute class, so that the members and classes carrying the
-/// attribute count as used. On a class that is no attribute class, as the struct `DomainRecord`, it would mark nothing,
-/// so it is a compile error that names the fix. On an attribute class it compiles, and a struct that carries that
-/// attribute has no too-wide member.
+/// Spec section 5: `[DynamicallyAccessed]` on an attribute class says its framework reads the attribute, so the members
+/// and classes that carry it count as used. On a class that is no attribute class it marks a base class, whose
+/// framework creates each class that extends it and calls its methods, so a subclass in another namespace has no
+/// too-wide method, and the mark on the base class compiles.
 #[test]
-fn the_dynamically_accessed_mark_goes_on_an_attribute_class_only() {
+fn the_dynamically_accessed_mark_on_a_base_class_reaches_its_subclasses() {
     let marker = (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
         include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
     );
-    let domain_record = "namespace App.Shop;\n\n[DynamicallyAccessed]\npublic struct DomainRecord\n{\n    public DomainRecord(public string value { get; }) { }\n}\n";
+    let base = "namespace App.Shop;\n\n[DynamicallyAccessed]\npublic abstract class DomainRecord\n{\n}\n";
+    let order = "namespace App.Web;\n\nimport App.Shop.DomainRecord;\n\npublic final class Order : DomainRecord\n{\n    public string total() => \"0\";\n}\n";
+    assert_eq!(refusals(("src/App/Shop/DomainRecord.sharp", base), &[marker]), Vec::<String>::new());
     assert_eq!(
-        refusals(("src/App/Shop/DomainRecord.sharp", domain_record), &[marker]),
-        [
-            "3:2 invalid-attribute-target `[DynamicallyAccessed]` marks an attribute class, and `DomainRecord` is not one. Mark the attribute that `DomainRecord` carries. | "
-        ]
+        too_wide(&[marker, ("src/App/Shop/DomainRecord.sharp", base), ("src/App/Web/Order.sharp", order)]),
+        Vec::<String>::new()
     );
 
     let record =
@@ -1187,6 +1187,137 @@ fn the_dynamically_accessed_mark_goes_on_an_attribute_class_only() {
     assert_eq!(
         too_wide(&[marker, ("src/App/Shop/Record.sharp", record), ("src/App/Web/Carried.sharp", carried)]),
         Vec::<String>::new()
+    );
+}
+
+/// PHPUnit's base class of a test and its attributes of a test method, as a project's `vendor` folder holds them.
+const PHPUNIT: [(&str, &str); 3] = [
+    (
+        "vendor/phpunit/phpunit/src/Framework/TestCase.php",
+        "<?php\n\nnamespace PHPUnit\\Framework;\n\nabstract class TestCase\n{\n}\n",
+    ),
+    (
+        "vendor/phpunit/phpunit/src/Framework/Attributes/Test.php",
+        "<?php\n\nnamespace PHPUnit\\Framework\\Attributes;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD)]\nfinal class Test\n{\n}\n",
+    ),
+    (
+        "vendor/phpunit/phpunit/src/Framework/Attributes/DataProvider.php",
+        "<?php\n\nnamespace PHPUnit\\Framework\\Attributes;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD | \\Attribute::IS_REPEATABLE)]\nfinal class DataProvider\n{\n    public function __construct(public string $methodName)\n    {\n    }\n}\n",
+    ),
+];
+
+/// Eloquent's `Model`, the base class of a model, and its `Attribute` of an accessor, as a project's `vendor` folder
+/// holds them.
+const ELOQUENT_MODEL: [(&str, &str); 2] = [
+    (
+        "vendor/laravel/framework/src/Illuminate/Database/Eloquent/Model.php",
+        "<?php\n\nnamespace Illuminate\\Database\\Eloquent;\n\nabstract class Model\n{\n}\n",
+    ),
+    (
+        "vendor/laravel/framework/src/Illuminate/Database/Eloquent/Casts/Attribute.php",
+        "<?php\n\nnamespace Illuminate\\Database\\Eloquent\\Casts;\n\nfinal class Attribute\n{\n    public static function make(?\\Closure $get = null): self\n    {\n        return new self();\n    }\n}\n",
+    ),
+];
+
+/// Spec section 5: in a test folder, an `autoload-dev` one, the test runner calls each method marked PHPUnit's `Test`
+/// and each method a `DataProvider` of one names, which the checker never sees, so neither is too wide with no
+/// declaration of the project's. A public method of a test class with neither is still too wide.
+#[test]
+fn a_test_method_marked_test_is_reached_by_the_runner() {
+    let test = "namespace App.Shop;\n\nimport PHPUnit.Framework.Attributes.DataProvider;\nimport PHPUnit.Framework.Attributes.Test;\nimport PHPUnit.Framework.TestCase;\n\npublic final class OrderTest : TestCase\n{\n    [Test]\n    [DataProvider(nameof(OrderTest.rows))]\n    public void testItLists(int count) { }\n\n    public static List<List<int>> rows() => [[1]];\n\n    public void helper() { }\n}\n";
+    let mut files = PHPUNIT.to_vec();
+    files.push(("tests/Shop/OrderTest.sharp", test));
+
+    assert_eq!(
+        too_wide(&files),
+        [
+            "tests/Shop/OrderTest.sharp 15:17 `OrderTest.helper` is public, and nothing outside `OrderTest` uses it. | Declare it `private`, or, when a framework reaches it by name or by reflection, put an attribute whose class is marked `[DynamicallyAccessed]` on its class."
+        ]
+    );
+}
+
+/// Spec section 5: `[DynamicallyAccessed]` on a base class that is no attribute class, as on the `extern` line of
+/// Eloquent's `Model`, says its framework creates each class that extends it and calls its public and protected
+/// methods, which the checker never sees. So a model's relation and accessor need no other use, and without the mark
+/// the model and its relation are too wide.
+#[test]
+fn a_marked_base_class_reaches_public_and_protected_methods_of_its_subclasses() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let with_mark = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Model;\n\n[DynamicallyAccessed]\nextern Model uses none;\n";
+    let without_mark =
+        "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Model;\n\nextern Model uses none;\n";
+    let offer = "namespace App.Store;\n\nimport Illuminate.Database.Eloquent.Casts.Attribute;\nimport Illuminate.Database.Eloquent.Model;\n\npublic final class CartOffer : Model\n{\n    public string offer() => \"offer\";\n\n    protected Attribute label() => Attribute.make(get: (string value) => value.trim());\n}\n";
+    let files = |stubs: &'static str| {
+        let mut files = ELOQUENT_MODEL.to_vec();
+        files.extend([marker, ("src/App/Stubs/Stubs.sharp", stubs), ("src/App/Store/CartOffer.sharp", offer)]);
+        files
+    };
+
+    assert_eq!(too_wide(&files(with_mark)), Vec::<String>::new());
+    assert_eq!(
+        too_wide(&files(without_mark)),
+        [
+            "src/App/Store/CartOffer.sharp 6:20 `CartOffer` is public, and nothing outside `App.Store` uses it. | Declare it `internal`, or, when a framework reaches it by name or by reflection, put an attribute whose class is marked `[DynamicallyAccessed]` on it.",
+            "src/App/Store/CartOffer.sharp 8:19 `CartOffer.offer` is public, and nothing outside `CartOffer` uses it. | Declare it `private`, or, when a framework reaches it by name or by reflection, put an attribute whose class is marked `[DynamicallyAccessed]` on its class."
+        ]
+    );
+}
+
+/// Spec section 5: each reach the checker can't see is a use from outside any namespace, so `internal`, written or by
+/// default, on a class or a member one reaches is too narrow, an error at its declaration, where the engine would
+/// throw when it runs. Each reach names who reaches: the test runner, the framework of a marked attribute or of a
+/// marked base class, plain PHP calling an `[Export]` method and the engine running the class of a `main`, which is
+/// always public. A private method of a
+/// marked base's subclass that no code uses is the framework's, which calls it from the base class, so it is refused
+/// with `protected`.
+#[test]
+fn an_internal_class_or_member_a_framework_reaches_is_too_narrow() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let export = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Interop/Export.sharp",
+        include_str!("../../../../composer/library/Sharp/Interop/Export.sharp"),
+    );
+    let listener = "<?php\n\nnamespace Symfony\\Component\\EventDispatcher\\Attribute;\n\n#[\\Attribute(\\Attribute::TARGET_CLASS | \\Attribute::TARGET_METHOD)]\nclass AsEventListener\n{\n}\n";
+    let stubs = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Model;\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\n[DynamicallyAccessed]\nextern AsEventListener uses none;\n\n[DynamicallyAccessed]\nextern Model uses none;\n";
+    let order_test =
+        "namespace App.Shop;\n\nimport PHPUnit.Framework.TestCase;\n\nfinal class OrderTest : TestCase\n{\n}\n";
+    let cart_test = "namespace App.Shop;\n\nimport PHPUnit.Framework.Attributes.Test;\nimport PHPUnit.Framework.TestCase;\n\npublic final class CartTest : TestCase\n{\n    [Test]\n    internal void testTotals() { }\n}\n";
+    let hooks = "namespace App.Payments;\n\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\npublic class Hooks\n{\n    [AsEventListener]\n    internal void paid() { }\n}\n";
+    let offer = "namespace App.Store;\n\nimport Illuminate.Database.Eloquent.Casts.Attribute;\nimport Illuminate.Database.Eloquent.Model;\n\npublic final class CartOffer : Model\n{\n    internal string offer() => \"offer\";\n\n    private Attribute label() => Attribute.make(get: (string value) => value.trim());\n}\n";
+    let overrides = "namespace App.Hooks;\n\nimport Sharp.Interop.Export;\n\npublic static class Overrides\n{\n    [Export(\"app_title\")]\n    internal static string title(string text) => text;\n}\n";
+    let import = "namespace App.Console;\n\nclass Import\n{\n    public int main() => 0;\n}\n";
+    let mut files = PHPUNIT.to_vec();
+    files.extend(ELOQUENT_MODEL);
+    files.extend([
+        marker,
+        export,
+        ("vendor/symfony/event-dispatcher/Attribute/AsEventListener.php", listener),
+        ("src/App/Stubs/Stubs.sharp", stubs),
+        ("tests/Shop/OrderTest.sharp", order_test),
+        ("tests/Shop/CartTest.sharp", cart_test),
+        ("src/App/Payments/Hooks.sharp", hooks),
+        ("src/App/Store/CartOffer.sharp", offer),
+        ("src/App/Hooks/Overrides.sharp", overrides),
+        ("src/App/Console/Import.sharp", import),
+    ]);
+
+    assert_eq!(
+        too_wide(&files),
+        [
+            "tests/Shop/OrderTest.sharp 5:13 `OrderTest` is internal, and its test runner reaches it from outside `App.Shop`, so it throws when it runs. | Declare it public.",
+            "tests/Shop/CartTest.sharp 9:19 `CartTest.testTotals` is internal, and its test runner reaches it from outside `App.Shop`, so it throws when it runs. | Declare it public.",
+            "src/App/Payments/Hooks.sharp 8:19 `Hooks.paid` is internal, and the framework that reads `AsEventListener` reaches it from outside `App.Payments`, so it throws when it runs. | Declare it public.",
+            "src/App/Store/CartOffer.sharp 8:21 `CartOffer.offer` is internal, and the framework that `Model` declares reaches it from outside `App.Store`, so it throws when it runs. | Declare it public.",
+            "src/App/Store/CartOffer.sharp 10:23 `CartOffer.label` is private, and the framework that `Model` declares reaches it from outside `CartOffer`, so it throws when it runs. | Declare it protected.",
+            "src/App/Hooks/Overrides.sharp 8:28 `Overrides.title` is internal, and plain PHP's call of its `[Export]` function reaches it from outside `App.Hooks`, so it throws when it runs. | Declare it public.",
+            "src/App/Console/Import.sharp 3:7 `Import` is internal, and the engine that runs the program reaches it from outside `App.Console`, so it throws when it runs. | Declare it public."
+        ]
     );
 }
 
@@ -4526,9 +4657,8 @@ fn a_list_test_of_a_value_declared_a_map_is_an_error() {
     assert_eq!(
         errors,
         [
-            "This pattern never matches the value it tests, a `Map<int|string, Any?>?`: a `Map` is never a `List`.",
-            "`box.records` is a `Map<int|string, Any?>?` that is never a `List<Map<string, string?>>` here, so `box.records as List<Map<string, string?>>` always gives `null`.",
             "This pattern never matches the value it tests, a `Map<int, int>`: a `Map` is never a `List`.",
+            "`box.records` is a `List<Any?>` or a `Map<int|string, Any?>`, since plain PHP's `array` holds either, and `values` is a `Map`'s. Test it with `is` first.",
         ]
     );
 }
@@ -14438,8 +14568,9 @@ fn a_template_refuses_every_type_but_int_float_string_and_bool() {
 }
 
 /// Spec section 12: plain PHP's `array<int, T>`, returned or held in a property, arrives as a `List<T>`, which PHP#
-/// renumbers where it arrives, and still makes a `Map<int, T>` of its keys. An array keyed by `string` or by
-/// `int|string`, and a shape, stay a `Map`.
+/// renumbers where it arrives, and still makes a `Map<int, T>` of its keys. An array keyed by `string`, and a shape, stay
+/// a `Map`, and one keyed by `int|string` is a `List<T>` or a `Map<int|string, T>`, so neither a `List` nor a `Map` of
+/// another key type takes it.
 #[test]
 fn a_plain_php_int_keyed_array_arrives_as_a_list() {
     let users = "<?php\n\nnamespace App;\n\nfinal class Users\n{\n    /** @var array<int, Person> */\n    public array $cached = [];\n\n    /** @return array<int, Person> */\n    public function all(): array { return []; }\n\n    /** @return non-empty-array<int, Person> */\n    public function some(): array { return [new Person()]; }\n\n    /** @return array<string, Person> */\n    public function byName(): array { return []; }\n\n    /** @return array<int|string, Person> */\n    public function mixed(): array { return []; }\n}\n";
@@ -14489,6 +14620,64 @@ fn a_plain_php_int_keyed_shape_or_field_arrives_as_a_list() {
     let sharp = "namespace App;\n\nclass Reader\n{\n    public int read(Pivot pivot, Any? changed)\n    {\n        List<int> pair = pivot.pair();\n        List<int> attached = pivot.changes().get(\"attached\") ?? [];\n        List<int> grouped = pivot.grouped()[\"a\"] ?? [];\n        const sum = match (pivot.pair()) { [int a, int b] => a + b, default => 0 };\n        const listed = match (pivot.listed()) { [int a, int b] => a + b, default => 0 };\n        return changed is List<int> ? sum + listed + pair[0] + attached.count() + grouped.count() : sum;\n    }\n}\n";
 
     assert_eq!(issues(("src/App/Reader.sharp", sharp), &[("src/App/Pivot.php", pivot)]), [] as [&str; 0]);
+}
+
+/// Spec section 12: plain PHP's `array<V>` holds a list as often as a map, so PHP# reads it as a `List<V>` or a
+/// `Map<int|string, V>`. A `Map` method called on it is one error that names both and the test to make first, with no
+/// error for its arguments beside it. Tested `is Map<int|string, V>`, it is the `Map` alone, which the method reads.
+#[test]
+fn a_map_method_on_a_list_or_map_from_plain_php_is_one_error() {
+    let bag = "<?php\n\nnamespace App;\n\nfinal class Bag\n{\n    /** @return array<string, array<string>> */\n    public function messages(): array { return []; }\n}\n";
+    let sharp = "namespace App;\n\nclass Reader\n{\n    public string? first(Bag bag)\n    {\n        for (const lines of bag.messages().values()) {\n            return lines.get(0);\n        }\n        return null;\n    }\n\n    public string? tested(Bag bag)\n    {\n        for (const lines of bag.messages().values()) {\n            if (lines is Map<int|string, string> map) {\n                return map.get(0);\n            }\n        }\n        return null;\n    }\n}\n";
+
+    assert_eq!(
+        worded(("src/App/Reader.sharp", sharp), &[("src/App/Bag.php", bag)]),
+        [
+            "8:26 non-existent-method `lines` is a `List<string>` or a `Map<int|string, string>`, since plain PHP's `array<string>` holds either, and `get` is a `Map`'s. Test it with `is` first. | A method of a `Map` only. | This is a `List<string>` or a `Map<int|string, string>`. | Narrow `lines` to the `Map<int|string, string>` with `is` or `as`, then call `get`."
+        ]
+    );
+}
+
+/// Spec section 12: plain PHP's `array<V>`, a `List<V>` or a `Map<int|string, V>`, keeps the PHP array plain PHP gave,
+/// whose keys PHP's loop reads for a list as for a map, so `for (const [k, v] of x)` reads it, as it read the `Map`.
+/// A PHP# `List` still reads its indexes from `entries()`.
+#[test]
+fn a_key_read_loop_over_a_list_or_map_from_plain_php_compiles() {
+    let registry = "<?php\n\nnamespace App;\n\nfinal class Registry\n{\n    public static array $items = [1, 2, 3];\n\n    /** @return array<string> */\n    public static function names(): array { return []; }\n}\n";
+    let sharp = "namespace App;\n\nclass Counter\n{\n    public static int count(List<int> own)\n    {\n        let count = 0;\n        for (const [index, item] of Registry.items) {\n            count++;\n        }\n        for (const [key, name] of Registry.names()) {\n            count++;\n        }\n        for (const [index, item] of own) {\n            count++;\n        }\n        return count;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Counter.sharp", sharp), &[("src/App/Registry.php", registry)]),
+        ["14:37 invalid-iterator"]
+    );
+}
+
+/// Spec section 12: plain PHP's array keyed by `int` alone still arrives as a `List` alone, returned, held in a
+/// property, and as a `Map`'s value, since its keys are a list's.
+#[test]
+fn an_int_keyed_plain_php_array_still_arrives_as_a_list() {
+    let users = "<?php\n\nnamespace App;\n\nfinal class Users\n{\n    /** @var array<int, Person> */\n    public array $cached = [];\n\n    /** @return array<int, Person> */\n    public function all(): array { return []; }\n\n    /** @return array<string, array<int, string>> */\n    public function grouped(): array { return []; }\n}\n";
+    let person = "<?php\n\nnamespace App;\n\nfinal class Person\n{\n}\n";
+    let sharp = "namespace App;\n\nclass Roster\n{\n    public List<Person> all(Users users) => users.all();\n\n    public List<Person> cached(Users users) => users.cached;\n\n    public List<string> grouped(Users users) => users.grouped()[\"a\"] ?? [];\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Roster.sharp", sharp), &[("src/App/Users.php", users), ("src/App/Person.php", person)]),
+        [] as [&str; 0]
+    );
+}
+
+/// Spec section 12: plain PHP's array keyed by `string` alone still arrives as a `Map` alone, so a `Map` method reads
+/// it with no test first.
+#[test]
+fn a_string_keyed_plain_php_array_still_arrives_as_a_map() {
+    let users = "<?php\n\nnamespace App;\n\nfinal class Users\n{\n    /** @return array<string, Person> */\n    public function byName(): array { return []; }\n}\n";
+    let person = "<?php\n\nnamespace App;\n\nfinal class Person\n{\n}\n";
+    let sharp = "namespace App;\n\nclass Roster\n{\n    public Map<string, Person> all(Users users) => users.byName();\n\n    public Person? named(Users users) => users.byName().get(\"a\");\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Roster.sharp", sharp), &[("src/App/Users.php", users), ("src/App/Person.php", person)]),
+        [] as [&str; 0]
+    );
 }
 
 /// Spec section 12: a `List` is not a `Map`, so a `List` value where only a `Map` is declared is refused, as a `List`
@@ -16274,25 +16463,26 @@ fn a_sharp_list_property_emptied_through_any_object_stays_a_list() {
     assert_eq!(issues(("src/Demo/Sizes.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// A PHP# local copied from a plain PHP `array` property is PHP#'s own place, and PHP# reads a PHP `array` as a `Map`,
-/// so the local refuses a `List` literal.
+/// A PHP# local copied from a plain PHP `array` property is PHP#'s own place, and PHP# reads a PHP `array` as a `List`
+/// or a `Map`, spec section 12, so the local takes a `List` literal as it takes a `Map` literal.
 #[test]
-fn a_local_copied_from_a_php_array_property_refuses_a_list_literal() {
+fn a_local_copied_from_a_php_array_property_takes_a_list_literal() {
     let sharp = "namespace Demo;\n\nimport Lib.Store;\n\nclass Report\n{\n    public int run(Store store)\n    {\n        let items = store.items;\n        items = [];\n        return items.count();\n    }\n}\n";
 
-    assert_eq!(
-        reported(("src/Demo/Report.sharp", sharp), &[STORE]),
-        ["10:17 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
-    );
+    assert_eq!(reported(("src/Demo/Report.sharp", sharp), &[STORE]), Vec::<String>::new());
 }
 
 /// A plain PHP `array` property a PHP# class empties is typed by the value it holds, as in PHP, and PHP# still reads it
-/// as a `Map`: its `Map` methods and its `[k, v]` loop check clean, and a bare index read is refused.
+/// as a `List` or a `Map`, spec section 12: its `[k, v]` loop and its index read and write check as PHP's, a `Map`
+/// method on it is tested with `is` first, and a bare index read is refused.
 #[test]
-fn an_emptied_php_array_property_keeps_the_map_rules() {
+fn an_emptied_php_array_property_keeps_the_list_or_map_rules() {
     let sharp = "namespace Demo;\n\nimport Lib.Store;\n\npublic class Rows : Store\n{\n    public int total()\n    {\n        this.items = [];\n        this.items.remove(\"a\");\n        let total = 0;\n        for (const [key, value] of this.items) {\n            total += 1;\n        }\n        this.items = [:];\n        const first = this.items.get(\"a\");\n        return total + this.items.count() + (first == null ? 0 : 1);\n    }\n\n    public Any? read() => this.items[\"b\"];\n}\n";
 
-    assert_eq!(issues(("src/Demo/Rows.sharp", sharp), &[STORE]), ["20:27 possibly-undefined-array-index"]);
+    assert_eq!(
+        issues(("src/Demo/Rows.sharp", sharp), &[STORE]),
+        ["16:34 non-existent-method", "20:27 possibly-undefined-array-index"]
+    );
 }
 
 /// A `List` has `add`, `getOrNull`, `entries()`, `contains`, `indexOf`, `last`, `insert`, `remove`, `clear`, `toSet`,
@@ -20883,6 +21073,34 @@ fn a_plain_php_class_is_no_type_argument_a_named_constructor_is_called_through()
     );
 }
 
+/// Spec section 11: a type parameter bounded by a class binds to its static type argument, and `T.wireName()` runs that
+/// class's own static, so a type argument whose class leaves the static abstract is refused where it is bound, inferred
+/// from an argument or written, as C# refuses one with unimplemented static abstract members (CS8920). A class that
+/// declares the static compiles.
+#[test]
+fn a_type_argument_leaving_a_called_static_abstract_is_refused() {
+    let public_event = (
+        "src/App/PublicEvent.sharp",
+        "namespace App;\n\ninternal abstract class PublicEvent\n{\n    internal static abstract string wireName();\n}\n",
+    );
+    let order_paid = (
+        "src/App/OrderPaidEvent.sharp",
+        "namespace App;\n\ninternal class OrderPaidEvent : PublicEvent\n{\n    internal static override string wireName() => \"order.paid\";\n}\n",
+    );
+    let wire = (
+        "src/App/Wire.sharp",
+        "namespace App;\n\ninternal class Wire\n{\n    private static string wireNameOf<T : PublicEvent>(Class<T> type) => T.wireName();\n\n    internal static List<string> run()\n    {\n        Class<PublicEvent> held = typeof(OrderPaidEvent);\n        const first = Wire.wireNameOf(typeof(OrderPaidEvent));\n        const second = Wire.wireNameOf(held);\n        const third = Wire.wireNameOf<PublicEvent>(held);\n        return [first, second, third];\n    }\n}\n",
+    );
+
+    assert_eq!(
+        refusals(wire, &[public_event, order_paid]),
+        [
+            "11:40 template-constraint-violation `PublicEvent` leaves `wireName` abstract, so it can't stand for `T`, whose code calls `T.wireName()`. | Pass the class itself, as `typeof(OrderPaidEvent)`, or reach the static through `methods()` and `createInvoker`.",
+            "12:38 template-constraint-violation `PublicEvent` leaves `wireName` abstract, so it can't stand for `T`, whose code calls `T.wireName()`. | Pass the class itself, as `typeof(OrderPaidEvent)`, or reach the static through `methods()` and `createInvoker`.",
+        ]
+    );
+}
+
 /// Spec section 25: `Self.name` reads and writes a constant or a static member of the class the code is called on, as
 /// Swift's `Self.name` does, so a subclass's own constant answers when the call ran on the subclass.
 #[test]
@@ -23779,10 +23997,11 @@ fn a_plain_php_array_key_type_argument_is_recorded_as_int_or_string() {
 }
 
 /// Spec section 12: a plain PHP result whose type holds `array-key` arrives as `int|string`, so its keys fix a PHP#
-/// generic call's type argument as `int|string`, which PHP# writes.
+/// generic call's type argument as `int|string`, which PHP# writes. The result is a `List` or a `Map`, so its `Map` is
+/// tested with `is` before its keys are read.
 #[test]
 fn a_plain_php_result_keyed_by_array_key_arrives_keyed_by_int_or_string() {
-    let sharp = "namespace Demo;\n\nimport Lib.Sources;\n\nclass Report\n{\n    public int run(Box source)\n    {\n        const columns = Sources.from(source);\n        return Report.counted(columns.keys());\n    }\n\n    private static int counted<T>(List<T> items) => items.count();\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Sources;\n\nclass Report\n{\n    public int run(Box source)\n    {\n        const columns = Sources.from(source);\n        if (columns is Map<int|string, Any?> map) {\n            return Report.counted(map.keys());\n        }\n        return 0;\n    }\n\n    private static int counted<T>(List<T> items) => items.count();\n}\n";
     let source = ("src/Demo/Box.sharp", "namespace Demo;\n\npublic class Box\n{\n}\n");
     let call = "Sources.from(source)";
     let start = sharp.find(call).unwrap() as u32;
@@ -23793,10 +24012,10 @@ fn a_plain_php_result_keyed_by_array_key_arrives_keyed_by_int_or_string() {
     assert_eq!(issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(), Vec::<String>::new());
     assert_eq!(
         artifacts.expression_types.get(&(start, start + call.len() as u32)).map(|r#type| r#type.get_id().to_string()),
-        Some("array<int|string, mixed>".to_owned())
+        Some("array<int|string, mixed>|list<mixed>".to_owned())
     );
     assert_eq!(
-        recorded_type_arguments(("src/Demo/Report.sharp", sharp), &[SOURCES, source], "Report.counted(columns.keys())"),
+        recorded_type_arguments(("src/Demo/Report.sharp", sharp), &[SOURCES, source], "Report.counted(map.keys())"),
         ["int|string"]
     );
 }
@@ -27166,7 +27385,7 @@ fn a_refined_scalar_a_class_string_and_an_object_are_named_as_sharp_writes_them(
     );
 }
 
-/// A plain PHP type that reaches PHP# is named by the PHP# type the spec gives it: an `array` is a
+/// A plain PHP type that reaches PHP# is named by the PHP# type the spec gives it: an `array` is a `List<Any?>` or a
 /// `Map<int|string, Any?>`, an `array-key` an `int|string`, and an `iterable` an `Iterable<…>` of its values, spec
 /// sections 12 and 24. `numeric` and `scalar` have no PHP# name and keep Mago's. The PHP twin keeps Mago's text.
 #[test]
@@ -27189,7 +27408,7 @@ fn a_plain_php_type_is_named_by_the_type_the_spec_gives_it() {
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &others),
         [
-            "Invalid argument type for argument #1 of `Report.keep`: expected `bool`, but found `Map<int|string, Any?>`.",
+            "Invalid argument type for argument #1 of `Report.keep`: expected `bool`, but found `List<Any?>|Map<int|string, Any?>`.",
             "Invalid argument type for argument #1 of `Report.keep`: expected `bool`, but found `int|string`.",
             "Invalid argument type for argument #1 of `Report.keep`: expected `bool`, but found `Iterable<int>`.",
             "Invalid argument type for argument #1 of `Report.keep`: expected `bool`, but found `numeric`.",
