@@ -802,6 +802,23 @@ function enumCases(string $type, string $case): array {}
 function attributes(string $type, string $kind, string $name, int $position, string $attribute): array {}
 
 /**
+ * An object of the class the class value `$data` names, the standard library's `AttributeData`, for each attribute
+ * `attributes()` reads with the same arguments, in the order they are declared: its class, and the call of its
+ * constructor, one value for each parameter in parameter order, a named argument at its parameter's place and a
+ * left-out parameter's default filled in. It builds no attribute. Each member's `attributeData<T>()` of the standard
+ * library gives them.
+ *
+ * @template T
+ *
+ * @param class-string<T> $data
+ *
+ * @return list<T>
+ *
+ * @throws \Error
+ */
+function attributeData(string $type, string $kind, string $name, int $position, string $attribute, string $data): array {}
+
+/**
  * The constants of the class the class value `$type` names, its own first and then those it inherits, in the order they
  * are declared, without an enum's cases. The standard library's `Class<T>.constants()` makes a `Constant` of each.
  *

@@ -33065,6 +33065,43 @@ fn create_instance_may_have_every_effect() {
     );
 }
 
+/// Spec sections 25 and 29: `attributeData<T>()` reads attributes as written and builds none, so the pure `Counting.count`
+/// accepts a method that reads them, and rebuilding one from its data goes through `createInstance`, which may have
+/// every effect, so the pure `Rebuilding.rebuild` refuses a method that does it and a method no `uses` limits does it.
+#[test]
+fn attribute_data_is_pure_and_rebuilding_from_it_may_have_every_effect() {
+    let attribute_data = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/AttributeData.sharp",
+        include_str!("../../../../composer/library/Sharp/AttributeData.sharp"),
+    );
+    let counting =
+        ("app/Shop/Counting.sharp", "namespace App.Shop;\n\npublic interface Counting\n{\n    int count();\n}\n");
+    let rebuilding = (
+        "app/Shop/Rebuilding.sharp",
+        "namespace App.Shop;\n\npublic interface Rebuilding\n{\n    Object rebuild(AttributeData data);\n}\n",
+    );
+    let reading = (
+        "app/Shop/Reading.sharp",
+        "namespace App.Shop;\n\npublic class Reading : Counting\n{\n    public int count() => typeof(Reading).methods()[0].attributeData<Object>().count();\n}\n",
+    );
+    let pure = (
+        "app/Shop/PureRebuild.sharp",
+        "namespace App.Shop;\n\npublic class PureRebuild : Rebuilding\n{\n    public Object rebuild(AttributeData data) => data.type.createInstance(data.arguments);\n}\n",
+    );
+    let free = (
+        "app/Shop/Rebuild.sharp",
+        "namespace App.Shop;\n\npublic class Rebuild\n{\n    public Object rebuild(AttributeData data) => data.type.createInstance(data.arguments);\n}\n",
+    );
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[reading, pure, free, counting, rebuilding, attribute_data, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/PureRebuild.sharp:5:50 incompatible-effects: `PureRebuild.rebuild` reaches `ClassMembers.createInstance`, which may have every effect, so the pure `Rebuilding.rebuild` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
 /// Spec sections 25 and 29: `Method.createDelegate<TFunction>()` gives a value of the function type `TFunction`, whose
 /// `uses` says the effects a call of it has, and whose result type types the call, and making it is pure. So a base
 /// class whose `relations` is held to `uses Database` builds each method it walks by an attribute as a
