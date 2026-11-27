@@ -37915,6 +37915,25 @@ fn payments() -> Vec<(&'static str, &'static str)> {
     RESULT_LIBRARY.iter().chain(&PAYMENTS).copied().collect()
 }
 
+/// Spec section 31, as Rust's `#[must_use]` on `Result`: a `Result` holds a failure the caller must handle, so a
+/// statement that discards one is refused, a call's and a case's alike. A `Result` the code keeps, and the `Ok` value
+/// `try` gives, are never refused.
+#[test]
+fn a_statement_that_discards_a_result_is_refused() {
+    let code = "namespace App;\n\nclass Checkout\n{\n    public Checkout(private Gateway gateway) { }\n\n    public Result<int, PaymentError> run()\n    {\n        this.gateway.charge();\n        const order = try this.gateway.charge();\n        const kept = this.gateway.charge();\n        Result<int, PaymentError>.Ok(order.total);\n        try this.gateway.charge();\n        return Result.Ok(order.total);\n    }\n}\n";
+
+    let refused = |line: u32, written: &str| {
+        format!(
+            "{line}:9 discarded-result `{written}` returns a Result: handle it with try, match, ok() or unwrap(). | A dropped Result loses its failure: pass it up with `try`, or keep the Result in a `const`."
+        )
+    };
+
+    assert_eq!(
+        refusals(("src/App/Checkout.sharp", code), &payments()),
+        [refused(9, "this.gateway.charge"), refused(12, "Result<int, PaymentError>.Ok")]
+    );
+}
+
 /// Spec section 31: `try` gives the `Ok` value, and on `Err` the method returns an `Err` holding the same error. It is a
 /// prefix operator, so a member read binds tighter, and it stands anywhere an expression can.
 #[test]
