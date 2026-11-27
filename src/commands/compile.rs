@@ -1634,6 +1634,7 @@ fn hosted(
     if let Some(started) = started {
         orchestrator.set_external_analyzer_handle(started);
     }
+    let taken_over = matches!(loaded, Loaded::Hosted { .. });
     let loaded = match loaded {
         Loaded::Hosted { server, requests } => {
             Loaded::Hosted { server: Box::new(server.scoped_to(is_lowered)), requests }
@@ -1656,6 +1657,15 @@ fn hosted(
             (server, issues)
         }
     };
+    // The analysis the hosts took over, under the key of the record the compile kept, for the next compile to restore
+    // when only source files changed since.
+    let compiled_folder = configuration.source.workspace.join(unit::COMPILED_FOLDER);
+    if taken_over
+        && let Some(record) = Record::read(&compiled_folder.join(INPUTS))
+        && let Some(bytes) = server.persist(&analysis_key(&without_hosts(configuration), record.marker))?
+    {
+        write_by_rename(&compiled_folder.join(ANALYSIS), &bytes)?;
+    }
 
     Ok((server.database().read_only(), issues))
 }
@@ -1769,8 +1779,7 @@ pub(crate) fn compile_with_hosts(
     analysis: bool,
 ) -> Result<(Started, Outcome, Loaded), Error> {
     let hosts = HostsCompile::new(configuration)?;
-    let mut without_hosts = configuration.clone();
-    without_hosts.extension_hosts.clear();
+    let without_hosts = without_hosts(configuration);
     let keeping = match (analysis, hosts.enabled) {
         (true, false) => Keeping::Analysis,
         (true, true) => Keeping::Hosted,
@@ -1780,6 +1789,14 @@ pub(crate) fn compile_with_hosts(
         compiled(&without_hosts, color_choice, hosts.enabled.then_some(&hosts), keeping)?;
 
     Ok((started, outcome, loaded))
+}
+
+/// `configuration` with no extension host, as the compile before the hosts take its analysis over runs with it.
+fn without_hosts(configuration: &Configuration) -> Configuration {
+    let mut without_hosts = configuration.clone();
+    without_hosts.extension_hosts.clear();
+
+    without_hosts
 }
 
 /// Compiles the project with `configuration`, which enables no extension host, into its `.sharp` folder, as [`compile`]
@@ -1875,11 +1892,11 @@ fn compiled(
         return Ok((std::mem::take(&mut record.outcome), database, Loaded::Nothing, start()));
     }
     // A record that holds in all but the source files names the analysis its compile left, which this compile restores
-    // and rechecks the changed files from, as watch mode does. A run that passes its analysis on, or compiles with the
-    // extension hosts, analyzes from scratch.
+    // and rechecks the changed files from, as watch mode does, the analysis the hosts took over included. A run that
+    // passes its analysis on otherwise analyzes from scratch.
     let analysis = last
         .as_ref()
-        .filter(|_| all_but_the_sources && keeping == Keeping::Nothing && hosts.is_none())
+        .filter(|_| all_but_the_sources && matches!(keeping, Keeping::Nothing | Keeping::Hosted))
         .and_then(|record| {
             Some((std::fs::read(compiled_folder.join(ANALYSIS)).ok()?, analysis_key(configuration, record.marker)))
         });

@@ -4959,6 +4959,43 @@ fn a_compile_after_a_body_edit_gives_what_a_full_compile_gives() {
     );
 }
 
+/// A compile with an extension host keeps the analysis the host took over, and after a body edit restores it and
+/// reports what a full compile with the host reports, in a project whose package holds a `.sharp` file with an error.
+#[test]
+fn a_compile_with_an_extension_host_after_a_body_edit_gives_what_a_full_compile_gives() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the compile with a host after an edit") {
+        return;
+    }
+    let hosted = |root: &Path| {
+        write(root, "app/Cart.sharp", CART);
+        write(root, MONEY_PATH, &MONEY.replace("return 100;", "return \"100\";"));
+        write(root, "tools/host.php", HOST_READING_THE_COMPILED_FILE);
+        write(
+            root,
+            "mago.toml",
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
+        );
+    };
+    let edit = |root: &Path| write(root, "app/Order.sharp", &ORDER.replace("extra + 1", "extra + 2"));
+    let seeded = project(ORDER, MONEY);
+    hosted(seeded.path());
+    let first = compile_lines(seeded.path());
+    assert!(issue_lines(&first).iter().any(|line| line.contains("Money")), "{}", printed(&first));
+    assert!(seeded.path().join(".sharp/analysis.bin").is_file(), "the compile with a host kept no analysis");
+    edit(seeded.path());
+
+    let after = compile_lines(seeded.path());
+
+    let fresh = project(ORDER, MONEY);
+    hosted(fresh.path());
+    edit(fresh.path());
+    let full = compile_lines(fresh.path());
+    assert_eq!(after.status.code(), full.status.code(), "{}", printed(&after));
+    assert_eq!(issue_lines(&after), issue_lines(&full), "{}", printed(&after));
+    assert_eq!(compiled_keys(seeded.path()), compiled_keys(fresh.path()));
+}
+
 /// After a signature edit that breaks a caller in another file, a compile restores the last analysis, checks the
 /// caller again, and refuses it as a full compile does.
 #[test]
