@@ -115,8 +115,9 @@ pub const DISPATCHES_EMITS: &str = "Sharp\\Internal\\DispatchesEmits";
 
 /// The mark of a generic method that parses a value into its type argument.
 ///
-/// The method runs the type's `parse`, as `Json.parse<T>` does, so each call's type argument gets the struct parse
-/// check.
+/// The method reads its text with its class's `read`, then runs the type's `parse`, as `Json.parse<T>` does, so each
+/// call's type argument gets the struct parse check, and the call has the effects of that `read` and of the readers the
+/// type argument holds.
 pub const PARSES_TYPE_ARGUMENT: &str = "Sharp\\Internal\\ParsesTypeArgument";
 
 /// The attribute the standard library marks a method with that a law's proof reads as the Lean function the

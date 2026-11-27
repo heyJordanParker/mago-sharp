@@ -254,11 +254,25 @@ final class Container
 final class ContainerError extends \Error {}
 
 /**
- * The handle of a listener `Events.on` starts: the engine stops the listener when the handle is destroyed.
+ * A value that holds a resource, such as an open archive, a transaction or a listener. Its one owner releases it with
+ * `dispose()`: a `using` local when its block ends, newest first, or the container when the value's scope ends. An
+ * implementation may have any effect, and a `using` local carries its value's.
  */
-final class Listening
+interface Disposable
+{
+    #[\Sharp\Internal\AcceptsAnyEffect]
+    public function dispose(): void;
+}
+
+/**
+ * The handle of a listener `Events.on` starts. It is `Disposable`: `dispose()` stops the listener, and the engine stops
+ * it too when the handle is destroyed.
+ */
+final class Listening implements Disposable
 {
     private function __construct() {}
+
+    public function dispose(): void {}
 }
 
 /**
@@ -542,8 +556,9 @@ final class RunsInitialValues {}
 final class DispatchesEmits {}
 
 /**
- * Marks a standard library generic method that parses a value into its type argument with the type's `parse`, as
- * `Json.parse<T>` does, so the checker gives each call's type argument the struct parse check.
+ * Marks a standard library generic method that reads its text with its class's `read`, then parses the value into
+ * its type argument with the type's `parse`, as `Json.parse<T>` does. The checker gives each call's type argument the
+ * struct parse check, and the call the effects of that `read` and of the readers the type argument holds.
  */
 #[\Attribute(\Attribute::TARGET_METHOD)]
 final class ParsesTypeArgument {}

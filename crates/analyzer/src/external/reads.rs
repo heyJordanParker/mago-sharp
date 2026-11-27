@@ -44,7 +44,7 @@ pub struct SessionReads {
 ///
 /// The worker sorts each read by the plugin that made it, in any callback: a plugin that registers a provider may answer
 /// it from what it read.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExtensionReads {
     /// What plugins with no provider read, which decides only the issues reported.
     pub issues: FileReads,
@@ -242,7 +242,7 @@ impl ClassLoads {
 }
 
 /// Each worker's class log, as far as responses reported it, by the id the worker drew at its start.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClassLogs(HashMap<u64, Vec<Word>>);
 
 impl ClassLogs {
@@ -283,7 +283,7 @@ impl ClassLogs {
 }
 
 /// What one file's extension hooks and providers read from the codebase.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileReads {
     /// The class-likes, functions, and constants they read, keyed as the reference graph keys
     /// top-level symbols. A class-like stands for its members too: the invalidation cascade marks a
@@ -294,7 +294,7 @@ pub struct FileReads {
 }
 
 /// A set of names a hook or provider read whole, which changes when a name joins or leaves it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Listing {
     /// The class-likes of one kind, by the class-like kind filter of the codebase query protocol.
     ClassLikes(u8),

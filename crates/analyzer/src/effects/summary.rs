@@ -22,6 +22,7 @@ use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_names::CREATES_ATTRIBUTES;
+use mago_names::PARSES_TYPE_ARGUMENT;
 use mago_names::RUNS_INITIAL_VALUES;
 use mago_names::binding::Binding;
 use mago_names::binding::Local;
@@ -1214,10 +1215,12 @@ where
         Some(argument)
     }
 
-    /// Records the call at `span` of the standard library's `Class<T>.parse` as calls of the readers it runs, spec
-    /// sections 10, 25 and 29, the `parse` of each class [`decoded_readers`] finds in the type of the class value
-    /// `receiver`, when it knows each one. True when it records them. False for any other call, and for a class value
-    /// whose reader it can't know, which the call of the member itself gives every effect through its `uses any`.
+    /// Records the call at `span` of the standard library's `Class<T>.parse`, or of a method it marks
+    /// `ParsesTypeArgument`, as `Json.parse<T>`, as calls of the readers it runs, spec sections 10, 23, 24, 25 and 29:
+    /// the `parse` of each class [`decoded_readers`] finds in the type of the class value `receiver`, or [`readers_of`]
+    /// finds in the call's type argument, when it knows each one. A marked method reads its text first with its class's
+    /// `read`, which the call also runs. True when it records them. False for any other call, and for a type whose
+    /// reader it can't know, which the call of the member itself gives every effect through its `uses any`.
     fn decode_read(
         &mut self,
         class: Word,
@@ -1226,15 +1229,41 @@ where
         span: Span,
     ) -> bool {
         let codebase = self.codebase();
-        if codebase.class_key(class) != codebase.class_key(word(CLASS_MEMBERS)) || method.as_bytes() != b"parse" {
-            return false;
-        }
-        let Some(readers) = receiver
-            .and_then(|receiver| self.artifacts.get_expression_type(receiver))
-            .and_then(|class_value| decoded_readers(codebase, class_value))
-        else {
+        let (readers, text_read) =
+            if codebase.class_key(class) == codebase.class_key(word(CLASS_MEMBERS)) && method.as_bytes() == b"parse" {
+                let readers = receiver
+                    .and_then(|receiver| self.artifacts.get_expression_type(receiver))
+                    .and_then(|class_value| decoded_readers(codebase, class_value));
+                (readers, None)
+            } else if codebase
+                .get_method(class, method)
+                .is_some_and(|metadata| metadata.has_attribute(codebase, word(PARSES_TYPE_ARGUMENT)))
+            {
+                let readers = self
+                    .artifacts
+                    .inferred_type_arguments
+                    .get(&(span.start.offset, span.end.offset))
+                    .and_then(|arguments| arguments.first())
+                    .and_then(|parsed| {
+                        let mut readers = Vec::new();
+                        readers_of(codebase, parsed, &mut readers).map(|()| readers)
+                    });
+                (readers, codebase.get_class_like(class).map(|metadata| metadata.method_key(word("read"))))
+            } else {
+                return false;
+            };
+        let Some(readers) = readers else {
             return false;
         };
+        if let Some(read) = text_read {
+            self.summary.calls.push(Call {
+                callee: Body::Method(class, read),
+                span,
+                receiver: Roots::new(),
+                arguments: Vec::new(),
+                type_arguments: Vec::new(),
+            });
+        }
         for reader in readers {
             self.summary.calls.push(Call {
                 callee: Body::Method(reader.name, reader.method_key(word("parse"))),
