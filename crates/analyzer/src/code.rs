@@ -6,8 +6,7 @@
 /// kind of issue that the analyzer can detect during code analysis.
 ///
 /// This enum is non-exhaustive; new issue codes may be added in future versions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 #[repr(u16)]
 #[non_exhaustive]
 pub enum IssueCode {
@@ -382,6 +381,7 @@ pub enum IssueCode {
     UnusedStatement,
     UnusedTemplateParameter,
     UselessControlFlow,
+    UsingNotDisposable,
     WhereConstraintViolation,
     WriteOnlyLocal,
     WriteOnlyProperty,
@@ -767,6 +767,7 @@ impl IssueCode {
             Self::UnusedStatement => "unused-statement",
             Self::UnusedTemplateParameter => "unused-template-parameter",
             Self::UselessControlFlow => "useless-control-flow",
+            Self::UsingNotDisposable => "using-not-disposable",
             Self::WhereConstraintViolation => "where-constraint-violation",
             Self::WriteOnlyLocal => "write-only-local",
             Self::WriteOnlyProperty => "write-only-property",
@@ -1157,6 +1158,7 @@ impl IssueCode {
             Self::UnusedStatement,
             Self::UnusedTemplateParameter,
             Self::UselessControlFlow,
+            Self::UsingNotDisposable,
             Self::WhereConstraintViolation,
             Self::WriteOnlyLocal,
             Self::WriteOnlyProperty,
@@ -1545,6 +1547,7 @@ impl std::str::FromStr for IssueCode {
             "unused-statement" => Ok(Self::UnusedStatement),
             "unused-template-parameter" => Ok(Self::UnusedTemplateParameter),
             "useless-control-flow" => Ok(Self::UselessControlFlow),
+            "using-not-disposable" => Ok(Self::UsingNotDisposable),
             "where-constraint-violation" => Ok(Self::WhereConstraintViolation),
             "write-only-local" => Ok(Self::WriteOnlyLocal),
             "write-only-property" => Ok(Self::WriteOnlyProperty),

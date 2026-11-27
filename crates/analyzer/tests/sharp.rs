@@ -1266,6 +1266,69 @@ fn a_marked_base_class_reaches_public_and_protected_methods_of_its_subclasses() 
     );
 }
 
+/// A plain PHP console command's base class, and the `extern` line that marks it, as an application declares them.
+const MARKED_COMMAND: [(&str, &str); 2] = [
+    ("src/Lib/Command.php", "<?php\n\nnamespace Lib;\n\nabstract class Command\n{\n}\n"),
+    (
+        "src/App/Stubs/Stubs.sharp",
+        "namespace App.Stubs;\n\nimport Lib.Command;\n\n[DynamicallyAccessed]\nextern Command uses none;\n",
+    ),
+];
+
+/// Spec section 5: the framework of a marked base class reaches each class that extends it with its public and
+/// protected methods, so an `internal` helper of the class is the class's own, which no framework reaches, and it
+/// compiles. Its public methods stay reached, so neither the one the framework calls nor one no code calls is too wide.
+#[test]
+fn an_internal_helper_of_a_marked_base_class_subclass_compiles() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let report = "namespace App.Console;\n\nimport Lib.Command;\n\npublic class SendReport : Command\n{\n    public void handle() { this.helper(); }\n\n    internal string helper() => \"report\";\n\n    public void neverCalled() { }\n}\n";
+    let mut files = MARKED_COMMAND.to_vec();
+    files.extend([marker, ("src/App/Console/SendReport.sharp", report)]);
+
+    assert_eq!(too_wide(&files), Vec::<String>::new());
+}
+
+/// Spec section 5: the framework of a marked attribute reaches a class that carries it with every public member the
+/// class has, so an `internal` method, property and constant of the class are the class's own, which no framework
+/// reaches, and they compile.
+#[test]
+fn an_internal_member_of_a_class_carrying_a_marked_attribute_compiles() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let wired =
+        "namespace App.Wiring;\n\nimport Attribute;\n\n[Attribute]\n[DynamicallyAccessed]\npublic class Wired\n{\n}\n";
+    let tokens = "namespace App.Auth;\n\nimport App.Wiring.Wired;\n\n[Wired]\npublic class Tokens\n{\n    internal const int LIMIT = 3;\n\n    internal string realm { get; } = \"api\";\n\n    public string issue() => this.find(`${this.realm}:${Tokens.LIMIT}`);\n\n    internal string find(string bearer) => bearer;\n}\n";
+
+    assert_eq!(
+        too_wide(&[marker, ("src/App/Wiring/Wired.sharp", wired), ("src/App/Auth/Tokens.sharp", tokens)]),
+        Vec::<String>::new()
+    );
+}
+
+/// Spec section 5: the framework of a marked base class calls the protected methods of each class that extends it, so a
+/// protected method no code calls is neither too wide nor unused, in a final class too.
+#[test]
+fn a_protected_method_of_a_marked_base_class_subclass_is_reached() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let report = "namespace App.Console;\n\nimport Lib.Command;\n\npublic final class SendReport : Command\n{\n    protected string fallback() => \"report\";\n}\n";
+    let mut files = MARKED_COMMAND.to_vec();
+    files.extend([marker, ("src/App/Console/SendReport.sharp", report)]);
+
+    assert_eq!(too_wide(&files), Vec::<String>::new());
+    assert_eq!(
+        issues(("src/App/Console/SendReport.sharp", report), &[MARKED_COMMAND[0], MARKED_COMMAND[1], marker]),
+        Vec::<String>::new()
+    );
+}
+
 /// Spec section 5: each reach the checker can't see is a use from outside any namespace, so `internal`, written or by
 /// default, on a class or a member one reaches is too narrow, an error at its declaration, where the engine would
 /// throw when it runs. Each reach names who reaches: the test runner, the framework of a marked attribute or of a
@@ -1313,7 +1376,6 @@ fn an_internal_class_or_member_a_framework_reaches_is_too_narrow() {
             "tests/Shop/OrderTest.sharp 5:13 `OrderTest` is internal, and its test runner reaches it from outside `App.Shop`, so it throws when it runs. | Declare it public.",
             "tests/Shop/CartTest.sharp 9:19 `CartTest.testTotals` is internal, and its test runner reaches it from outside `App.Shop`, so it throws when it runs. | Declare it public.",
             "src/App/Payments/Hooks.sharp 8:19 `Hooks.paid` is internal, and the framework that reads `AsEventListener` reaches it from outside `App.Payments`, so it throws when it runs. | Declare it public.",
-            "src/App/Store/CartOffer.sharp 8:21 `CartOffer.offer` is internal, and the framework that `Model` declares reaches it from outside `App.Store`, so it throws when it runs. | Declare it public.",
             "src/App/Store/CartOffer.sharp 10:23 `CartOffer.label` is private, and the framework that `Model` declares reaches it from outside `CartOffer`, so it throws when it runs. | Declare it protected.",
             "src/App/Hooks/Overrides.sharp 8:28 `Overrides.title` is internal, and plain PHP's call of its `[Export]` function reaches it from outside `App.Hooks`, so it throws when it runs. | Declare it public.",
             "src/App/Console/Import.sharp 3:7 `Import` is internal, and the engine that runs the program reaches it from outside `App.Console`, so it throws when it runs. | Declare it public."
@@ -3960,6 +4022,16 @@ fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
             "Default value for property `Demo\\Order::$timestamps` is not assignable to its declared type.",
         ]
     );
+}
+
+/// `Map.from` of a plain PHP `array` gives the `Map` of its keys and values, `Map<int|string, Any?>`, with or without
+/// type arguments, so it returns, assigns and spreads where that type is declared, as the array itself does, spec
+/// section 12.
+#[test]
+fn map_from_a_plain_php_array_returns_as_the_map_it_gives() {
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Row : Model\n{\n    internal Map<int|string, Any?> held() => Map.from(this.appends);\n\n    internal Map<int|string, Any?> kept() => this.appends;\n\n    internal Map<int|string, Any?> copied()\n    {\n        Map<int|string, Any?> copy = Map.from(this.appends);\n        Map<int|string, Any?> typed = Map<int|string, Any?>.from(this.appends);\n\n        return [...copy, ...typed];\n    }\n\n    internal Map<int|string, Any?> spread() => [...Map.from(this.appends), \"b\": 2];\n}\n";
+
+    assert_eq!(worded(("src/Demo/Row.sharp", sharp), &[("src/Lib/Model.php", MODEL)]), Vec::<String>::new());
 }
 
 /// An override keeps its written type instead of inheriting the parent's `@var` type, so a type that does not fit is
@@ -32095,6 +32167,58 @@ fn a_use_of_a_class_s_statics_has_the_effects_of_their_initial_values() {
     );
 }
 
+const DISPOSABLE_LIBRARY: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Disposable.sharp",
+    include_str!("../../../../composer/library/Sharp/Disposable.sharp"),
+);
+
+/// Spec section 2: a `using` local's block calls `dispose()` on the value it holds when it ends, so the value is a
+/// `Disposable`, as `Archive` is. Any other value is refused.
+#[test]
+fn a_using_local_holds_a_disposable() {
+    let archive = (
+        "app/Shop/Archive.sharp",
+        "namespace App.Shop;\n\npublic class Archive : Disposable\n{\n    public void dispose() { }\n}\n",
+    );
+    let export = (
+        "app/Shop/Export.sharp",
+        "namespace App.Shop;\n\npublic class Export\n{\n    public int count()\n    {\n        using archive = new Archive();\n        using total = 3;\n        return total;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        messages(export, &[archive, DISPOSABLE_LIBRARY]),
+        ["A `using` local holds a `Disposable`, and the type of `3` is `int`."]
+    );
+}
+
+/// Spec sections 2 and 29: a `Disposable`'s `dispose()` may have any effect, as `Transaction`'s reads the database,
+/// and a `using` local carries the effects of its value's `dispose()`, as a written call of it would. So
+/// `Report.count`, which disposes a `Transaction`, has the effect `Database`, which the pure `Counter.count` refuses.
+#[test]
+fn a_using_local_carries_the_effects_of_its_value_s_dispose() {
+    let database = (
+        "src/App/Shop/Database.sharp",
+        "namespace App.Shop;\n\npublic effect abstract class Database\n{\n    public abstract int rows();\n}\n",
+    );
+    let transaction = (
+        "src/App/Shop/Transaction.sharp",
+        "namespace App.Shop;\n\npublic class Transaction : Disposable\n{\n    public Transaction(private Database database) { }\n\n    public void dispose()\n    {\n        this.database.rows();\n    }\n}\n",
+    );
+    let counter =
+        ("src/App/Shop/Counter.sharp", "namespace App.Shop;\n\npublic interface Counter\n{\n    int count();\n}\n");
+    let report = (
+        "src/App/Shop/Report.sharp",
+        "namespace App.Shop;\n\npublic class Report : Counter\n{\n    public Report(private Database database) { }\n\n    public int count()\n    {\n        using transaction = new Transaction(this.database);\n        return 1;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[report, transaction, database, counter, DISPOSABLE_LIBRARY]),
+        [
+            "src/App/Shop/Report.sharp:9:9 incompatible-effects: `Report.count` reaches `Transaction.dispose`, which calls `App.Shop.Database.rows` with the effect `App.Shop.Database`, so the pure `Counter.count` cannot accept it."
+        ]
+    );
+}
+
 const BEHAVIOR_LIBRARY: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
     include_str!("../../../../composer/library/Sharp/Behavior.sharp"),
@@ -33061,6 +33185,133 @@ fn create_instance_may_have_every_effect() {
         effect_issues(&[making, building, MAKER, disk, stub, saved, note, a, b, c, d, e, f, g]),
         [
             "app/Shop/Making.sharp:5:28 incompatible-effects: `Making.make` reaches `ClassMembers.createInstance`, which may have every effect, so the pure `Maker.make` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
+/// The pure `Reading.read` and the `Storing.read` that may write to the database, which each reader below implements.
+const READING: [(&str, &str); 2] = [
+    ("app/Shop/Reading.sharp", "namespace App.Shop;\n\npublic interface Reading\n{\n    Any? read(Any? row);\n}\n"),
+    (
+        "app/Shop/Storing.sharp",
+        "namespace App.Shop;\n\npublic interface Storing\n{\n    Any? read(Any? row) uses Database;\n}\n",
+    ),
+];
+
+/// A reader of `app/Shop/{name}.sharp` that implements `interface` with `decode`, a `typeof(…).decode(row)` call.
+fn decoding(name: &str, interface: &str, decode: &str) -> (&'static str, &'static str) {
+    (
+        leak(format!("app/Shop/{name}.sharp")),
+        leak(format!(
+            "namespace App.Shop;\n\npublic class {name} : {interface}\n{{\n    public Any? read(Any? row) => {decode};\n}}\n"
+        )),
+    )
+}
+
+/// Spec sections 10, 25 and 29: `decode` runs the reader of the class its class value holds, its `parse`, which runs
+/// its constructor, so a pure method that decodes a `Saved`, whose `required` constructor writes to the database, is
+/// refused as `new Saved()` is, and one whose `uses` lists `Database` compiles.
+#[test]
+fn decode_has_the_effects_of_the_reader_it_runs() {
+    let pure = decoding("SavedReader", "Reading", "typeof(Saved).decode(row)");
+    let storing = decoding("StoredReader", "Storing", "typeof(Saved).decode(row)");
+    let [disk, stub, saved, note] = BUILT;
+    let [reading, storing_interface] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[pure, storing, reading, storing_interface, disk, stub, saved, note, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/SavedReader.sharp:5:35 incompatible-effects: `SavedReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
+/// A `final` class whose constructor has no effect, so no subclass's reader can run in its place.
+const MEMO: (&str, &str) = (
+    "app/Shop/Memo.sharp",
+    "namespace App.Shop;\n\npublic final class Memo\n{\n    public Memo(public string text { get; }) { }\n}\n",
+);
+
+/// Spec section 29: no class extends a `final` class, so `decode` of it runs its own reader alone, and one with no
+/// effect keeps a pure method pure.
+#[test]
+fn decode_of_a_final_class_with_no_effects_is_pure() {
+    let memo_reader = decoding("MemoReader", "Reading", "typeof(Memo).decode(row)");
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(effect_issues(&[memo_reader, MEMO, reading, a, b, c, d, e, f, g]), Vec::<String>::new());
+}
+
+/// Spec section 29: an open class whose constructor is not `required` may be any subclass whose constructor differs, so
+/// `decode` of it may have every effect, as `createInstance` may. Once the class is `final` its reader is known.
+#[test]
+fn decode_of_an_open_class_may_have_every_effect() {
+    let ledger_reader = decoding("LedgerReader", "Reading", "typeof(Ledger).decode(row)");
+    let open = (
+        "app/Shop/Ledger.sharp",
+        "namespace App.Shop;\n\npublic class Ledger\n{\n    public Ledger(public int total { get; }) { }\n}\n",
+    );
+    let closed = (
+        "app/Shop/Ledger.sharp",
+        "namespace App.Shop;\n\npublic final class Ledger\n{\n    public Ledger(public int total { get; }) { }\n}\n",
+    );
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[ledger_reader, open, reading, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/LedgerReader.sharp:5:35 incompatible-effects: `LedgerReader.read` reaches `ClassMembers.decode`, which may have every effect, so the pure `Reading.read` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects."
+        ]
+    );
+    assert_eq!(effect_issues(&[ledger_reader, closed, reading, a, b, c, d, e, f, g]), Vec::<String>::new());
+}
+
+/// Spec section 10: a family's `parse` reads one of its declared variants, so `decode` of the family has the effects of
+/// each variant's reader, and a variant whose constructor writes to the database makes a pure method's `decode` of the
+/// family refused.
+#[test]
+fn decode_of_a_family_has_its_variants_readers_effects() {
+    let entry =
+        ("app/Shop/Entry.sharp", "namespace App.Shop;\n\n[Tag(\"type\")]\npublic sealed interface Entry\n{\n}\n");
+    let stored = (
+        "app/Shop/StoredEntry.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\n[Key(\"stored\")]\npublic final class StoredEntry : Entry\n{\n    public StoredEntry() { Disk.save(); }\n}\n",
+    );
+    let noted = (
+        "app/Shop/NotedEntry.sharp",
+        "namespace App.Shop;\n\n[Key(\"noted\")]\npublic final class NotedEntry : Entry\n{\n    public NotedEntry(public string text { get; }) { }\n}\n",
+    );
+    let entry_reader = decoding("EntryReader", "Reading", "typeof(Entry).decode(row)");
+    let [disk, stub, _, _] = BUILT;
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[entry_reader, entry, stored, noted, reading, disk, stub, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/EntryReader.sharp:5:35 incompatible-effects: `EntryReader.read` reaches `StoredEntry.StoredEntry`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
+/// Spec sections 10 and 29: a type that is no class runs only the readers of the classes inside it, so `decode` of a
+/// `List<Memo>` or of an `int` keeps a pure method pure, and `decode` of a `List<Saved>` has `Saved`'s reader's effects.
+#[test]
+fn decode_of_a_list_takes_its_elements_readers_effects() {
+    let memos = decoding("MemosReader", "Reading", "typeof(List<Memo>).decode(row)");
+    let count = decoding("CountReader", "Reading", "typeof(int).decode(row)");
+    let saved_list = decoding("SavedListReader", "Reading", "typeof(List<Saved>).decode(row)");
+    let [disk, stub, saved, note] = BUILT;
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[memos, count, saved_list, MEMO, reading, disk, stub, saved, note, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/SavedListReader.sharp:5:35 incompatible-effects: `SavedListReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
         ]
     );
 }

@@ -10,10 +10,11 @@ use crate::cst::sequence::TokenSeparatedSequence;
 
 /// Represents a PHP# local declaration, which `let` makes reassignable and `const` does not.
 ///
-/// A local declared with its type written has no `let`, and is reassignable unless it is `const`.
+/// `using` declares a local that is not reassignable and whose `Disposable` value its block disposes when it ends. A
+/// local declared with its type written has no `let`, and is reassignable unless it is `const`.
 ///
-/// Example: `let total = 0;`, `const currency = this.currency;`, `Money? total = null;`, `const Plan plan = …;` or
-/// `const [total, count] = summary;`
+/// Example: `let total = 0;`, `const currency = this.currency;`, `Money? total = null;`, `const Plan plan = …;`,
+/// `const [total, count] = summary;` or `using archive = ZipArchive.open(path);`
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct LocalDeclaration<'arena> {
@@ -52,6 +53,13 @@ impl LocalDeclaration<'_> {
     #[must_use]
     pub fn is_const(&self) -> bool {
         self.keyword.as_ref().is_some_and(|keyword| keyword.value.eq_ignore_ascii_case(b"const"))
+    }
+
+    /// Returns `true` when the local is declared with `using`, spec section 2.
+    #[inline]
+    #[must_use]
+    pub fn is_using(&self) -> bool {
+        self.keyword.as_ref().is_some_and(|keyword| keyword.value == b"using")
     }
 }
 

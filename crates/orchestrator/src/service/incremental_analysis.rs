@@ -90,6 +90,7 @@ use mago_syntax::settings::ParserSettings;
 use mago_word::Word;
 use mago_word::WordSet;
 
+use self::codex::LibraryCodex;
 use crate::Autoloader;
 use crate::error::OrchestratorError;
 use crate::progress::ProgressBarTheme;
@@ -102,6 +103,7 @@ use crate::service::telemetry::HangWatcher;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::service::telemetry::SlowestFiles;
 
+pub mod codex;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod compile;
 
@@ -123,7 +125,6 @@ struct FileState {
     reads: AnalysisReads,
     /// What each PHP# body of the file does by itself. Every run solves the summaries of all files again, so an
     /// unchanged file's getter sees a changed callee without being analyzed again.
-    #[serde(with = "mago_analyzer::effects::file_summaries")]
     effect_summaries: Vec<EffectSummary>,
     /// The issues in the file of the last run's project passes, which read every file: the effect rules' solve and the
     /// too-wide warning.
@@ -267,6 +268,12 @@ pub struct IncrementalAnalysisService {
     declared_returns: HashMap<(Word, Word), Option<TypeMetadata>>,
     /// Each extension worker's class log, as the analyses' responses reported it, which each file's reads index.
     class_logs: ClassLogs,
+    /// The standard library's codex, which a project's analysis takes the library from, with no file of the library to
+    /// scan, analyze or lower.
+    library: Option<Arc<LibraryCodex>>,
+    /// The scan of the standard library's own files the last analysis from scratch made, of the library's package, which
+    /// [`Self::library_codex`] writes its codex from.
+    library_scan: CodebaseMetadata,
     /// The files the last analysis analyzed, which the fanout tests compare with the inputs.
     #[cfg(test)]
     pub(crate) analyzed_files: HashSet<FileId>,
@@ -312,6 +319,8 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("autoloaded", &self.autoloaded.len())
             .field("declared_returns", &self.declared_returns.len())
             .field("class_logs", &self.class_logs)
+            .field("library", &self.library.is_some())
+            .field("library_scan", &"<CodebaseMetadata>")
             .finish()
     }
 }
@@ -380,6 +389,8 @@ impl IncrementalAnalysisService {
             autoloaded: Vec::new(),
             declared_returns: HashMap::default(),
             class_logs: ClassLogs::default(),
+            library: None,
+            library_scan: CodebaseMetadata::new(),
             #[cfg(test)]
             analyzed_files: HashSet::default(),
             #[cfg(test)]
@@ -437,6 +448,14 @@ impl IncrementalAnalysisService {
     #[must_use]
     pub fn with_package_files(mut self, package_files: impl IntoIterator<Item = FileId>) -> Self {
         self.package_files = package_files.into_iter().collect();
+        self
+    }
+
+    /// Takes the standard library from `library`, its codex, in place of its files, which the database then holds only
+    /// as built-in files that no analysis scans. With none, a project's analysis has no library but the files it holds.
+    #[must_use]
+    pub fn with_library(mut self, library: Option<Arc<LibraryCodex>>) -> Self {
+        self.library = library;
         self
     }
 
@@ -1027,6 +1046,14 @@ impl IncrementalAnalysisService {
         // The prelude decodes while the files scan, so no copy of it outlives an analysis.
         let ((mut merged_codebase, mut symbol_references), scans) =
             rayon::join(self.prelude, || scan_files(source_files));
+        if let Some(library) = &self.library {
+            merged_codebase.extend(library.metadata.clone());
+            for file in
+                self.database.files().filter(|file| file.is_standard_library && file.file_type == FileType::Builtin)
+            {
+                merged_codebase.name_file(file.id, &file.name);
+            }
+        }
         let (mut per_file_results, reached): (Vec<FileScan>, Vec<WordSet>) = scans?.into_iter().unzip();
         if let Some(autoloader) = &autoloader {
             // A vendor file another analysis of the run served is the one this one serves, as the file it scanned.
@@ -1054,20 +1081,20 @@ impl IncrementalAnalysisService {
                 Scans { settings: Some(settings), files: kept.into_inner().unwrap_or_else(PoisonError::into_inner) };
         }
 
+        // The standard library's codex counts as one more scanned file. Its own names resolved when it was released,
+        // against its own files, so nothing here scans it again.
+        let library = self.library.as_deref().map(|library| &library.metadata);
+        let scanned = || per_file_results.iter().map(|(_, _, metadata, _, _)| metadata).chain(library);
         // A class-like's name never depends on how names resolve, so the first scan finds every class-like that wins
         // over a default class-like, and the files that name one are scanned again against them.
-        self.namespace_classes = NamespaceClasses::new(per_file_results.iter().flat_map(|(_, _, metadata, _, _)| {
+        self.namespace_classes = NamespaceClasses::new(scanned().flat_map(|metadata| {
             metadata.class_likes.values().map(|class_like| (class_like.original_name, class_like.flags.is_sharp()))
         }));
         // An extension changes only as a whole analysis runs again, so the members that change their receiver stay.
-        self.changing_members = ChangingMembers::new(
-            per_file_results.iter().flat_map(|(_, _, metadata, _, _)| receiver_changing_members(metadata)),
-        );
+        self.changing_members = ChangingMembers::new(scanned().flat_map(receiver_changing_members));
         // A namespace a `.sharp` file gives a library's classes, spec section 23, changes what a class name means in
         // every PHP# file, so each is scanned again against them.
-        self.extern_namespaces = ExternNamespaces::new(extern_namespace_classes(
-            &per_file_results.iter().map(|(_, _, metadata, _, _)| metadata).collect::<Vec<_>>(),
-        ));
+        self.extern_namespaces = ExternNamespaces::new(extern_namespace_classes(&scanned().collect::<Vec<_>>()));
         let namespace_classes = &self.namespace_classes;
         let extern_namespaces = &self.extern_namespaces;
         per_file_results
@@ -1118,6 +1145,10 @@ impl IncrementalAnalysisService {
         scan.end();
 
         let populate = Phase::start("populate");
+        self.library_scan = CodebaseMetadata::new();
+        for (_, _, metadata, _, _) in per_file_results.iter().filter(|(file, ..)| file.is_standard_library) {
+            self.library_scan.extend(metadata.clone());
+        }
         let staged: Vec<(FileId, u64, CodebaseEntryKeys, Vec<mago_word::Word>)> = per_file_results
             .into_iter()
             .map(|(file, content_hash, metadata, _, named)| {
@@ -2968,8 +2999,9 @@ impl IncrementalAnalysisService {
                 .filter_map(|file_id| Some((*file_id, self.file_states.get(file_id)?.effect_summaries.as_slice()))),
         );
         effect_summaries.sort_unstable_by_key(|(file_id, _)| *file_id);
+        let library = self.library.iter().flat_map(|library| library.effect_summaries.iter());
         let effect_summaries: Vec<EffectSummary> =
-            effect_summaries.into_iter().flat_map(|(_, summaries)| summaries.iter().cloned()).collect();
+            library.chain(effect_summaries.into_iter().flat_map(|(_, summaries)| summaries.iter())).cloned().collect();
         let native_symbol_references = aggregated_result.symbol_references.clone();
         aggregated_result.symbol_references.extend(external_symbol_references.clone());
         aggregated_result.symbol_references.extend(late_symbol_references.clone());

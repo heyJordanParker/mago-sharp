@@ -51,17 +51,7 @@ fn compile_proves_a_law_from_its_sharp_file_alone_and_writes_the_compiled_file()
 
 #[test]
 fn compile_proves_a_law_in_a_project_that_installs_the_standard_library() {
-    let directory = lawful_project(&[
-        ("app/Shared/Money.sharp", LAWFUL_MONEY),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/composer.json",
-            "{\n    \"name\": \"heyjordanparker/php-sharp-composer\",\n    \"autoload\": {\n        \"psr-4\": {\n            \"Sharp\\\\\": \"library/Sharp/\"\n        }\n    }\n}\n",
-        ),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math.sharp",
-            "namespace Sharp;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
-        ),
-    ]);
+    let directory = library_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
     let root = directory.path();
 
     let output = compile_lines(root);
@@ -348,6 +338,30 @@ fn a_law_the_fixed_steps_leave_unproven_goes_on_to_lean_s_search() {
     );
     assert!(compiled(root, "app/Shared/Money.sharp").exists());
     assert!(!compiled(root, "app/Shared/Purse.sharp").exists());
+}
+
+/// A law over an enum value closes with the fixed steps on each case of the enum, as a `match` on the value reads one
+/// case in each, so it ends in the one runner, before Lean's search.
+#[cfg(unix)]
+#[test]
+fn a_law_over_an_enum_value_proves_with_the_fixed_steps_on_each_case() {
+    let directory = lawful_project(&[(
+        "app/Auth/Level.sharp",
+        "namespace App.Auth;\n\npublic enum Level\n{\n    case Low;\n    case Mid;\n    case High;\n\n    public int rank() => match (this) {\n        Level.Low => 1,\n        Level.Mid => 2,\n        Level.High => 3,\n    };\n\n    law rankIsPositive(Level a) => a.rank() > 0;\n}\n",
+    )]);
+    let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
+
+    let output = process::output(command(root, "never").env("XDG_CACHE_HOME", counting_cache(lake.path()))).unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let (_, _, steps, _) = runner_request(lake.path())
+        .theorems
+        .into_iter()
+        .find(|(statement, ..)| statement == "«App».«Auth».«Level».«rankIsPositive»")
+        .expect("the law's theorem");
+    assert!(steps.contains("cases «a» <;> "), "{steps}");
+    assert!(compiled(root, "app/Auth/Level.sharp").exists());
 }
 
 #[test]

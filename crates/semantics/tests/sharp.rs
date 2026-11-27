@@ -1110,6 +1110,18 @@ fn a_for_counter_is_out_of_scope_after_its_loop_and_const_when_declared_so() {
     );
 }
 
+/// Spec section 2: a `using` local's block disposes the value it holds when it ends, so the local takes no other.
+#[test]
+fn a_using_local_is_never_reassigned() {
+    let code =
+        leak(method("        using archive = this.open();\n        archive = this.open();\n        return extra;\n"));
+
+    assert_eq!(
+        issues(code),
+        ["8:9 Cannot assign to `archive`: it is declared with `using`, and its block disposes the value it holds."]
+    );
+}
+
 #[test]
 fn for_of_over_values_or_keys_and_values_is_in_the_slice() {
     let code = leak(method(

@@ -280,6 +280,7 @@ final class AnalyzerCodeModuleGenerator
         'write-only-local',
         'parameter-change',
         'const-local-change',
+        'using-not-disposable',
         'extend-final-class',
         'non-existent-class-constant',
         'possibly-false-argument',
@@ -446,8 +447,7 @@ final class AnalyzerCodeModuleGenerator
         $enum .= "/// kind of issue that the analyzer can detect during code analysis.\n";
         $enum .= "///\n";
         $enum .= "/// This enum is non-exhaustive; new issue codes may be added in future versions.\n";
-        $enum .= "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\n";
-        $enum .= "#[cfg_attr(feature = \"serde\", derive(serde::Serialize, serde::Deserialize))]\n";
+        $enum .= "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]\n";
         $enum .= "#[repr(u16)]\n";
         $enum .= "#[non_exhaustive]\n";
         $enum .= "pub enum IssueCode {\n";

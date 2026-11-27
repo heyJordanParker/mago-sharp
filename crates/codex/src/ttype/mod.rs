@@ -1651,6 +1651,32 @@ pub fn get_collection_object(array: &TArray, codebase: &CodebaseMetadata) -> Opt
     Some(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(word(class), Some(parameters)))))
 }
 
+/// The PHP# `Map<K, V>` or `Set<T>` a `Sharp\Map<K, V>` or `Sharp\Set<T>` object runs as.
+///
+/// It is the reverse of [`get_collection_object`], so a type plain PHP declares names a `Map` or a `Set` as PHP# code
+/// types one. Any other object, and a `Sharp\Map` or `Sharp\Set` without its type parameters, stays as it is.
+#[must_use]
+pub fn get_object_collection(object: TObject) -> TAtomic {
+    if let TObject::Named(named) = &object
+        && let Some(parameters) = named.type_parameters.as_deref()
+    {
+        match parameters {
+            [key_type, value_type] if named.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Map") => {
+                return TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                    Arc::new(key_type.clone()),
+                    Arc::new(value_type.clone()),
+                )));
+            }
+            [element_type] if named.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Set") => {
+                return TAtomic::Array(TArray::Set(Arc::new(element_type.clone())));
+            }
+            _ => {}
+        }
+    }
+
+    TAtomic::Object(object)
+}
+
 /// The type PHP declares for the PHP# type `r#type`, once generics are erased.
 ///
 /// It is the type the bridge writes in a PHP declaration, and so the type the engine links a plain PHP class's method

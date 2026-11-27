@@ -17,6 +17,8 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::union::TUnion;
 use mago_names::CREATES_ATTRIBUTES;
@@ -305,6 +307,96 @@ fn parsed_classes<'codebase>(
             _ => {}
         }
     }
+}
+
+/// The standard library's `ClassMembers`, which holds `Class<T>.decode`, spec section 25.
+const CLASS_MEMBERS: &[u8] = b"Sharp\\ClassMembers";
+
+/// The classes whose readers `decode` of a class value of `class_value`'s type runs, spec sections 10 and 29, as
+/// [`readers_of`] finds them in the type it holds, or `None` when one of them may be any class's reader.
+fn decoded_readers<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    class_value: &TUnion,
+) -> Option<Vec<&'codebase ClassLikeMetadata>> {
+    let mut readers = Vec::new();
+    for atomic in class_value.types.iter().filter(|atomic| !atomic.is_null()) {
+        match atomic {
+            TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Literal { value })) => {
+                reader_of(codebase, *value, &mut readers)?;
+            }
+            TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
+                readers_of(codebase, constraint, &mut readers)?;
+            }
+            _ => return None,
+        }
+    }
+
+    Some(readers)
+}
+
+/// Pushes onto `readers` the class of each reader `decode` of `r#type` runs, once each, spec section 29: a type that is
+/// no class runs only the readers of the classes inside it, so a scalar, an enum and `null` add none, and a `List`, a
+/// `Map`, a tuple, a `Set`, a union and a generic class's type arguments add their classes'. `None` for a type whose
+/// reader may be any, as [`reader_of`] says.
+fn readers_of<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    r#type: &TUnion,
+    readers: &mut Vec<&'codebase ClassLikeMetadata>,
+) -> Option<()> {
+    for atomic in r#type.types.iter() {
+        match atomic {
+            TAtomic::Null | TAtomic::Scalar(_) | TAtomic::Object(TObject::Enum(_)) => {}
+            TAtomic::Array(array) => {
+                let (keys, values) = get_array_parameters(array, codebase);
+                readers_of(codebase, &keys, readers)?;
+                readers_of(codebase, &values, readers)?;
+            }
+            TAtomic::Object(TObject::Named(object)) => {
+                if codebase.class_key(object.name) != codebase.class_key(word(SET_CLASS)) {
+                    reader_of(codebase, object.name, readers)?;
+                }
+                for argument in object.get_type_parameters().unwrap_or_default() {
+                    readers_of(codebase, argument, readers)?;
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    Some(())
+}
+
+/// The prelude's `Set`, a type that is no class, spec section 12, whose readers are its element type's.
+const SET_CLASS: &[u8] = b"Sharp\\Set";
+
+/// Pushes onto `readers` the class `name` when `decode` of it runs its own reader, spec section 29: an enum has none of
+/// a project's, and a `final` class, a struct, a family, whose reader reads one of its declared variants, and a class
+/// whose constructor is `required`, below which no constructor adds an effect, each run the `parse` it declares or
+/// the bridge writes. `None` for any other class, which may be a subclass whose reader differs.
+fn reader_of<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    name: Word,
+    readers: &mut Vec<&'codebase ClassLikeMetadata>,
+) -> Option<()> {
+    let class = codebase.get_class_like(name)?;
+    if class.kind.is_enum() {
+        return Some(());
+    }
+    let constructor = word("__construct");
+    let required = codebase
+        .get_declaring_method_class(class.name, constructor)
+        .and_then(|declaring| codebase.get_method(declaring, constructor))
+        .is_some_and(|constructor| constructor.flags.is_required());
+    let known = class.flags.is_final() || class.flags.is_struct() || class.tag_key().is_some() || required;
+    let parses = codebase.get_declaring_method_class(class.name, word("parse")) == Some(class.name);
+    if !known || !parses {
+        return None;
+    }
+    if !readers.iter().any(|seen| seen.name == class.name) {
+        readers.push(class);
+    }
+
+    Some(())
 }
 
 /// Records each lambda and method value `value` holds where a `.sharp` file gives it the place of type `declared` at
@@ -1084,6 +1176,9 @@ where
                     if self.runs_initial_values(declaring_class, method_name, span) {
                         continue;
                     }
+                    if self.decode_read(declaring_class, method_name, receiver, span) {
+                        continue;
+                    }
                     let class = named_class.unwrap_or(declaring_class);
                     self.method_call(declaring_class, method_name, class, span, receiver, arguments);
                 }
@@ -1122,6 +1217,40 @@ where
         }
 
         Some(argument)
+    }
+
+    /// Records the call at `span` of the standard library's `Class<T>.decode` as calls of the readers it runs, spec
+    /// sections 10, 25 and 29, the `parse` of each class [`decoded_readers`] finds in the type of the class value
+    /// `receiver`, when it knows each one. True when it records them. False for any other call, and for a class value
+    /// whose reader it can't know, which the call of the member itself gives every effect through its `uses any`.
+    fn decode_read(
+        &mut self,
+        class: Word,
+        method: Word,
+        receiver: Option<&'ast Expression<'arena>>,
+        span: Span,
+    ) -> bool {
+        let codebase = self.codebase();
+        if codebase.class_key(class) != codebase.class_key(word(CLASS_MEMBERS)) || method.as_bytes() != b"decode" {
+            return false;
+        }
+        let Some(readers) = receiver
+            .and_then(|receiver| self.artifacts.get_expression_type(receiver))
+            .and_then(|class_value| decoded_readers(codebase, class_value))
+        else {
+            return false;
+        };
+        for reader in readers {
+            self.summary.calls.push(Call {
+                callee: Body::Method(reader.name, reader.method_key(word("parse"))),
+                span,
+                receiver: Roots::new(),
+                arguments: Vec::new(),
+                type_arguments: Vec::new(),
+            });
+        }
+
+        true
     }
 
     /// The type arguments the checker inferred for the call at `span`, by the callee's own type parameter index, each as
@@ -1577,6 +1706,41 @@ where
         }
     }
 
+    /// Records the `dispose()` a `using` local's block runs on its value when it ends, spec section 2, as a call of
+    /// each class the value may be, which gives the body that `dispose`'s effects as a written call would. A `dispose`
+    /// without a body has the effects its `uses` lists.
+    fn dispose(&mut self, declaration: &'ast LocalDeclaration<'arena>) {
+        let codebase = self.codebase();
+        let dispose = word(b"dispose");
+        let span = declaration.span();
+        let receiver = self.roots(declaration.value);
+        for class in self.object_classes(declaration.value) {
+            let Some(declaring_class) = codebase.get_declaring_method_class(class, dispose) else {
+                continue;
+            };
+            let Some(metadata) = codebase.get_method(declaring_class, dispose) else {
+                continue;
+            };
+            if metadata.method_metadata.as_ref().is_some_and(|method| method.is_abstract) {
+                let cause = self.member_cause(declaring_class, dispose, Some(class));
+                for effect in &metadata.uses {
+                    self.summary.effects.push((Effect::Class(*effect), span, cause));
+                }
+
+                continue;
+            }
+
+            let declaring_class = codebase.class_key(declaring_class);
+            self.summary.calls.push(Call {
+                callee: Body::Method(declaring_class, codebase.method_key(declaring_class, dispose)),
+                span,
+                receiver: receiver.clone(),
+                arguments: Vec::new(),
+                type_arguments: Vec::new(),
+            });
+        }
+    }
+
     /// Records an `emit`, which has the effect `Sharp\Events` for each class its event may be.
     fn emit(&mut self, emit: &'ast Emit<'arena>) {
         let span = emit.span();
@@ -1740,6 +1904,9 @@ where
         declaration: &'ast LocalDeclaration<'arena>,
         recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
     ) {
+        if declaration.is_using() {
+            recorder.dispose(declaration);
+        }
         match &declaration.target {
             LocalTarget::Name(name) => recorder.store(name.span, declaration.value),
             // Each local an unpack declares holds a part of the value, as a loop variable holds a part of its source.

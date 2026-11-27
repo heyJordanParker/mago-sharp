@@ -24,8 +24,8 @@ mago-names = { workspace = true }
 mago-formatter = { workspace = true }
 mago-php-version = { workspace = true }
 mago-semantics = { workspace = true }
-mago-codex = { workspace = true }
-mago-analyzer = { workspace = true, features = ["serde"] }
+mago-codex = { workspace = true, features = ["serde"] }
+mago-analyzer = { workspace = true }
 mago-guard = { workspace = true }
 mago-sharp-bridge = { workspace = true }
 mago-composer = { workspace = true }

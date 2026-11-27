@@ -15,8 +15,8 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    /// Whether a PHP# local declaration starts here: `const`, `let` followed by a name, or a type, as
-    /// `is_at_typed_local` reads it.
+    /// Whether a PHP# local declaration starts here: `const`, `let` followed by a name, `using` followed by a name, or
+    /// a type, as `is_at_typed_local` reads it.
     pub(crate) fn is_at_local_declaration(&mut self) -> Result<bool, ParseError<'arena>> {
         if !self.dialect.is_sharp() {
             return Ok(false);
@@ -24,6 +24,14 @@ where
 
         match self.stream.lookahead(0)? {
             Some(token) if token.kind == T!["const"] => Ok(true),
+            // Spec section 2: `using archive = …;` declares a local its block disposes.
+            Some(token)
+                if token.kind == T![Identifier]
+                    && token.value == b"using"
+                    && self.stream.peek_kind(1)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()) =>
+            {
+                Ok(true)
+            }
             // `let [` unpacks a tuple, spec section 30, as in TypeScript.
             Some(token)
                 if token.kind == T![Identifier]
@@ -41,16 +49,24 @@ where
 
     /// Parses a PHP# local: `let` or `const`, then its type when it is written, its name, `=` and its value. A local
     /// with its type written has no `let`, as in `Money? total = null;`. `let` or `const` before brackets of names
-    /// unpacks a tuple, spec section 30, as in `const [total, count] = summary;`.
+    /// unpacks a tuple, spec section 30, as in `const [total, count] = summary;`. `using` takes a name alone, as in
+    /// `using archive = ZipArchive.open(path);`, spec section 2.
     pub(crate) fn parse_local_declaration(&mut self) -> Result<LocalDeclaration<'arena>, ParseError<'arena>> {
         let keyword = match self.stream.lookahead(0)? {
-            Some(token) if token.kind == T!["const"] || token.value == b"let" => Some(self.expect_any_keyword()?),
+            Some(token) if token.kind == T!["const"] || token.value == b"let" || token.value == b"using" => {
+                Some(self.expect_any_keyword()?)
+            }
             _ => None,
         };
-        let is_let = keyword.as_ref().is_some_and(|keyword| keyword.value == b"let");
-        let hint =
-            if !is_let && self.is_at_typed_local()? { Some(&*self.arena.alloc(self.parse_type_hint()?)) } else { None };
-        let target = if keyword.is_some() && hint.is_none() && self.stream.is_at(T!["["])? {
+        let is_named_only =
+            keyword.as_ref().is_some_and(|keyword| keyword.value == b"let" || keyword.value == b"using");
+        let hint = if !is_named_only && self.is_at_typed_local()? {
+            Some(&*self.arena.alloc(self.parse_type_hint()?))
+        } else {
+            None
+        };
+        let is_using = keyword.as_ref().is_some_and(|keyword| keyword.value == b"using");
+        let target = if keyword.is_some() && !is_using && hint.is_none() && self.stream.is_at(T!["["])? {
             LocalTarget::Unpack(self.parse_local_unpack()?)
         } else {
             LocalTarget::Name(self.parse_local_identifier()?)

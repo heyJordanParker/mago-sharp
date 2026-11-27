@@ -14,6 +14,7 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner;
@@ -472,6 +473,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LocalDeclaration<'arena> {
             unpacked_type.is_none().then_some(self.value),
             unpacked_type,
         )?;
+        if self.is_using() {
+            report_undisposable_using(context, artifacts, self.value);
+        }
 
         if let Some((local_type, _)) = local_type {
             block_context.locals.insert(variable_ids[0], local_type);
@@ -537,6 +541,34 @@ fn report_unpacked_non_tuple<A>(
     }
 
     context.collector.report_with_code(IssueCode::InvalidDestructuringSource, issue);
+}
+
+/// Reports a `using` local, spec section 2, whose `value` may be no `Disposable`: its block calls `dispose()` on the
+/// value when it ends. A value whose refusal was already reported says nothing again.
+fn report_undisposable_using<A>(context: &mut Context<'_, '_, A>, artifacts: &AnalysisArtifacts, value: &Expression<'_>)
+where
+    A: Arena,
+{
+    let Some(value_type) = artifacts.get_expression_type(value) else {
+        return;
+    };
+    let disposable = word(b"Sharp\\Disposable");
+    if value_type.types.iter().all(|atomic| match atomic {
+        TAtomic::Object(TObject::Named(named)) => context.codebase.is_instance_of(named.name, disposable),
+        atomic => matches!(atomic, TAtomic::Error),
+    }) {
+        return;
+    }
+
+    let quoted = quoted_source(context, value.span());
+    let issue = Issue::error(format!(
+        "A `using` local holds a `Disposable`, and the type of `{quoted}` is `{}`.",
+        display_type(context, &get_general_type(value_type, context.codebase))
+    ))
+    .with_annotation(Annotation::primary(value.span()).with_message("Its block disposes this value when it ends."))
+    .with_help("Declare it with `const`, or have its class implement `Disposable`.");
+
+    context.collector.report_with_code(IssueCode::UsingNotDisposable, issue);
 }
 
 /// Binds the local `variable_id` to its written type, or unbinds it when none is written, and returns the written type
@@ -953,6 +985,18 @@ where
     true
 }
 
+/// Whether the analyzed file is a PHP# file outside the standard library and `namespace`, a PHP name, is `Sharp` or a
+/// namespace under it, which [`report_standard_library_namespace`] refuses.
+pub(crate) fn refuses_standard_library_namespace<A>(context: &Context<'_, '_, A>, namespace: &[u8]) -> bool
+where
+    A: Arena,
+{
+    context.dialect.is_sharp()
+        && !context.source_file.is_standard_library
+        && namespace.get(..b"Sharp".len()).is_some_and(|root| root.eq_ignore_ascii_case(b"Sharp"))
+        && matches!(namespace.get(b"Sharp".len()), None | Some(b'\\'))
+}
+
 /// Checks statement expressions for unused results or lack of side effects.
 /// Refuses a PHP# file outside the standard library that declares `namespace Sharp` or a namespace under it. The name
 /// would reach the standard library's own classes and `Sharp.Internal` with no import, and only the analyzer knows the
@@ -962,11 +1006,7 @@ where
     A: Arena,
 {
     let namespace = php_name(name);
-    if !context.dialect.is_sharp()
-        || context.source_file.is_standard_library
-        || !namespace.get(..b"Sharp".len()).is_some_and(|root| root.eq_ignore_ascii_case(b"Sharp"))
-        || !matches!(namespace.get(b"Sharp".len()), None | Some(b'\\'))
-    {
+    if !refuses_standard_library_namespace(context, &namespace) {
         return;
     }
 
