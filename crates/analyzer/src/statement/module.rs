@@ -118,6 +118,7 @@ where
             report_duplicate_binding(context, service, binding_metadata, *first);
         } else {
             bound.push((key, binding_metadata.span));
+            report_binding_of_another_file(context, metadata, service, binding_metadata, key);
         }
         if binding_metadata.binds_dispatcher(context.codebase) {
             check_app_dispatcher(context, metadata, binding_metadata);
@@ -840,6 +841,56 @@ fn report_duplicate_binding<A>(
         Issue::error(format!("This module already binds `{service_name}`{target}: bind each service once."))
             .with_annotation(Annotation::primary(binding.span).with_message("Bound again here."))
             .with_annotation(Annotation::secondary(first).with_message("First bound here.")),
+    );
+}
+
+/// Spec section 32: a namespace's base modules, and its modules of one environment, are one set of bindings, as one
+/// module is, so a service `binding` binds that another module file of the set binds for the same class too is refused,
+/// naming that file. The engine would take the binding of the file whose name sorts first. A test module overrides for
+/// the tests of its own file.
+fn report_binding_of_another_file<A>(
+    context: &mut Context<'_, '_, A>,
+    module: &ModuleMetadata,
+    service: &TUnion,
+    binding: &BindingMetadata,
+    key: (Word, Option<Word>),
+) where
+    A: Arena,
+{
+    if module.kind == ModuleKind::Test {
+        return;
+    }
+    let codebase = context.codebase;
+    let mut others: Vec<Word> = codebase
+        .modules
+        .iter()
+        .filter(|other| other.file != module.file && other.namespace == module.namespace && other.kind == module.kind)
+        .filter(|other| {
+            other
+                .bindings
+                .iter()
+                .any(|bound| (bound.service_id, bound.target.map(|target| codebase.class_key(target))) == key)
+        })
+        .map(|other| other.file)
+        .collect();
+    if others.is_empty() {
+        return;
+    }
+    others.sort_unstable();
+    others.dedup();
+
+    let service_name = display_sharp_type(context, service);
+    let target =
+        binding.target.map(|target| format!(" for `{}`", display_class_like_name(context, target))).unwrap_or_default();
+    let namespace = display_namespace(codebase, module);
+    context.collector.report_with_code(
+        IssueCode::InvalidBinding,
+        Issue::error(format!(
+            "This module and {} each bind `{service_name}`{target} in the namespace `{namespace}`: bind each service once.",
+            and_list(&others)
+        ))
+        .with_annotation(Annotation::primary(binding.span).with_message("Bound here."))
+        .with_help("Keep one binding: the engine takes the binding of the file whose name sorts first."),
     );
 }
 
