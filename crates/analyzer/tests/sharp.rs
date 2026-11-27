@@ -36497,6 +36497,55 @@ const BOUND_SERVICES: [(&str, &str); 11] = [
     ),
 ];
 
+/// Spec section 32, as one module binds each service once: a namespace's base modules, and its modules of one
+/// environment, are one set of bindings, so two such module files that bind one service are each refused, naming the
+/// other. The engine would take the binding of the file whose name sorts first. Two base modules of one namespace are
+/// also one class, `App.Shop.Module`, so the file whose name sorts second is refused as its second definition too. A
+/// binding `for` one class, a module of another namespace and an environment module, which overrides the base set, bind
+/// the service again freely.
+#[test]
+fn two_module_files_of_one_namespace_that_bind_one_service_are_refused() {
+    let module = |path: &'static str, namespace: &str, header: &str, members: &str| {
+        (
+            path,
+            leak(format!(
+                "namespace {namespace};\n\nimport App.Mail.Mailer;\nimport App.Mail.QueueMailer;\nimport App.Mail.SmtpMailer;\n\nmodule{header}\n{{\n{members}\n}}\n"
+            )),
+        )
+    };
+    let shop = module("app/Shop/Module.sharp", "App.Shop", "", "    singleton Mailer = SmtpMailer;");
+    let lib = module("lib/Shop/Module.sharp", "App.Shop", "", "    singleton Mailer = QueueMailer;");
+    let targeted =
+        module("lib/Shop/Module.sharp", "App.Shop", "", "    singleton Mailer for SendReceipt = QueueMailer;");
+    let admin = module("app/Admin/Module.sharp", "App.Admin", "", "    singleton Mailer = QueueMailer;");
+    let production =
+        module("app/Shop/Module.Production.sharp", "App.Shop", " : App.Shop", "    singleton Mailer = QueueMailer;");
+    let lib_production =
+        module("lib/Shop/Module.Production.sharp", "App.Shop", " : App.Shop", "    singleton Mailer = SmtpMailer;");
+    let refused = |other: &str| {
+        format!(
+            "9:5 invalid-binding This module and `{other}` each bind `Mailer` in the namespace `App.Shop`: bind each service once. | Keep one binding: the engine takes the binding of the file whose name sorts first."
+        )
+    };
+    let with = |others: &[(&'static str, &'static str)]| -> Vec<(&'static str, &'static str)> {
+        BOUND_SERVICES.iter().copied().chain(others.iter().copied()).collect()
+    };
+
+    assert_eq!(refusals(shop, &with(&[lib])), [refused("lib/Shop/Module.sharp")]);
+    assert_eq!(
+        refusals(lib, &with(&[shop])),
+        [
+            refused("app/Shop/Module.sharp"),
+            "7:1 duplicate-definition Module `Module` is already defined in `app/Shop/Module.sharp`. | Consider using namespaces to avoid naming conflicts, or remove one of the duplicate definitions.".to_owned(),
+        ]
+    );
+    assert_eq!(refusals(shop, &with(&[targeted])), Vec::<String>::new());
+    assert_eq!(refusals(shop, &with(&[admin])), Vec::<String>::new());
+    assert_eq!(refusals(shop, &with(&[production])), Vec::<String>::new());
+    assert_eq!(refusals(production, &with(&[shop])), Vec::<String>::new());
+    assert_eq!(refusals(production, &with(&[shop, lib_production])), [refused("lib/Shop/Module.Production.sharp")]);
+}
+
 /// `app/Shop/Module.sharp` binding `members`, with the imports the binding rows use.
 fn shop_module(members: &str) -> (&'static str, &'static str) {
     (
