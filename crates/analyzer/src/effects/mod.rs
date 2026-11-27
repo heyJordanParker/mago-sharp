@@ -172,12 +172,29 @@ pub(crate) struct Call {
 /// sections 1 and 25.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AttributeArgument {
-    /// A PHP# class-like whose attributes only PHP# code writes, which a read creates with no effects.
-    Sharp,
+    /// A class-like by its name, whose attributes a read creates with no effects when [`sharp_attributes`] holds for
+    /// it in the codebase the effects are solved against, and with every effect otherwise.
+    Class(Word),
     /// The type parameter at this index of the calling body's own method, which its callers give in turn.
     Parameter(u32),
     /// Any other type, whose attributes a read may create with every effect.
     Other,
+}
+
+/// Whether a read creates the attributes of `class` with no effects, spec sections 1 and 25: a PHP# class-like that no
+/// plain PHP class extends or implements, since the attributes a read creates are of the class or of one that extends
+/// or implements it, and whose constructor, each one's own or inherited, PHP# declares.
+pub(crate) fn sharp_attributes(codebase: &CodebaseMetadata, class: Word) -> bool {
+    let is_sharp = |class: Word| codebase.get_class_like(class).is_some_and(|class| class.flags.is_sharp());
+    let written_in_sharp = |class: Word| {
+        is_sharp(class)
+            && codebase
+                .get_declaring_method_class(class, word("__construct"))
+                .is_none_or(|constructor| is_sharp(word(constructor.as_bytes())))
+    };
+
+    written_in_sharp(class)
+        && codebase.get_all_descendants(class).iter().all(|descendant| written_in_sharp(word(descendant.as_bytes())))
 }
 
 /// What one PHP# body does by itself: the effects of the plain PHP it calls, the PHP# bodies it calls, and the state
@@ -428,7 +445,7 @@ impl Effects {
                         for &target in call_targets {
                             let reached: Vec<(Item, Item)> = solved[target]
                                 .iter()
-                                .flat_map(|(item, _)| through(*item, call).map(move |mapped| (*item, mapped)))
+                                .flat_map(|(item, _)| through(codebase, *item, call).map(move |mapped| (*item, mapped)))
                                 .collect();
 
                             for (callee_item, item) in reached {
@@ -938,8 +955,9 @@ fn own_items(summary: &EffectSummary) -> Vec<(Item, Origin)> {
 
 /// What a callee's item is in the caller: an effect stays, a change maps through the roots the call passes, and a read
 /// of attributes through a type parameter maps through the type argument the call gives it: none for a PHP# attribute
-/// class, spec section 1, the caller's own type parameter for one it passes on, and every effect for any other type.
-fn through(item: Item, call: &Call) -> impl Iterator<Item = Item> + '_ {
+/// class, spec section 1, as `codebase` holds its descendants now, the caller's own type parameter for one it passes on,
+/// and every effect for any other type.
+fn through<'call>(codebase: &CodebaseMetadata, item: Item, call: &'call Call) -> impl Iterator<Item = Item> + 'call {
     let roots: Vec<Changed> = match item {
         Item::Effect(_) | Item::AttributesOf(_) => Vec::new(),
         Item::Changed(Changed::This) => call.receiver.iter().copied().collect(),
@@ -953,7 +971,9 @@ fn through(item: Item, call: &Call) -> impl Iterator<Item = Item> + '_ {
     let effect = match item {
         Item::Effect(_) => Some(item),
         Item::AttributesOf(index) => match call.type_arguments.get(index as usize) {
-            Some(AttributeArgument::Sharp) => None,
+            Some(AttributeArgument::Class(class)) => {
+                (!sharp_attributes(codebase, *class)).then_some(Item::Effect(Effect::Any))
+            }
             Some(AttributeArgument::Parameter(own)) => Some(Item::AttributesOf(*own)),
             Some(AttributeArgument::Other) | None => Some(Item::Effect(Effect::Any)),
         },

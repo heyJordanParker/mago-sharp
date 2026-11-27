@@ -1813,6 +1813,7 @@ fn listing_name(listing: &Listing) -> Vec<u8> {
         Listing::Descendants(class) => [b"descendants of ", class.as_bytes()].concat(),
         Listing::Namespace(namespace) => [b"namespace ", namespace.as_bytes()].concat(),
         Listing::Methods(search) => [b"methods ", search.as_bytes()].concat(),
+        Listing::InitialValues => b"initial values".to_vec(),
     }
 }
 

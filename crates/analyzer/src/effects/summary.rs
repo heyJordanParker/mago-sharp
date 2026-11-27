@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use foldhash::HashMap;
+use foldhash::HashSet;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -73,6 +74,8 @@ use crate::effects::FunctionValue;
 use crate::effects::Roots;
 use crate::effects::Runs;
 use crate::effects::member_of_effect_class;
+use crate::effects::sharp_attributes;
+use crate::external::Listing;
 use crate::resolver::static_property::StaticProperty;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_holder;
@@ -105,7 +108,9 @@ pub(crate) fn record<'ast, 'arena, A>(
 
     let function_values = std::mem::take(&mut artifacts.function_values);
     let readonly_calls = std::mem::take(&mut artifacts.readonly_calls);
-    let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, initializer, code);
+    let (mut summary, mut lambdas, listings) =
+        summarize(context, artifacts, class, body, member, parameters, initializer, code);
+    artifacts.listings.extend(listings);
     summary.function_values = function_values;
     summary.readonly_calls = readonly_calls;
     // Code that reaches an object of an abstract effect class, the real one or a fake, has that effect, whatever its
@@ -415,7 +420,8 @@ fn function_value_runs(codebase: &CodebaseMetadata, function: Word) -> Runs {
     plain_php_runs(declaration, callee, callee)
 }
 
-/// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
+/// The summary of `body`, a body of the class `class`, the summaries of the lambdas written in it, and the sets of the
+/// program they read whole.
 #[allow(clippy::too_many_arguments)]
 fn summarize<'ast, 'arena, A>(
     context: &Context<'_, 'arena, A>,
@@ -426,7 +432,7 @@ fn summarize<'ast, 'arena, A>(
     parameters: Vec<Span>,
     initializer: Option<&'ast ConstructorInitializer<'arena>>,
     code: FunctionLikeBody<'ast, 'arena>,
-) -> (EffectSummary, Vec<EffectSummary>)
+) -> (EffectSummary, Vec<EffectSummary>, HashSet<Listing>)
 where
     A: Arena,
 {
@@ -487,6 +493,7 @@ where
         },
         summary: empty_summary(),
         lambda_summaries: Vec::new(),
+        listings: HashSet::default(),
     };
 
     // A local takes the roots of every value assigned to it anywhere in the body, so the walk repeats until no
@@ -523,7 +530,24 @@ where
         }
     }
 
-    (recorder.summary, recorder.lambda_summaries)
+    (recorder.summary, recorder.lambda_summaries, recorder.listings)
+}
+
+/// Every PHP# property that declares an initial value, as its class and its name, which a read of an initial value can
+/// run, spec section 29. PHP takes only a constant expression for a property, so a plain PHP one runs no code.
+pub(crate) fn initial_values(codebase: &CodebaseMetadata) -> Vec<(Word, Word)> {
+    codebase
+        .class_likes
+        .values()
+        .filter(|class_like| class_like.flags.is_sharp())
+        .flat_map(|class_like| {
+            class_like
+                .properties
+                .iter()
+                .filter(|(_, metadata)| metadata.flags.has_default())
+                .map(|(property, _)| (class_like.name, *property))
+        })
+        .collect()
 }
 
 /// The state of one body's walk.
@@ -556,6 +580,8 @@ where
     summary: EffectSummary,
     /// The summary of each lambda written in the body, once, which a function value of the lambda runs.
     lambda_summaries: Vec<EffectSummary>,
+    /// The sets of the program the body's summary read whole, so a watch analyzes the file again when one changes.
+    listings: HashSet<Listing>,
 }
 
 impl<'ctx, 'ast, 'arena, A> Recorder<'_, 'ctx, 'ast, 'arena, A>
@@ -976,8 +1002,9 @@ where
         }
 
         let parameters = parameters.parameters.iter().map(|parameter| parameter.variable.span).collect();
-        let (summary, lambdas) =
+        let (summary, lambdas, listings) =
             summarize(self.context, self.artifacts, self.class, body, empty_word(), parameters, None, code);
+        self.listings.extend(listings);
         self.lambda_summaries.push(summary);
         for lambda in lambdas {
             if !self.lambda_summaries.iter().any(|summary| summary.body == lambda.body) {
@@ -1045,13 +1072,13 @@ where
                     // A read of attributes has the effects of the class its type argument names, spec section 1: none
                     // for a PHP# attribute class, and those each call gives for the body's own type parameter.
                     match self.attributes_read(declaring_class, method_name, span) {
-                        Some(AttributeArgument::Sharp) => continue,
+                        Some(AttributeArgument::Class(class)) if sharp_attributes(self.codebase(), class) => continue,
                         Some(AttributeArgument::Parameter(index)) => {
                             let cause = self.member_cause(declaring_class, method_name, named_class);
                             self.summary.attribute_reads.push((index, span, cause));
                             continue;
                         }
-                        Some(AttributeArgument::Other) | None => {}
+                        Some(AttributeArgument::Class(_) | AttributeArgument::Other) | None => {}
                     }
                     if self.runs_initial_values(declaring_class, method_name, span) {
                         continue;
@@ -1076,9 +1103,10 @@ where
 
     /// What the call at `span` of `method` of `class` reads, when the standard library marks the method
     /// `CreatesAttributes`, as `Class<T>.attributes<TAttribute>()`: the attributes of the class its own type argument
-    /// names, the last the checker inferred, after an extension block's, as [`Self::attribute_argument`] gives it. None
-    /// for any other method.
-    fn attributes_read(&self, class: Word, method: Word, span: Span) -> Option<AttributeArgument> {
+    /// names, the last the checker inferred, after an extension block's, as [`Self::attribute_argument`] gives it. The
+    /// summary decides what the read does from every descendant of a class it names, so it records that set. None for
+    /// any other method.
+    fn attributes_read(&mut self, class: Word, method: Word, span: Span) -> Option<AttributeArgument> {
         let codebase = self.codebase();
         if !codebase
             .get_method(class, method)
@@ -1087,7 +1115,12 @@ where
             return None;
         }
 
-        Some(self.attribute_arguments(span).last().copied().unwrap_or(AttributeArgument::Other))
+        let argument = self.attribute_arguments(span).last().copied().unwrap_or(AttributeArgument::Other);
+        if let AttributeArgument::Class(attribute_class) = argument {
+            self.listings.insert(Listing::Descendants(attribute_class));
+        }
+
+        Some(argument)
     }
 
     /// The type arguments the checker inferred for the call at `span`, by the callee's own type parameter index, each as
@@ -1100,11 +1133,9 @@ where
             .unwrap_or_default()
     }
 
-    /// What `argument` is to a read of the attributes of the class it names, spec sections 1 and 25. A PHP# class-like
-    /// that no plain PHP class extends or implements, since the attributes a read creates are of the class or of one
-    /// that extends or implements it, and whose constructor, each one's own or inherited, PHP# declares, has attributes
-    /// a read creates with no effects. A type parameter of the body's own method gives the type argument each of its
-    /// calls gives. Any other type may have every effect.
+    /// What `argument` is to a read of the attributes of the class it names, spec sections 1 and 25: the class-like it
+    /// names, which [`sharp_attributes`] decides where a read takes it, a type parameter of the body's own method, which
+    /// each of its calls gives, or any other type, which may have every effect.
     fn attribute_argument(&self, argument: &TUnion) -> AttributeArgument {
         let codebase = self.codebase();
         if let [TAtomic::GenericParameter(parameter)] = &*argument.types
@@ -1119,25 +1150,9 @@ where
             return AttributeArgument::Parameter(index as u32);
         }
 
-        let is_sharp = |class: Word| codebase.get_class_like(class).is_some_and(|class| class.flags.is_sharp());
-        let written_in_sharp = |class: Word| {
-            is_sharp(class)
-                && codebase
-                    .get_declaring_method_class(class, word("__construct"))
-                    .is_none_or(|constructor| is_sharp(word(constructor.as_bytes())))
-        };
-        match argument.get_single_named_object() {
-            Some(named)
-                if written_in_sharp(named.name)
-                    && codebase
-                        .get_all_descendants(named.name)
-                        .iter()
-                        .all(|descendant| written_in_sharp(word(descendant.as_bytes()))) =>
-            {
-                AttributeArgument::Sharp
-            }
-            _ => AttributeArgument::Other,
-        }
+        argument
+            .get_single_named_object()
+            .map_or(AttributeArgument::Other, |named| AttributeArgument::Class(named.name))
     }
 
     /// The callee of a call of `method` of `declaring_class`, through `named_class` when the call names another, as
@@ -1164,14 +1179,9 @@ where
         {
             return false;
         }
-        let mut callees = Vec::new();
-        for class_like in codebase.class_likes.values().filter(|class_like| class_like.flags.is_sharp()) {
-            for (property, metadata) in &class_like.properties {
-                if metadata.flags.has_default() {
-                    callees.push(Body::InitialValue(class_like.name, *property));
-                }
-            }
-        }
+        let mut callees: Vec<Body> =
+            initial_values(codebase).into_iter().map(|(class, property)| Body::InitialValue(class, property)).collect();
+        self.listings.insert(Listing::InitialValues);
 
         callees.sort_unstable();
         for callee in callees {
