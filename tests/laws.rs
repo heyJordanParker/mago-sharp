@@ -350,6 +350,30 @@ fn a_law_the_fixed_steps_leave_unproven_goes_on_to_lean_s_search() {
     assert!(!compiled(root, "app/Shared/Purse.sharp").exists());
 }
 
+/// A law over an enum value closes with the fixed steps on each case of the enum, as a `match` on the value reads one
+/// case in each, so it ends in the one runner, before Lean's search.
+#[cfg(unix)]
+#[test]
+fn a_law_over_an_enum_value_proves_with_the_fixed_steps_on_each_case() {
+    let directory = lawful_project(&[(
+        "app/Auth/Level.sharp",
+        "namespace App.Auth;\n\npublic enum Level\n{\n    case Low;\n    case Mid;\n    case High;\n\n    public int rank() => match (this) {\n        Level.Low => 1,\n        Level.Mid => 2,\n        Level.High => 3,\n    };\n\n    law rankIsPositive(Level a) => a.rank() > 0;\n}\n",
+    )]);
+    let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
+
+    let output = process::output(command(root, "never").env("XDG_CACHE_HOME", counting_cache(lake.path()))).unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let (_, _, steps, _) = runner_request(lake.path())
+        .theorems
+        .into_iter()
+        .find(|(statement, ..)| statement == "«App».«Auth».«Level».«rankIsPositive»")
+        .expect("the law's theorem");
+    assert!(steps.contains("cases «a» <;> "), "{steps}");
+    assert!(compiled(root, "app/Auth/Level.sharp").exists());
+}
+
 #[test]
 fn compile_refuses_an_unproven_law_every_time_and_never_leaves_a_current_compiled_file() {
     let broken =
@@ -4324,14 +4348,49 @@ fn a_law_reaching_another_list_method_is_refused_naming_the_members_it_reads() {
     );
 }
 
-/// `map` and `filter` take a pure function, so a lambda whose body can throw, as `x * 2` throws on overflow, is
-/// refused.
+/// Spec section 28: a lambda passed to a `List`'s `map`, `filter`, `any` or `all`, or a `Map`'s `filter` or `any`, may
+/// call PHP# methods, as `cases()`, `tryFrom` and a static method that compares, so a law proves that no value of one
+/// string enum is a value of another.
 #[test]
-fn a_law_reaching_a_lambda_that_can_throw_is_refused() {
-    assert_unmodeled(
+fn a_law_lambda_may_call_a_method_that_cannot_throw() {
+    let directory = library_project(&[
+        (
+            "app/Kinds/Color.sharp",
+            "namespace App.Kinds;\n\npublic enum Color : string\n{\n    case Red = \"red\";\n    case Blue = \"blue\";\n}\n",
+        ),
+        (
+            "app/Kinds/Mood.sharp",
+            "namespace App.Kinds;\n\npublic enum Mood : string\n{\n    case Calm = \"calm\";\n    case Angry = \"angry\";\n}\n",
+        ),
+        (
+            "app/Kinds/Kinds.sharp",
+            "namespace App.Kinds;\n\npublic static class Kinds\n{\n    public static bool clashes(Color color) => Mood.cases().any(mood => mood.value == color.value);\n\n    public static bool same(Color color, Mood mood) => color.value == mood.value;\n\n    law noColorIsAMood() => Color.cases().filter(color => Mood.cases().filter(mood => mood.value == color.value).isNotEmpty()).isEmpty();\n\n    law noColorClashes() => Color.cases().filter(color => Kinds.clashes(color)).isEmpty();\n\n    law noColorReadsAsAMood() => Color.cases().filter(color => Mood.tryFrom(color.value) != null).isEmpty();\n\n    law noMoodIsThisColor(Color color) => Mood.cases().filter(mood => Kinds.same(color, mood)).isEmpty();\n\n    law aMapKeepsNoClash() => [\"a\": Color.Red, \"b\": Color.Blue].filter(color => Kinds.clashes(color)).isEmpty();\n\n    law aMapHasNoClash() => ![\"a\": Color.Red].any(color => Kinds.clashes(color));\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Kinds/Kinds.sharp").exists());
+}
+
+/// Spec section 28: a lambda whose body can throw, as `x * 2` throws on overflow, translates as a function of the monad
+/// the code runs in, so its law is judged on its own terms: `same` is false for a list whose doubling overflows, so it
+/// is not proved, and no construct refuses it.
+#[test]
+fn a_law_lambda_that_can_throw_translates() {
+    let directory = library_project(&[(
+        "app/Shared/Shape.sharp",
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static List<int> doubled(List<int> items) => items.map(x => x * 2);\n\n    law same(List<int> items) => Shape.doubled(items).count() == items.count();\n}\n",
-        "Law same reaches a lambda whose body can throw in Shape.doubled. Pass a lambda only to a List's `map` or `filter`, with a body that cannot throw, and call a PHP# method in place of any other function value.",
-    );
+    )]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert!(!printed(&output).contains("unmodeled-construct"), "{}", printed(&output));
+    assert!(printed(&output).contains("error - law-unproven: law same"), "{}", printed(&output));
+    assert!(!compiled(root, "app/Shared/Shape.sharp").exists());
 }
 
 /// Spec section 25: a class value of a type no family names, as `Class<Object>` and `Class<Any?>`, is a value a law

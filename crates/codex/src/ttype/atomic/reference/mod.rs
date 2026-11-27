@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use mago_word::Word;
 use mago_word::concat_word;
 
@@ -110,23 +112,13 @@ impl TReference {
 }
 
 impl TType for TReference {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        let mut children = Vec::new();
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
         if let TReference::Symbol { parameters, intersection_types, .. } = self {
-            if let Some(params) = parameters {
-                for param in params {
-                    children.push(TypeRef::Union(param));
-                }
-            }
-
-            if let Some(intersection_types) = intersection_types {
-                for atomic in intersection_types {
-                    children.push(TypeRef::Atomic(atomic));
-                }
-            }
+            parameters.iter().flatten().try_for_each(|parameter| visit(TypeRef::Union(parameter)))?;
+            intersection_types.iter().flatten().try_for_each(|atomic| visit(TypeRef::Atomic(atomic)))?;
         }
 
-        children
+        ControlFlow::Continue(())
     }
 
     fn can_be_intersected(&self) -> bool {

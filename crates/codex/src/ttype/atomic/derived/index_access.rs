@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -158,8 +159,9 @@ impl TIndexAccess {
 }
 
 impl TType for TIndexAccess {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        vec![TypeRef::Union(&self.target_type), TypeRef::Union(&self.index_type)]
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        visit(TypeRef::Union(&self.target_type))?;
+        visit(TypeRef::Union(&self.index_type))
     }
 
     fn needs_population(&self) -> bool {

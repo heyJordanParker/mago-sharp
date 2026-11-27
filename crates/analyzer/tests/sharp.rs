@@ -1266,6 +1266,69 @@ fn a_marked_base_class_reaches_public_and_protected_methods_of_its_subclasses() 
     );
 }
 
+/// A plain PHP console command's base class, and the `extern` line that marks it, as an application declares them.
+const MARKED_COMMAND: [(&str, &str); 2] = [
+    ("src/Lib/Command.php", "<?php\n\nnamespace Lib;\n\nabstract class Command\n{\n}\n"),
+    (
+        "src/App/Stubs/Stubs.sharp",
+        "namespace App.Stubs;\n\nimport Lib.Command;\n\n[DynamicallyAccessed]\nextern Command uses none;\n",
+    ),
+];
+
+/// Spec section 5: the framework of a marked base class reaches each class that extends it with its public and
+/// protected methods, so an `internal` helper of the class is the class's own, which no framework reaches, and it
+/// compiles. Its public methods stay reached, so neither the one the framework calls nor one no code calls is too wide.
+#[test]
+fn an_internal_helper_of_a_marked_base_class_subclass_compiles() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let report = "namespace App.Console;\n\nimport Lib.Command;\n\npublic class SendReport : Command\n{\n    public void handle() { this.helper(); }\n\n    internal string helper() => \"report\";\n\n    public void neverCalled() { }\n}\n";
+    let mut files = MARKED_COMMAND.to_vec();
+    files.extend([marker, ("src/App/Console/SendReport.sharp", report)]);
+
+    assert_eq!(too_wide(&files), Vec::<String>::new());
+}
+
+/// Spec section 5: the framework of a marked attribute reaches a class that carries it with every public member the
+/// class has, so an `internal` method, property and constant of the class are the class's own, which no framework
+/// reaches, and they compile.
+#[test]
+fn an_internal_member_of_a_class_carrying_a_marked_attribute_compiles() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let wired =
+        "namespace App.Wiring;\n\nimport Attribute;\n\n[Attribute]\n[DynamicallyAccessed]\npublic class Wired\n{\n}\n";
+    let tokens = "namespace App.Auth;\n\nimport App.Wiring.Wired;\n\n[Wired]\npublic class Tokens\n{\n    internal const int LIMIT = 3;\n\n    internal string realm { get; } = \"api\";\n\n    public string issue() => this.find(`${this.realm}:${Tokens.LIMIT}`);\n\n    internal string find(string bearer) => bearer;\n}\n";
+
+    assert_eq!(
+        too_wide(&[marker, ("src/App/Wiring/Wired.sharp", wired), ("src/App/Auth/Tokens.sharp", tokens)]),
+        Vec::<String>::new()
+    );
+}
+
+/// Spec section 5: the framework of a marked base class calls the protected methods of each class that extends it, so a
+/// protected method no code calls is neither too wide nor unused, in a final class too.
+#[test]
+fn a_protected_method_of_a_marked_base_class_subclass_is_reached() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let report = "namespace App.Console;\n\nimport Lib.Command;\n\npublic final class SendReport : Command\n{\n    protected string fallback() => \"report\";\n}\n";
+    let mut files = MARKED_COMMAND.to_vec();
+    files.extend([marker, ("src/App/Console/SendReport.sharp", report)]);
+
+    assert_eq!(too_wide(&files), Vec::<String>::new());
+    assert_eq!(
+        issues(("src/App/Console/SendReport.sharp", report), &[MARKED_COMMAND[0], MARKED_COMMAND[1], marker]),
+        Vec::<String>::new()
+    );
+}
+
 /// Spec section 5: each reach the checker can't see is a use from outside any namespace, so `internal`, written or by
 /// default, on a class or a member one reaches is too narrow, an error at its declaration, where the engine would
 /// throw when it runs. Each reach names who reaches: the test runner, the framework of a marked attribute or of a
@@ -1313,7 +1376,6 @@ fn an_internal_class_or_member_a_framework_reaches_is_too_narrow() {
             "tests/Shop/OrderTest.sharp 5:13 `OrderTest` is internal, and its test runner reaches it from outside `App.Shop`, so it throws when it runs. | Declare it public.",
             "tests/Shop/CartTest.sharp 9:19 `CartTest.testTotals` is internal, and its test runner reaches it from outside `App.Shop`, so it throws when it runs. | Declare it public.",
             "src/App/Payments/Hooks.sharp 8:19 `Hooks.paid` is internal, and the framework that reads `AsEventListener` reaches it from outside `App.Payments`, so it throws when it runs. | Declare it public.",
-            "src/App/Store/CartOffer.sharp 8:21 `CartOffer.offer` is internal, and the framework that `Model` declares reaches it from outside `App.Store`, so it throws when it runs. | Declare it public.",
             "src/App/Store/CartOffer.sharp 10:23 `CartOffer.label` is private, and the framework that `Model` declares reaches it from outside `CartOffer`, so it throws when it runs. | Declare it protected.",
             "src/App/Hooks/Overrides.sharp 8:28 `Overrides.title` is internal, and plain PHP's call of its `[Export]` function reaches it from outside `App.Hooks`, so it throws when it runs. | Declare it public.",
             "src/App/Console/Import.sharp 3:7 `Import` is internal, and the engine that runs the program reaches it from outside `App.Console`, so it throws when it runs. | Declare it public."
@@ -3960,6 +4022,16 @@ fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
             "Default value for property `Demo\\Order::$timestamps` is not assignable to its declared type.",
         ]
     );
+}
+
+/// `Map.from` of a plain PHP `array` gives the `Map` of its keys and values, `Map<int|string, Any?>`, with or without
+/// type arguments, so it returns, assigns and spreads where that type is declared, as the array itself does, spec
+/// section 12.
+#[test]
+fn map_from_a_plain_php_array_returns_as_the_map_it_gives() {
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Row : Model\n{\n    internal Map<int|string, Any?> held() => Map.from(this.appends);\n\n    internal Map<int|string, Any?> kept() => this.appends;\n\n    internal Map<int|string, Any?> copied()\n    {\n        Map<int|string, Any?> copy = Map.from(this.appends);\n        Map<int|string, Any?> typed = Map<int|string, Any?>.from(this.appends);\n\n        return [...copy, ...typed];\n    }\n\n    internal Map<int|string, Any?> spread() => [...Map.from(this.appends), \"b\": 2];\n}\n";
+
+    assert_eq!(worded(("src/Demo/Row.sharp", sharp), &[("src/Lib/Model.php", MODEL)]), Vec::<String>::new());
 }
 
 /// An override keeps its written type instead of inheriting the parent's `@var` type, so a type that does not fit is
@@ -33061,6 +33133,43 @@ fn create_instance_may_have_every_effect() {
         effect_issues(&[making, building, MAKER, disk, stub, saved, note, a, b, c, d, e, f, g]),
         [
             "app/Shop/Making.sharp:5:28 incompatible-effects: `Making.make` reaches `ClassMembers.createInstance`, which may have every effect, so the pure `Maker.make` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
+/// Spec sections 25 and 29: `attributeData<T>()` reads attributes as written and builds none, so the pure `Counting.count`
+/// accepts a method that reads them, and rebuilding one from its data goes through `createInstance`, which may have
+/// every effect, so the pure `Rebuilding.rebuild` refuses a method that does it and a method no `uses` limits does it.
+#[test]
+fn attribute_data_is_pure_and_rebuilding_from_it_may_have_every_effect() {
+    let attribute_data = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/AttributeData.sharp",
+        include_str!("../../../../composer/library/Sharp/AttributeData.sharp"),
+    );
+    let counting =
+        ("app/Shop/Counting.sharp", "namespace App.Shop;\n\npublic interface Counting\n{\n    int count();\n}\n");
+    let rebuilding = (
+        "app/Shop/Rebuilding.sharp",
+        "namespace App.Shop;\n\npublic interface Rebuilding\n{\n    Object rebuild(AttributeData data);\n}\n",
+    );
+    let reading = (
+        "app/Shop/Reading.sharp",
+        "namespace App.Shop;\n\npublic class Reading : Counting\n{\n    public int count() => typeof(Reading).methods()[0].attributeData<Object>().count();\n}\n",
+    );
+    let pure = (
+        "app/Shop/PureRebuild.sharp",
+        "namespace App.Shop;\n\npublic class PureRebuild : Rebuilding\n{\n    public Object rebuild(AttributeData data) => data.type.createInstance(data.arguments);\n}\n",
+    );
+    let free = (
+        "app/Shop/Rebuild.sharp",
+        "namespace App.Shop;\n\npublic class Rebuild\n{\n    public Object rebuild(AttributeData data) => data.type.createInstance(data.arguments);\n}\n",
+    );
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[reading, pure, free, counting, rebuilding, attribute_data, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/PureRebuild.sharp:5:50 incompatible-effects: `PureRebuild.rebuild` reaches `ClassMembers.createInstance`, which may have every effect, so the pure `Rebuilding.rebuild` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
         ]
     );
 }
