@@ -7529,8 +7529,8 @@ fn readonly_that_cannot_matter_is_an_error() {
 /// An `int` is no exit code, so `int main` is refused.
 #[test]
 fn a_class_main_is_public_and_takes_nothing_and_returns_void_an_exit_code_or_a_result_of_one() {
-    let exits = "namespace App.Console;\n\nimport Sharp.System.ExitCode;\n\nclass Import\n{\n    public ExitCode main() => ExitCode.SUCCESS;\n}\n";
-    let results = "namespace App.Console;\n\nimport Sharp.Result;\nimport Sharp.System.ExitCode;\n\nclass Import\n{\n    public Result<ExitCode, ImportError> main() => Result.Ok(ExitCode.SUCCESS);\n}\n";
+    let exits = "namespace App.Console;\n\nimport Sharp.System.ExitCode;\n\nclass Import\n{\n    public ExitCode main() => ExitCode.success;\n}\n";
+    let results = "namespace App.Console;\n\nimport Sharp.Result;\nimport Sharp.System.ExitCode;\n\nclass Import\n{\n    public Result<ExitCode, ImportError> main() => Result.Ok(ExitCode.success);\n}\n";
     let returns = "namespace App.Http;\n\nclass Boot\n{\n    public void main() { }\n}\n";
     let integer = "namespace App.Console;\n\nclass Import\n{\n    public int main() => 0;\n}\n";
     let result_of_int = "namespace App.Console;\n\nimport Sharp.Result;\n\nclass Import\n{\n    public Result<int, ImportError> main() => Result.Ok(0);\n}\n";

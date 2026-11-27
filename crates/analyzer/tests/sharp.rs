@@ -14766,16 +14766,22 @@ fn never_is_a_method_return_type() {
     );
 
     // The standard library's `Process.exit` is a `never` method too.
-    let stopper = "namespace App.Probe;\n\nimport Sharp.System.Process;\n\npublic class Stopper\n{\n    public Stopper(private Process process) { }\n\n    public int ends() { this.process.exit(1); }\n\n    public int after()\n    {\n        this.process.exit(1);\n        return 0;\n    }\n}\n";
+    let stopper = "namespace App.Probe;\n\nimport Sharp.System.ExitCode;\nimport Sharp.System.Process;\n\npublic class Stopper\n{\n    public Stopper(private Process process) { }\n\n    public int ends() { this.process.exit(ExitCode.failure); }\n\n    public int after()\n    {\n        this.process.exit(ExitCode.failure);\n        return 0;\n    }\n}\n";
     assert_eq!(
         issues(
             ("src/App/Probe/Stopper.sharp", stopper),
-            &[(
-                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Process.sharp",
-                include_str!("../../../../composer/library/Sharp/System/Process.sharp"),
-            )]
+            &[
+                (
+                    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Process.sharp",
+                    include_str!("../../../../composer/library/Sharp/System/Process.sharp"),
+                ),
+                (
+                    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/ExitCode.sharp",
+                    include_str!("../../../../composer/library/Sharp/System/ExitCode.sharp"),
+                ),
+            ]
         ),
-        ["14:9 unevaluated-code"]
+        ["15:9 unevaluated-code"]
     );
 }
 

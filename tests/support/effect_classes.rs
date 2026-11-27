@@ -27,7 +27,7 @@ pub const SET_MEMBERS: (&str, &str) = library_file!("Sharp/SetMembers.sharp");
 /// The lazy operations of an `Iterable`, as `LIST_MEMBERS` are a `List`'s members.
 pub const ITERABLE_MEMBERS: (&str, &str) = library_file!("Sharp/IterableMembers.sharp");
 
-pub const EFFECT_CLASSES: [(&str, &str); 64] = [
+pub const EFFECT_CLASSES: [(&str, &str); 65] = [
     LIST_MEMBERS,
     MAP_MEMBERS,
     SET_MEMBERS,
@@ -37,6 +37,7 @@ pub const EFFECT_CLASSES: [(&str, &str); 64] = [
     library_file!("Sharp/Random.sharp"),
     library_file!("Sharp/IO/Console.sharp"),
     library_file!("Sharp/System/Process.sharp"),
+    library_file!("Sharp/System/ExitCode.sharp"),
     library_file!("Sharp/System/ProcessResult.sharp"),
     library_file!("Sharp/System/ChildProcess.sharp"),
     library_file!("Sharp/IO/Files.sharp"),
