@@ -4355,7 +4355,7 @@ fn a_test_in_an_autoload_dev_folder_and_production_code_of_a_required_package_co
         "project",
         &[(
             "tests/OptInTest.sharp",
-            "namespace Tests;\n\nimport PHPUnit.Framework.TestCase;\n\ninternal class OptInTest : TestCase\n{\n}\n",
+            "namespace Tests;\n\nimport PHPUnit.Framework.TestCase;\n\npublic class OptInTest : TestCase\n{\n}\n",
         )],
     );
     let required = dev_package_project(

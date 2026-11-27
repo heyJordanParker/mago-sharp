@@ -1269,7 +1269,8 @@ fn a_marked_base_class_reaches_public_and_protected_methods_of_its_subclasses() 
 /// Spec section 5: each reach the checker can't see is a use from outside any namespace, so `internal`, written or by
 /// default, on a class or a member one reaches is too narrow, an error at its declaration, where the engine would
 /// throw when it runs. Each reach names who reaches: the test runner, the framework of a marked attribute or of a
-/// marked base class, plain PHP calling an `[Export]` method and the engine running `main`. A private method of a
+/// marked base class, plain PHP calling an `[Export]` method and the engine running the class of a `main`, which is
+/// always public. A private method of a
 /// marked base's subclass that no code uses is the framework's, which calls it from the base class, so it is refused
 /// with `protected`.
 #[test]
@@ -1290,7 +1291,7 @@ fn an_internal_class_or_member_a_framework_reaches_is_too_narrow() {
     let hooks = "namespace App.Payments;\n\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\npublic class Hooks\n{\n    [AsEventListener]\n    internal void paid() { }\n}\n";
     let offer = "namespace App.Store;\n\nimport Illuminate.Database.Eloquent.Casts.Attribute;\nimport Illuminate.Database.Eloquent.Model;\n\npublic final class CartOffer : Model\n{\n    internal string offer() => \"offer\";\n\n    private Attribute label() => Attribute.make(get: (string value) => value.trim());\n}\n";
     let overrides = "namespace App.Hooks;\n\nimport Sharp.Interop.Export;\n\npublic static class Overrides\n{\n    [Export(\"app_title\")]\n    internal static string title(string text) => text;\n}\n";
-    let import = "namespace App.Console;\n\npublic class Import\n{\n    internal int main() => 0;\n}\n";
+    let import = "namespace App.Console;\n\nclass Import\n{\n    public int main() => 0;\n}\n";
     let mut files = PHPUNIT.to_vec();
     files.extend(ELOQUENT_MODEL);
     files.extend([
@@ -1315,7 +1316,7 @@ fn an_internal_class_or_member_a_framework_reaches_is_too_narrow() {
             "src/App/Store/CartOffer.sharp 8:21 `CartOffer.offer` is internal, and the framework that `Model` declares reaches it from outside `App.Store`, so it throws when it runs. | Declare it public.",
             "src/App/Store/CartOffer.sharp 10:23 `CartOffer.label` is private, and the framework that `Model` declares reaches it from outside `CartOffer`, so it throws when it runs. | Declare it protected.",
             "src/App/Hooks/Overrides.sharp 8:28 `Overrides.title` is internal, and plain PHP's call of its `[Export]` function reaches it from outside `App.Hooks`, so it throws when it runs. | Declare it public.",
-            "src/App/Console/Import.sharp 5:18 `Import.main` is internal, and the engine that runs the program reaches it from outside `App.Console`, so it throws when it runs. | Declare it public."
+            "src/App/Console/Import.sharp 3:7 `Import` is internal, and the engine that runs the program reaches it from outside `App.Console`, so it throws when it runs. | Declare it public."
         ]
     );
 }
