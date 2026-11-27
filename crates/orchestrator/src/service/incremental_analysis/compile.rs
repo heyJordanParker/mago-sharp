@@ -770,6 +770,7 @@ impl IncrementalAnalysisService {
             .filter_map(|lowering| lowerings[*lowering].1.take())
             .collect();
         translations.extend(translated.into_iter().filter_map(Result::ok));
+        translations.extend(self.codex_translations());
         let refused = check(translations, &reach, &errored)
             .map_err(|error| OrchestratorError::General(format!("The laws could not be checked: {error}.")))?;
         laws.end();
@@ -1585,7 +1586,34 @@ impl IncrementalAnalysisService {
         library.sort_unstable_by_key(|(file_id, _)| **file_id);
         let effect_summaries = library.into_iter().flat_map(|(_, summaries)| summaries.iter().cloned()).collect();
 
-        Ok(LibraryCodex { metadata, effect_summaries, forms })
+        Ok(LibraryCodex { metadata, effect_summaries, forms, translations: self.library_translations()? })
+    }
+
+    /// The Lean translation of each standard library file, in name order, with every declaration a project's law may
+    /// reach: each of the library's class-likes and each of their methods and properties, and all they reach.
+    fn library_translations(&self) -> Result<Vec<Translation>, OrchestratorError> {
+        let files = self.sharp_files();
+        let library: Vec<&Arc<File>> = files.iter().filter(|file| file.is_standard_library).collect();
+        let ids: HashSet<FileId> = library.iter().map(|file| file.id).collect();
+        let reach =
+            Reach::reaching_files(&self.codebase, &self.native_symbol_references, |file_id| ids.contains(&file_id));
+        let (errors, unrefused) = self.errors(|issues| issues);
+        let session = self.plugin_registry.create_external_analysis_session(self.database.files());
+        let translations = self.checked_all(
+            &library,
+            &InlineForms::default(),
+            (&errors, &unrefused),
+            &self.effects(),
+            session.as_ref(),
+            |checked, _, _| translate(checked, &reach),
+        )?;
+
+        Ok(translations.into_iter().filter_map(Result::ok).collect())
+    }
+
+    /// The translations of the standard library's codex, which a project's laws take the library's declarations from.
+    fn codex_translations(&self) -> impl Iterator<Item = Translation> + '_ {
+        self.library.iter().flat_map(|library| library.translations.iter().cloned())
     }
 
     /// `forms`, with the inline forms of the standard library's codex after them.
@@ -1655,8 +1683,13 @@ impl IncrementalAnalysisService {
 
         let reach = Reach::new(&self.codebase, &self.native_symbol_references);
         let (law_files, reached) = self.law_reach(&reach);
-        let files: Vec<Arc<File>> =
-            self.database.files().filter(|file| reached.contains(&file.id) && Dialect::of(file).is_sharp()).collect();
+        // A standard library file the project installs is translated in the library's codex, so none is checked here.
+        let files: Vec<Arc<File>> = self
+            .database
+            .files()
+            .filter(|file| reached.contains(&file.id) && Dialect::of(file).is_sharp())
+            .filter(|file| !(file.is_standard_library && file.file_type == FileType::Builtin))
+            .collect();
         let reached_files: Vec<&Arc<File>> = files.iter().collect();
         let (errors, unrefused) = self.errors(|issues| issues);
         let session = self.plugin_registry.create_external_analysis_session(self.database.files());
@@ -1669,7 +1702,9 @@ impl IncrementalAnalysisService {
             |checked, _, _| translate(checked, &reach),
         )?;
         let errored: HashSet<FileId> = errors.keys().copied().collect();
-        let mut refused = refusals(&translations.into_iter().filter_map(Result::ok).collect::<Vec<_>>(), &errored);
+        let translations: Vec<Translation> =
+            translations.into_iter().filter_map(Result::ok).chain(self.codex_translations()).collect();
+        let mut refused = refusals(&translations, &errored);
         refused.retain(|file_id, _| law_files.contains(file_id));
 
         Ok(refused)

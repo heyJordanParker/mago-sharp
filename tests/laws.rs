@@ -51,17 +51,7 @@ fn compile_proves_a_law_from_its_sharp_file_alone_and_writes_the_compiled_file()
 
 #[test]
 fn compile_proves_a_law_in_a_project_that_installs_the_standard_library() {
-    let directory = lawful_project(&[
-        ("app/Shared/Money.sharp", LAWFUL_MONEY),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/composer.json",
-            "{\n    \"name\": \"heyjordanparker/php-sharp-composer\",\n    \"autoload\": {\n        \"psr-4\": {\n            \"Sharp\\\\\": \"library/Sharp/\"\n        }\n    }\n}\n",
-        ),
-        (
-            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math.sharp",
-            "namespace Sharp;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
-        ),
-    ]);
+    let directory = library_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
     let root = directory.path();
 
     let output = compile_lines(root);

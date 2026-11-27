@@ -111,6 +111,18 @@ impl Reach {
     /// member of the PHP# class that declares it. The laws of a machine reach each of its entry points and moves.
     #[must_use]
     pub fn new(codebase: &CodebaseMetadata, references: &SymbolReferences) -> Reach {
+        Self::reaching_files(codebase, references, |_| false)
+    }
+
+    /// As [`Self::new`], with a walk too from each class-like a file `whole` holds declares, from the class-like and each
+    /// of its methods and properties, as a standard library's release translates each declaration a project's law may
+    /// reach. Only a law's file names the files it reaches.
+    #[must_use]
+    pub fn reaching_files(
+        codebase: &CodebaseMetadata,
+        references: &SymbolReferences,
+        whole: impl Fn(FileId) -> bool,
+    ) -> Reach {
         let mut edges: HashMap<SymbolIdentifier, Vec<SymbolIdentifier>> = HashMap::default();
         for edge in references.cascade_edges(codebase) {
             if let CascadeEdge::Signature { from, to } | CascadeEdge::Body { from, to } = edge {
@@ -169,11 +181,17 @@ impl Reach {
             }
         }
 
-        for class in codebase.class_likes.values().filter(|class| !class.laws.is_empty()) {
+        for class in codebase.class_likes.values().filter(|class| !class.laws.is_empty() || whole(class.span.file_id)) {
             let law_file = class.span.file_id;
             let mut reached: HashSet<SymbolIdentifier> = HashSet::default();
             let mut pending: Vec<SymbolIdentifier> =
                 class.laws.keys().map(|law| keyed(codebase, (class.name, *law))).collect();
+            if whole(law_file) {
+                let key = codebase.class_key(class.name);
+                pending.push((key, empty_word()));
+                pending.extend(class.methods.iter().map(|method| keyed(codebase, (class.name, *method))));
+                pending.extend(class.properties.keys().map(|property| (key, *property)));
+            }
             pending.extend(class.machine.iter().flat_map(|machine| machine_steps(codebase, class, machine)));
             // Each PHP# implementer of an interface proves the interface's laws, so they reach what it gives for each
             // member of the interface they reach.
@@ -281,12 +299,12 @@ impl Reach {
                 }
             }
 
-            files.sort_unstable();
-            files.dedup();
-            let entry = reach.files.entry(law_file).or_default();
-            entry.extend(files);
-            entry.sort_unstable();
-            entry.dedup();
+            if !class.laws.is_empty() {
+                let entry = reach.files.entry(law_file).or_default();
+                entry.extend(files);
+                entry.sort_unstable();
+                entry.dedup();
+            }
             reach.declarations.extend(reached);
         }
         reach.valid = valid_classes(codebase, &reach);

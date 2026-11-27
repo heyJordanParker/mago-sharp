@@ -3,7 +3,9 @@
 
 use mago_analyzer::effects::EffectSummary;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_database::file::FileId;
 use mago_sharp_bridge::InlineForm;
+use mago_sharp_lean::Translation;
 
 use crate::error::OrchestratorError;
 
@@ -16,12 +18,15 @@ const MAGIC: &[u8; 8] = b"SHARPCDX";
 /// The standard library as one release compiled it.
 ///
 /// It holds the scan of its files, each method's return as the analysis of its body gave it, what each of its bodies
-/// does by itself, and the inline forms its lowering gave, which a project's lowering inlines.
+/// does by itself, the inline forms its lowering gave, which a project's lowering inlines, and the Lean translation of
+/// each of its files with every declaration a project's law may reach, which a project's laws take as Lean's compiled
+/// modules are imported by what a downstream file uses.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct LibraryCodex {
     pub(crate) metadata: CodebaseMetadata,
     pub(crate) effect_summaries: Vec<EffectSummary>,
     pub(crate) forms: Vec<(Vec<u8>, InlineForm)>,
+    pub(crate) translations: Vec<Translation>,
 }
 
 /// Why a codex can't be read.
@@ -34,6 +39,14 @@ pub enum CodexError {
 }
 
 impl LibraryCodex {
+    /// Names each file the codex's translations name as `moved` gives it, as [`Translation::relocate`] does: the release
+    /// wrote them where the library's package is the workspace, and a project installs the package in its own folder.
+    pub fn relocate(&mut self, moved: impl Fn(FileId) -> Option<(FileId, Vec<u8>)>) {
+        for translation in &mut self.translations {
+            translation.relocate(&moved);
+        }
+    }
+
     /// The bytes [`Self::decode`] reads back, which name `release`, the PHP# release that wrote them.
     ///
     /// # Errors

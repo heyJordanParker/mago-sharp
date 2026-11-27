@@ -1971,11 +1971,19 @@ fn compiled(
         Some(compiled) => read_listed(&compiled),
         None => Ok(None),
     };
-    // The generation of the `.sharp` folder the compile writes, while the project has a PHP# file to compile.
-    let generation = writing.as_ref().map(|_| Generation::start(&compiled_folder)).transpose()?;
+    // The generation of the `.sharp` folder the compile writes, while the project has a PHP# file to compile. The
+    // library's own package writes a plain `current` folder in place of a generation and its link, since a copy of
+    // the package, as Composer's path repository makes, keeps no link.
+    let current = compiled_folder.join(unit::CURRENT_GENERATION);
+    if releases_library && current.is_symlink() {
+        std::fs::remove_file(&current).map_err(|error| DatabaseError::io(IOAction::DeleteFile, &current, error))?;
+    }
+    let generation =
+        writing.as_ref().filter(|_| !releases_library).map(|_| Generation::start(&compiled_folder)).transpose()?;
     let write = |file: &File, bytes: Vec<u8>| {
         let wrote = match (compiled_path_of(&root, &sources, file)?, &generation) {
             (Some(compiled), Some(generation)) => generation.write(&compiled, &bytes)?,
+            (Some(compiled), None) if releases_library => write_if_changed(&compiled, &bytes)?,
             _ => false,
         };
 
@@ -2105,14 +2113,19 @@ fn compiled(
         if let Some(generation) = &generation {
             generation.write(&table, &bytes)?;
             published.push((table, unit::source_hash(&bytes)));
+        } else if releases_library {
+            write_if_changed(&table, &bytes)?;
+            published.push((table, unit::source_hash(&bytes)));
         }
     }
     if let Some(generation) = generation {
         generation.publish(&compiled_folder)?;
-        if let Some(record) = record.as_mut() {
-            for (path, hash) in &published {
-                record.output(path, *hash);
-            }
+    } else if releases_library {
+        collect_generations(&compiled_folder)?;
+    }
+    if let Some(record) = record.as_mut() {
+        for (path, hash) in &published {
+            record.output(path, *hash);
         }
     }
     if compiled_folder.is_dir() {
@@ -2436,7 +2449,8 @@ impl Record {
     /// `sources`, and stamps each input the loader and the compile read apart from the analysis. Those are the
     /// `composer.json` of each PHP# source's folder, or of the nearest folder above it that holds one, as the loader
     /// reads it, each absent one below it, Composer's `installed.json`, the autoload maps of `autoloader`, the baseline,
-    /// and the `.sharp` folder of each folder that holds a package's PHP# file, absent unless the compile refuses it. `filesystems` tells which
+    /// and the `.sharp` folder of each folder that holds a package's PHP# file but the standard library's, whose package
+    /// holds the one PHP# compiled it into, absent unless the compile refuses it. `filesystems` tells which
     /// filesystems record every write, for the outputs' statuses. Gives none when the temp file can't be created or an
     /// input can't be stamped, and the compile then keeps no record.
     fn start(
@@ -2464,7 +2478,7 @@ impl Record {
                     break;
                 }
             }
-            if name.starts_with("vendor/") {
+            if name.starts_with("vendor/") && package_of(name.as_bytes()).as_deref() != Some(STANDARD_LIBRARY_PACKAGE) {
                 for folder in package_compiled_folders_of(name) {
                     inputs.push(stamp(folder.as_bytes())?);
                 }
@@ -2877,18 +2891,21 @@ pub(crate) fn library_codex(root: &Path, database: &impl DatabaseReader) -> Resu
     let Ok(bytes) = std::fs::read(&path) else {
         return Err(format!("{} is missing, so the PHP# standard library can't be read. {reinstall}", path.display()));
     };
-    let codex = LibraryCodex::decode(&bytes, VERSION).map_err(|error| match error {
+    let mut codex = LibraryCodex::decode(&bytes, VERSION).map_err(|error| match error {
         CodexError::OtherRelease(release) => format!(
             "This project's PHP# standard library was compiled by PHP# {release}, and mago is {VERSION}. {reinstall}"
         ),
         CodexError::Unreadable => format!("{} is damaged. {reinstall}", path.display()),
     })?;
     let release = unit::release_checker(VERSION);
+    // The release named each library file from the package's folder, and the project names it from its own.
+    let mut moved: HashMap<FileId, (FileId, Vec<u8>)> = HashMap::default();
     for file in &library {
         let source = source_path(root, file);
         let Ok(relative) = source.strip_prefix(&package) else {
             continue;
         };
+        moved.insert(FileId::new(&File::logical_name(&package, &source)), (file.id, file.name.to_vec()));
         let compiled = folder.join(unit::CURRENT_GENERATION).join(relative).with_extension("sharpc");
         let Ok(bytes) = std::fs::read(&compiled) else {
             return Err(format!("{} is missing, so {} can't run. {reinstall}", compiled.display(), source.display()));
@@ -2900,6 +2917,7 @@ pub(crate) fn library_codex(root: &Path, database: &impl DatabaseReader) -> Resu
             ));
         }
     }
+    codex.relocate(|file_id| moved.get(&file_id).cloned());
 
     Ok(Some(Arc::new(codex)))
 }
