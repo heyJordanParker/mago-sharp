@@ -379,8 +379,7 @@ fn inherit_declared_parse(metadata: &mut ClassLikeMetadata, codebase: &CodebaseM
     let Some(parent) = codebase.get_class_like_by_word(parent_classname) else {
         return;
     };
-    let parent_declares =
-        parent.declaring_method_ids.get(&parent.method_key(name)).is_some_and(|id| !generated(id));
+    let parent_declares = parent.declaring_method_ids.get(&parent.method_key(name)).is_some_and(|id| !generated(id));
     // The class being populated is out of the codebase until it is done.
     let own_generated = codebase
         .function_likes

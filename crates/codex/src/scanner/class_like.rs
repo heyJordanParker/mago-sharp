@@ -2406,8 +2406,13 @@ fn create_held_value(
         add_method(codebase, b"__construct", class_like, constructor);
     }
     let instance = get_named_object(class_like.original_name, None);
-    let parse =
-        create_static_method("parse", span, vec![create_parameter("$value", backing, span)], parse_result(instance), vec![]);
+    let parse = create_static_method(
+        "parse",
+        span,
+        vec![create_parameter("$value", backing, span)],
+        parse_result(instance),
+        vec![],
+    );
     add_method(codebase, b"parse", class_like, parse);
 }
 
