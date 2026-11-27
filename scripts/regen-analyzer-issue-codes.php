@@ -405,6 +405,7 @@ final class AnalyzerCodeModuleGenerator
         'test-class-super-call',
         'test-method-parameter',
         'discarded-result',
+        'invalid-parse',
     ];
 
     /**

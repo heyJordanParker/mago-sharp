@@ -304,10 +304,10 @@ fn parsed_classes<'codebase>(
     }
 }
 
-/// The standard library's `ClassMembers`, which holds `Class<T>.decode`, spec section 25.
+/// The standard library's `ClassMembers`, which holds `Class<T>.parse`, spec section 25.
 const CLASS_MEMBERS: &[u8] = b"Sharp\\ClassMembers";
 
-/// The classes whose readers `decode` of a class value of `class_value`'s type runs, spec sections 10 and 29, as
+/// The classes whose readers `parse` of a class value of `class_value`'s type runs, spec sections 10 and 29, as
 /// [`readers_of`] finds them in the type it holds, or `None` when one of them may be any class's reader.
 fn decoded_readers<'codebase>(
     codebase: &'codebase CodebaseMetadata,
@@ -329,7 +329,7 @@ fn decoded_readers<'codebase>(
     Some(readers)
 }
 
-/// Pushes onto `readers` the class of each reader `decode` of `r#type` runs, once each, spec section 29: a type that is
+/// Pushes onto `readers` the class of each reader `parse` of `r#type` runs, once each, spec section 29: a type that is
 /// no class runs only the readers of the classes inside it, so a scalar, an enum and `null` add none, and a `List`, a
 /// `Map`, a tuple, a `Set`, a union and a generic class's type arguments add their classes'. `None` for a type whose
 /// reader may be any, as [`reader_of`] says.
@@ -364,7 +364,7 @@ fn readers_of<'codebase>(
 /// The prelude's `Set`, a type that is no class, spec section 12, whose readers are its element type's.
 const SET_CLASS: &[u8] = b"Sharp\\Set";
 
-/// Pushes onto `readers` the class `name` when `decode` of it runs its own reader, spec section 29: an enum has none of
+/// Pushes onto `readers` the class `name` when `parse` of it runs its own reader, spec section 29: an enum has none of
 /// a project's, and a `final` class, a struct, a family, whose reader reads one of its declared variants, and a class
 /// whose constructor is `required`, below which no constructor adds an effect, each run the `parse` it declares or
 /// the bridge writes. `None` for any other class, which may be a subclass whose reader differs.
@@ -1214,7 +1214,7 @@ where
         Some(argument)
     }
 
-    /// Records the call at `span` of the standard library's `Class<T>.decode` as calls of the readers it runs, spec
+    /// Records the call at `span` of the standard library's `Class<T>.parse` as calls of the readers it runs, spec
     /// sections 10, 25 and 29, the `parse` of each class [`decoded_readers`] finds in the type of the class value
     /// `receiver`, when it knows each one. True when it records them. False for any other call, and for a class value
     /// whose reader it can't know, which the call of the member itself gives every effect through its `uses any`.
@@ -1226,7 +1226,7 @@ where
         span: Span,
     ) -> bool {
         let codebase = self.codebase();
-        if codebase.class_key(class) != codebase.class_key(word(CLASS_MEMBERS)) || method.as_bytes() != b"decode" {
+        if codebase.class_key(class) != codebase.class_key(word(CLASS_MEMBERS)) || method.as_bytes() != b"parse" {
             return false;
         }
         let Some(readers) = receiver

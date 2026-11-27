@@ -202,10 +202,7 @@ where
         // A type that parses is a struct or a PHP# class, which keys its methods by their declared names, spec section
         // 24, so a `Parse` of its own is not the generated `parse`.
         let method_name = resolved_method.method_identifier.get_method_name();
-        if context.dialect.is_sharp()
-            && context.codebase.parses(metadata.name)
-            && method_name.as_bytes() == b"parse"
-        {
+        if context.dialect.is_sharp() && context.codebase.parses(metadata.name) && method_name.as_bytes() == b"parse" {
             check_struct_parse(context, metadata, class_type_arguments.as_deref().unwrap_or_default(), call.span);
             record_parse_fields(context.codebase, block_context, artifacts, metadata.name, &mut Vec::new());
         }
@@ -561,7 +558,7 @@ where
 
 /// Records, as uses from the code `block_context` runs, the fields `parse` reads of each PHP# struct or class `value`
 /// holds, wherever it holds one: in a collection's elements, keys and values, and in those fields. `Json.encode` writes
-/// a value by those fields and `parse` and `Json.decode` read them, spec section 10, so a public field that only the
+/// a value by those fields and `parse` and `Json.parse<T>` read them, spec section 10, so a public field that only the
 /// JSON holds is used where the code encodes or parses it, spec section 5. `recorded` holds the classes already done.
 fn record_parse_fields_in(
     codebase: &CodebaseMetadata,

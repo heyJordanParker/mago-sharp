@@ -292,6 +292,24 @@ pub(crate) fn expand_atomic(
         TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
             expand_union(codebase, Arc::make_mut(constraint), options);
         }
+        // The prelude is populated before any project is read, so a prelude type that names a project's class, as
+        // `\Sharp\Result<T, \Sharp\ParseError>` on `Sharp\Internal\parseAs`, stays a reference. Once the codebase knows
+        // the class, it is the object the reference names, with the type arguments it is written with.
+        TAtomic::Reference(TReference::Symbol {
+            name,
+            parameters,
+            variances,
+            intersection_types: None,
+            is_readonly,
+        }) if codebase.get_class_like(*name).is_some() => {
+            *skip_key = true;
+            let mut named =
+                TNamedObject::new(*name).with_type_parameters(parameters.clone()).with_variances(variances.clone());
+            named.is_readonly = *is_readonly;
+            let mut object = TObject::Named(named);
+            expand_object(&mut object, codebase, options);
+            new_return_type_parts.push(TAtomic::Object(object));
+        }
         TAtomic::Reference(TReference::Member { class_like_name, member_selector }) => {
             *skip_key = true;
             expand_member_reference(*class_like_name, member_selector, codebase, options, new_return_type_parts);
@@ -568,8 +586,11 @@ fn expand_global_reference(
 fn expand_object(object: &mut TObject, codebase: &CodebaseMetadata, options: &TypeExpansionOptions) {
     resolve_special_class_names(object, codebase, options);
 
+    // A PHP# generic enum written with its type arguments, as `Result<T, ParseError>`, keeps them. A plain PHP enum takes
+    // none.
     if let TObject::Named(named) = object
         && named.intersection_types.is_none()
+        && named.type_parameters.as_ref().is_none_or(|parameters| parameters.is_empty())
         && let Some(class_metadata) = codebase.get_class_like(named.name)
         && class_metadata.kind.is_enum()
     {

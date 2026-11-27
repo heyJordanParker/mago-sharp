@@ -115,7 +115,7 @@ pub const DISPATCHES_EMITS: &str = "Sharp\\Internal\\DispatchesEmits";
 
 /// The mark of a generic method that parses a value into its type argument.
 ///
-/// The method runs the type's `parse`, as `Json.decode<T>` does, so each call's type argument gets the struct parse
+/// The method runs the type's `parse`, as `Json.parse<T>` does, so each call's type argument gets the struct parse
 /// check.
 pub const PARSES_TYPE_ARGUMENT: &str = "Sharp\\Internal\\ParsesTypeArgument";
 

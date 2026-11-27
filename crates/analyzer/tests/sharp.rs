@@ -834,9 +834,9 @@ fn a_case_is_never_too_wide() {
     );
 }
 
-/// Spec sections 5 and 10: `Json.encode` writes a struct by the fields its `parse` reads, and `parse` and `Json.decode`
+/// Spec sections 5 and 10: `Json.encode` writes a struct by the fields its `parse` reads, and `parse` and `Json.parse<T>`
 /// read them, so each uses every field of the struct from the namespace of the code that encodes or parses it, inside a
-/// `List` too. `Row`, encoded, `Line`, parsed, and `Item`, decoded as a `List`, report nothing for their fields. A
+/// `List` too. `Row`, encoded, `Line`, parsed, and `Item`, parsed as a `List`, report nothing for their fields. A
 /// member the wire never holds and nothing reads by name, as `Row`'s computed `unused`, which stores nothing, is still
 /// too wide.
 #[test]
@@ -844,7 +844,7 @@ fn a_struct_s_fields_are_used_where_it_is_encoded_or_parsed() {
     let row = "namespace Demo;\n\npublic struct Row\n{\n    public int id { get; init; }\n    public string name { get; init; }\n    public int unused => 0;\n}\n";
     let line = "namespace Demo;\n\npublic struct Line\n{\n    public int amount { get; init; }\n}\n";
     let item = "namespace Demo;\n\npublic struct Item\n{\n    public int cents { get; init; }\n}\n";
-    let wire = "namespace Other;\n\nimport Demo.Item;\nimport Demo.Line;\nimport Demo.Row;\nimport Sharp.Encoding.Json;\n\ninternal class Wire\n{\n    internal string sent(Row row) => Json.encode(row);\n\n    internal Line got(Map<string, Any?> input) => Line.parse(input);\n\n    internal List<Item> items(string text) => Json.decode<List<Item>>(text);\n}\n";
+    let wire = "namespace Other;\n\nimport Demo.Item;\nimport Demo.Line;\nimport Demo.Row;\nimport Sharp.Encoding.Json;\n\ninternal class Wire\n{\n    internal string sent(Row row) => Json.encode(row);\n\n    internal Line got(Map<string, Any?> input) => Line.parse(input).unwrap();\n\n    internal List<Item> items(string text) => Json.parse<List<Item>>(text).unwrap();\n}\n";
 
     assert_eq!(
         too_wide(&[
@@ -6557,10 +6557,15 @@ fn die_compact_extract_and_clone_are_functions_php_sharp_has_not() {
 }
 
 /// The standard library's `Int` and `Float`, with the library's signatures, which a project reads from `vendor/`.
-const LIBRARY_TYPE_CLASSES: [(&str, &str); 1] = [(
-    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Float.sharp",
-    include_str!("../../../../composer/library/Sharp/Float.sharp"),
-)];
+const LIBRARY_TYPE_CLASSES: [(&str, &str); 4] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Float.sharp",
+        include_str!("../../../../composer/library/Sharp/Float.sharp"),
+    ),
+    PARSE_LIBRARY[0],
+    PARSE_LIBRARY[1],
+    PARSE_LIBRARY[2],
+];
 
 /// The semantic checks let any file whose namespace is `Sharp` declare `Int`, `Float` and `Bool`, as the engine does,
 /// and only the analyzer knows the file is not the standard library's. So it refuses `namespace Sharp` and every
@@ -6575,7 +6580,7 @@ fn a_namespace_of_the_standard_library_in_a_project_file_is_a_reserved_name() {
     };
     let bool_class = (
         "src/Sharp/Bool.sharp",
-        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => null;\n}\n",
+        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? parse(Any? value) => null;\n}\n",
     );
     let int_enum = ("src/Sharp/Int.sharp", "namespace Sharp;\n\npublic enum Int\n{\n    case One;\n}\n");
     let [order_event, order_paid] = ORDER_EVENTS;
@@ -6702,8 +6707,8 @@ fn a_class_that_shares_its_full_name_with_a_namespace_is_an_error() {
 
 #[test]
 fn int_and_float_parse_have_the_types_of_the_sharp_library_classes() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int count(string text, string fallback)\n    {\n        const price = Float.parse(text) + (Float.tryParse(fallback) ?? 0.0);\n        const count = Int.parse(text) + (Int.tryParse(fallback) ?? 0);\n        return price > 1.0 ? count : Int.tryParse(text);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function count(string $text, string $fallback): int\n    {\n        $price = \\Sharp\\Float::parse($text) + (\\Sharp\\Float::tryParse($fallback) ?? 0.0);\n        $count = \\Sharp\\Int::parse($text) + (\\Sharp\\Int::tryParse($fallback) ?? 0);\n        return $price > 1.0 ? $count : \\Sharp\\Int::tryParse($text);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int count(string text, string fallback)\n    {\n        const price = Float.parse(text).unwrap() + (Float.parse(fallback).ok() ?? 0.0);\n        const count = Int.parse(text).unwrap() + (Int.parse(fallback).ok() ?? 0);\n        return price > 1.0 ? count : Int.parse(text).ok();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function count(string $text, string $fallback): int\n    {\n        $price = \\Sharp\\Float::parse($text)->unwrap() + (\\Sharp\\Float::parse($fallback)->ok() ?? 0.0);\n        $count = \\Sharp\\Int::parse($text)->unwrap() + (\\Sharp\\Int::parse($fallback)->ok() ?? 0);\n        return $price > 1.0 ? $count : \\Sharp\\Int::parse($text)->ok();\n    }\n}\n";
 
     // `check_throws` skips `.sharp` files, so the PHP twin is analyzed without it.
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &LIBRARY_TYPE_CLASSES);
@@ -17912,11 +17917,11 @@ fn a_struct_declares_a_built_in_backing_type_and_the_value_and_parse_its_stored_
         ),
         (
             "src/Demo/Spot.sharp",
-            "namespace Demo;\n\npublic struct Spot : int\n{\n    public Spot(public int x { get; }) { }\n\n    public static Spot parse(int value) => new Spot(value);\n}\n",
+            "namespace Demo;\n\npublic struct Spot : int\n{\n    public Spot(public int x { get; }) { }\n\n    public static Result<Spot, ParseError> parse(Any? value) => value is int x ? Result.Ok(new Spot(x)) : Result.Err(new ParseError([\"\": \"expected int\"]));\n}\n",
         ),
         (
             "src/Demo/Money.sharp",
-            "namespace Demo;\n\npublic class Money\n{\n    public Money(public int cents { get; }) { }\n\n    public static Money parse(string text) => new Money(Int.parse(text));\n\n    public string toString() => `${this.cents}`;\n}\n",
+            "namespace Demo;\n\npublic class Money\n{\n    public Money(public int cents { get; }) { }\n\n    public static Money parse(string text) => new Money(Int.parse(text).unwrap());\n\n    public string toString() => `${this.cents}`;\n}\n",
         ),
         (
             "src/Demo/Price.sharp",
@@ -17927,12 +17932,12 @@ fn a_struct_declares_a_built_in_backing_type_and_the_value_and_parse_its_stored_
         ("src/Demo/UserId.sharp", "namespace Demo;\n\npublic struct UserId : int\n{\n}\n"),
         (
             "src/Demo/Users.sharp",
-            "namespace Demo;\n\npublic static class Users\n{\n    public static int first() => new UserId(7).value;\n\n    public static UserId read() => UserId.parse(3);\n}\n",
+            "namespace Demo;\n\npublic static class Users\n{\n    public static int first() => new UserId(7).value;\n\n    public static UserId read() => UserId.parse(3).unwrap();\n}\n",
         ),
     ];
 
     assert_eq!(
-        each_file(reported, &sharp, &[]),
+        each_file(reported, &sharp, &PARSE_LIBRARY),
         [
             vec![],
             vec![],
@@ -17940,12 +17945,14 @@ fn a_struct_declares_a_built_in_backing_type_and_the_value_and_parse_its_stored_
                 "3:22 invalid-struct `Address` is a struct, and a struct is stored as `string`, `int`, `float` or `bool`."
             ],
             vec![
-                "3:15 invalid-struct `Point` has fields, so it declares `public static Point parse(string value)`, which builds it back from the `string` it is stored as."
+                "3:15 invalid-struct `Point` has fields, so it declares `public static Result<Point, ParseError> parse(Any? value)`, which builds it back from the `string` it is stored as."
             ],
             vec![
                 "3:15 invalid-struct `Spot` has fields, so it declares `public int value`, the `int` it is stored as."
             ],
-            vec![],
+            vec![
+                "7:25 invalid-parse `Money.parse` is `static Result<Money, ParseError> parse(Any? value)`: the engine reads each `Money` through it."
+            ],
             vec![
                 "5:25 invalid-struct `Money` has `parse(string)` and `toString()`, which store nothing: declare `: string` on it, with the `value` it is stored as and the `parse` that reads it back."
             ],
@@ -18144,7 +18151,7 @@ fn a_generic_struct_takes_its_type_arguments_for_equality_keys_and_parse() {
             "namespace Demo;\n\nstruct Pair<TFirst, TSecond>\n{\n    public Pair(public TFirst first { get; }, public TSecond second { get; }) { }\n\n    public TFirst left() => this.first;\n}\n",
         ),
     ];
-    let sharp = "namespace Demo;\n\nclass Compare\n{\n    public bool numbers(Pair<int, string> a, Pair<int, string> b) => a == b;\n\n    public bool plans(Pair<Plan, int> a, Pair<Plan, int> b) => a == b;\n\n    public int keyed(Map<Pair<int, string>, int> counts) => counts.count();\n\n    public int parsed(Map<string, Any> input) => Pair<int, string>.parse(input).first;\n\n    public string? tried(Map<string, Any> input) => Pair<int, string>.tryParse(input)?.second;\n\n    public int left(Pair<int, string> pair) => pair.left();\n\n    public Any spots(Map<string, Any> input) => Pair<Spot, int>.parse(input);\n\n    public Any maps(Map<string, Any> input) => Pair<Map<string, int>, int>.parse(input);\n\n    public Any sets(Map<string, Any> input) => Pair<List<Set<int>>, int>.parse(input);\n\n    public Any sizes(Map<string, Any> input) => Pair<Size, int>.parse(input);\n\n    public Any lists(Map<string, Any> input) => Pair<List<int>, string?>.parse(input);\n}\n";
+    let sharp = "namespace Demo;\n\nclass Compare\n{\n    public bool numbers(Pair<int, string> a, Pair<int, string> b) => a == b;\n\n    public bool plans(Pair<Plan, int> a, Pair<Plan, int> b) => a == b;\n\n    public int keyed(Map<Pair<int, string>, int> counts) => counts.count();\n\n    public int parsed(Map<string, Any> input) => Pair<int, string>.parse(input).unwrap().first;\n\n    public string? tried(Map<string, Any> input) => Pair<int, string>.parse(input).ok()?.second;\n\n    public int left(Pair<int, string> pair) => pair.left();\n\n    public Any spots(Map<string, Any> input) => Pair<Spot, int>.parse(input).unwrap();\n\n    public Any maps(Map<string, Any> input) => Pair<Map<string, int>, int>.parse(input).unwrap();\n\n    public Any sets(Map<string, Any> input) => Pair<List<Set<int>>, int>.parse(input).unwrap();\n\n    public Any sizes(Map<string, Any> input) => Pair<Size, int>.parse(input).unwrap();\n\n    public Any lists(Map<string, Any> input) => Pair<List<int>, string?>.parse(input).unwrap();\n}\n";
 
     let built = |line_column: &str, argument: &str| {
         format!(
@@ -18152,9 +18159,9 @@ fn a_generic_struct_takes_its_type_arguments_for_equality_keys_and_parse() {
         )
     };
 
-    assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 4]);
+    assert_eq!(each_file(issues, &declared, &PARSE_LIBRARY), vec![Vec::<String>::new(); 4]);
     assert_eq!(
-        worded(("src/Demo/Compare.sharp", sharp), &declared),
+        worded(("src/Demo/Compare.sharp", sharp), &[declared.as_slice(), PARSE_LIBRARY.as_slice()].concat()),
         [
             "7:64 invalid-operand `Pair` can't compare by value: `first` is a `Plan`, which declares no `operator ==`. | This is `Pair<Plan, int>`. | This is `Pair<Plan, int>`. | A struct compares by value, property by property, with each property's own `==`.".to_owned(),
             built("17:49", "Spot"),
@@ -18191,11 +18198,11 @@ fn a_struct_that_declares_equality_compares_and_keys_by_it() {
             "namespace Demo;\n\nstruct Cents\n{\n    public Cents(public int amount { get; }) { }\n\n    public static bool operator ==(Cents a, int amount) => a.amount == amount;\n\n    public int hash() => this.amount;\n\n    public bool costs(int amount) => this == amount;\n}\n",
         ),
     ];
-    let sharp = "namespace Demo;\n\nclass Rules\n{\n    protected Set<Rule> seen = [];\n    protected Map<Rule, int> counts = [:];\n    protected Map<Step, int> steps = [:];\n    protected Set<Hook> hooks = [];\n    protected Map<Hook, int> hooked = [:];\n\n    public bool same(Rule a, Rule b) => a == b;\n\n    public bool other(Rule a, Rule b) => a != b;\n\n    public bool hookSame(Hook a, Hook b) => a == b;\n\n    public bool identical(Rule a, Rule b) => a === b;\n\n    public int count(Rule rule)\n    {\n        this.counts[rule] = 1;\n        return this.counts[rule] ?? 0;\n    }\n\n    public bool has(List<Rule> rules, Rule rule) => rules.contains(rule);\n\n    public bool hasHook(List<Hook> hooks, Hook hook) => hooks.contains(hook);\n\n    public void group(List<Rule> rules)\n    {\n        const byRule = rules.groupBy(rule => rule);\n    }\n\n    public Rule read(Map<string, Any?> input) => Rule.parse(input);\n}\n";
+    let sharp = "namespace Demo;\n\nclass Rules\n{\n    protected Set<Rule> seen = [];\n    protected Map<Rule, int> counts = [:];\n    protected Map<Step, int> steps = [:];\n    protected Set<Hook> hooks = [];\n    protected Map<Hook, int> hooked = [:];\n\n    public bool same(Rule a, Rule b) => a == b;\n\n    public bool other(Rule a, Rule b) => a != b;\n\n    public bool hookSame(Hook a, Hook b) => a == b;\n\n    public bool identical(Rule a, Rule b) => a === b;\n\n    public int count(Rule rule)\n    {\n        this.counts[rule] = 1;\n        return this.counts[rule] ?? 0;\n    }\n\n    public bool has(List<Rule> rules, Rule rule) => rules.contains(rule);\n\n    public bool hasHook(List<Hook> hooks, Hook hook) => hooks.contains(hook);\n\n    public void group(List<Rule> rules)\n    {\n        const byRule = rules.groupBy(rule => rule);\n    }\n\n    public Rule read(Map<string, Any?> input) => Rule.parse(input).unwrap();\n}\n";
 
-    assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 4]);
+    assert_eq!(each_file(issues, &declared, &PARSE_LIBRARY), vec![Vec::<String>::new(); 4]);
     assert_eq!(
-        reported(("src/Demo/Rules.sharp", sharp), &declared),
+        reported(("src/Demo/Rules.sharp", sharp), &[declared.as_slice(), PARSE_LIBRARY.as_slice()].concat()),
         [
             "8:15 template-constraint-violation `Hook` can't be in a `Set`: `check` is a function.",
             "9:15 template-constraint-violation `Hook` can't key a `Map`: `check` is a function.",
@@ -18207,13 +18214,13 @@ fn a_struct_that_declares_equality_compares_and_keys_by_it() {
     );
 }
 
-/// Spec section 24: `Json.decode<T>` reads any type a field `parse` reads can hold, so each call gives its type argument
+/// Spec section 24: `Json.parse<T>` reads any type a field `parse` reads can hold, so each call gives its type argument
 /// the struct parse check: a field `parse` can't read is refused as `Rule.parse` refuses it, and a part no field can
 /// hold, as a function in a `List`, is refused. A struct, a generic struct with its type arguments and a `List<int>`
 /// compile. A class that doesn't exist is the unknown-class error alone, and the caller's own type parameter is the
 /// caller's to bound.
 #[test]
-fn json_decode_gives_its_type_argument_the_struct_parse_check() {
+fn json_parse_gives_its_type_argument_the_struct_parse_check() {
     let json = (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Json.sharp",
         include_str!("../../../../composer/library/Sharp/Encoding/Json.sharp"),
@@ -18229,15 +18236,18 @@ fn json_decode_gives_its_type_argument_the_struct_parse_check() {
         ),
         ("src/Demo/Box.sharp", "namespace Demo;\n\nstruct Box<T>\n{\n    public Box(public T value { get; }) { }\n}\n"),
     ];
-    let sharp = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\nclass Reader\n{\n    public Point point(string json) => Json.decode<Point>(json);\n\n    public Rule rule(string json) => Json.decode<Rule>(json);\n\n    public List<Function<void()>> checks(string json) => Json.decode<List<Function<void()>>>(json);\n\n    public Box<int> box(string json) => Json.decode<Box<int>>(json);\n\n    public List<int> numbers(string json) => Json.decode<List<int>>(json);\n\n    public Missing missing(string json) => Json.decode<Missing>(json);\n\n    public TRead read<TRead>(string json) => Json.decode<TRead>(json);\n}\n";
+    let sharp = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\nclass Reader\n{\n    public Point point(string json) => Json.parse<Point>(json).unwrap();\n\n    public Rule rule(string json) => Json.parse<Rule>(json).unwrap();\n\n    public List<Function<void()>> checks(string json) => Json.parse<List<Function<void()>>>(json).unwrap();\n\n    public Box<int> box(string json) => Json.parse<Box<int>>(json).unwrap();\n\n    public List<int> numbers(string json) => Json.parse<List<int>>(json).unwrap();\n\n    public Missing missing(string json) => Json.parse<Missing>(json).unwrap();\n\n    public TRead read<TRead>(string json) => Json.parse<TRead>(json).unwrap();\n}\n";
 
     assert_eq!(
-        reported(("src/Demo/Reader.sharp", sharp), &[json, declared[0], declared[1], declared[2]]),
+        reported(
+            ("src/Demo/Reader.sharp", sharp),
+            &[json, declared[0], declared[1], declared[2], PARSE_LIBRARY[0], PARSE_LIBRARY[1], PARSE_LIBRARY[2]]
+        ),
         [
             "9:38 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
-            "11:58 invalid-struct `Json.decode` can't read `List<Function<void()>>`: `Function<void()>` is a function.",
+            "11:58 invalid-struct `Json.parse` can't read `List<Function<void()>>`: `Function<void()>` is a function.",
             "17:12 non-existent-class-like Cannot find type `Demo.Missing`.",
-            "17:56 non-existent-class-like Cannot find type `Demo.Missing`.",
+            "17:55 non-existent-class-like Cannot find type `Demo.Missing`.",
         ]
     );
     assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 3]);
@@ -18285,15 +18295,15 @@ fn with_and_an_object_initializer_set_init_and_set_properties() {
     );
 }
 
-/// Spec section 10: every struct has a static `parse` and `tryParse`. `[Key]` renames the key a struct's main
+/// Spec section 10: every struct has a static `parse`, which gives a `Result`. `[Key]` renames the key a struct's main
 /// constructor parameter reads, and two fields may not read one key, which is refused where `parse` is called, so a
 /// struct nothing parses compiles. A bare `Key` is the standard attribute, spec
 /// section 23. A property the main constructor sets is read once, by
 /// the parameter of its name, or not at all. Any other property a parameter's key names is read twice, whether `[Key]`
 /// or the parameter's own name gives that key, and the help renames the parameter's key, which then compiles.
 /// A struct with a field no value can give, a pure enum or a function, also in a list or a nested struct, compiles, and
-/// its `parse` and `tryParse` are refused where they are called, while its other static methods are not. A struct that
-/// holds itself parses. A struct that declares its own `parse` reads no key, so none is read twice.
+/// its `parse` is refused where it is called, while its other static methods are not. A struct that holds itself
+/// parses. A struct that declares its own `parse` reads no key, so none is read twice.
 #[test]
 fn every_struct_parses() {
     let sharp = [
@@ -18308,7 +18318,7 @@ fn every_struct_parses() {
         ),
         (
             "src/Demo/Twice.sharp",
-            "namespace Demo;\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n\n    public static Twice read(Map<string, Any?> input) => Twice.parse(input);\n}\n",
+            "namespace Demo;\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n\n    public static Twice read(Map<string, Any?> input) => Twice.parse(input).unwrap();\n}\n",
         ),
         (
             "src/Demo/Feeling.sharp",
@@ -18336,15 +18346,15 @@ fn every_struct_parses() {
         ),
         (
             "src/Demo/Reads.sharp",
-            "namespace Demo;\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input);\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input);\n\n    public Feeling calm() => Feeling.calm();\n\n    public Temp temp(Map<string, Any?> input) => Temp.parse(input);\n\n    public Gauge gauge(Map<string, Any?> input) => Gauge.parse(input);\n}\n",
+            "namespace Demo;\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input).unwrap();\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.parse(input).ok();\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input).unwrap();\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.parse(input).ok();\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input).unwrap();\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input).unwrap();\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input).unwrap();\n\n    public Feeling calm() => Feeling.calm();\n\n    public Temp temp(Map<string, Any?> input) => Temp.parse(input).unwrap();\n\n    public Gauge gauge(Map<string, Any?> input) => Gauge.parse(input).unwrap();\n}\n",
         ),
         (
             "src/Demo/Clash.sharp",
-            "namespace Demo;\n\nstruct Clash\n{\n    public Clash([Key(\"y\")] public int x { get; }) { }\n\n    public int y { get; init; }\n\n    public static Clash read(Map<string, Any?> input) => Clash.parse(input);\n}\n",
+            "namespace Demo;\n\nstruct Clash\n{\n    public Clash([Key(\"y\")] public int x { get; }) { }\n\n    public int y { get; init; }\n\n    public static Clash read(Map<string, Any?> input) => Clash.parse(input).unwrap();\n}\n",
         ),
         (
             "src/Demo/Split.sharp",
-            "namespace Demo;\n\nstruct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Split read(Map<string, Any?> input) => Split.parse(input);\n}\n",
+            "namespace Demo;\n\nstruct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Split read(Map<string, Any?> input) => Split.parse(input).unwrap();\n}\n",
         ),
         (
             "src/Demo/Renamed.sharp",
@@ -18356,11 +18366,11 @@ fn every_struct_parses() {
         ),
         (
             "src/Demo/Reading.sharp",
-            "namespace Demo;\n\nstruct Reading\n{\n    public Reading(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Reading? parse(string text) => null;\n}\n",
+            "namespace Demo;\n\nstruct Reading\n{\n    public Reading(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Result<Reading, ParseError> parse(Any? value) => Result.Err(new ParseError([\"\": \"unread\"]));\n}\n",
         ),
     ];
     let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
-    let others = [("src/Sharp/Key.sharp", key)];
+    let others = [("src/Sharp/Key.sharp", key), PARSE_LIBRARY[0], PARSE_LIBRARY[1], PARSE_LIBRARY[2]];
     let helps = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
         analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().filter_map(|issue| issue.help).collect()
     };
@@ -18370,7 +18380,7 @@ fn every_struct_parses() {
         [
             "7:58 invalid-struct `code` is read twice in `Twice`: by the main constructor parameter `plan` and the main constructor parameter `code`.",
             "9:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
-            "11:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
+            "11:54 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
             "13:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
             "15:50 invalid-struct `Mind.parse` can't read `feeling`: `Mood` has no backing value.",
             "9:58 invalid-struct `y` is read twice in `Clash`: by the main constructor parameter `x` and the property `y`.",
@@ -18404,17 +18414,17 @@ fn a_property_the_parents_constructor_sets_through_super_is_read_by_the_paramete
         ),
         (
             "src/Demo/UploadTarget.sharp",
-            "namespace Demo;\n\npublic struct UploadTarget\n{\n    public UploadTarget(public Url url { get; }) { }\n\n    public static UploadTarget read(Map<string, Any?> input) => UploadTarget.parse(input);\n}\n",
+            "namespace Demo;\n\npublic struct UploadTarget\n{\n    public UploadTarget(public Url url { get; }) { }\n\n    public static UploadTarget read(Map<string, Any?> input) => UploadTarget.parse(input).unwrap();\n}\n",
         ),
     ];
 
-    assert_eq!(each_file(reported, &sharp, &[]).concat(), Vec::<String>::new());
+    assert_eq!(each_file(reported, &sharp, &PARSE_LIBRARY).concat(), Vec::<String>::new());
 }
 
 /// Spec section 10: a PHP# class that can be created parses the same way a struct does, as C#'s `System.Text.Json`
 /// reads a class. It reads the main constructor's parameters, a parameter that declares its property once, then each
 /// other stored property, a private one included, with the same `[Key]`, the same refusal of a key read twice and the same
-/// `tryParse`, and builds a nested class through that class's own `parse`. A class that declares its own `parse` keeps
+/// `Result`, and builds a nested class through that class's own `parse`. A class that declares its own `parse` keeps
 /// it, a class whose parent declares one inherits it, as a subclass of a plain PHP class does, and an abstract class
 /// has none, so `[Key]` on its constructor is refused as on any other parameter, and no key of it is read twice. A
 /// field `parse` can't build is refused where `parse` is called, with why: a function, an abstract class, an interface, a
@@ -18437,7 +18447,7 @@ fn a_class_parses_as_a_struct_does() {
         ),
         (
             "src/Demo/Bill.sharp",
-            "namespace Demo;\n\nclass Bill\n{\n    public Bill([Key(\"total\")] public int amount { get; }) { }\n\n    public int total { get; set; } = 0;\n\n    public static Bill read(Map<string, Any?> input) => Bill.parse(input);\n}\n",
+            "namespace Demo;\n\nclass Bill\n{\n    public Bill([Key(\"total\")] public int amount { get; }) { }\n\n    public int total { get; set; } = 0;\n\n    public static Bill read(Map<string, Any?> input) => Bill.parse(input).unwrap();\n}\n",
         ),
         (
             "src/Demo/Money.sharp",
@@ -18465,7 +18475,7 @@ fn a_class_parses_as_a_struct_does() {
         ),
         (
             "src/Demo/Reads.sharp",
-            "namespace Demo;\n\nclass Reads\n{\n    public Note note(Map<string, Any?> input) => Note.parse(input);\n\n    public Note? maybe(Map<string, Any?> input) => Note.tryParse(input);\n\n    public Letter letter(Map<string, Any?> input) => Letter.parse(input);\n\n    public Money money() => Money.parse(\"1\");\n\n    public Hook hook(Map<string, Any?> input) => Hook.parse(input);\n\n    public Drawing drawing(Map<string, Any?> input) => Drawing.parse(input);\n\n    public Badge badge(Map<string, Any?> input) => Badge.parse(input);\n\n    public Receipt receipt(Map<string, Any?> input) => Receipt.parse(input);\n\n    public Wallet wallet(Map<string, Any?> input) => Wallet.parse(input);\n\n    public void shape(Map<string, Any?> input)\n    {\n        Shape.parse(input);\n    }\n\n    public void keyed([Key(\"other\")] Map<string, Any?> input) { }\n}\n",
+            "namespace Demo;\n\nclass Reads\n{\n    public Note note(Map<string, Any?> input) => Note.parse(input).unwrap();\n\n    public Note? maybe(Map<string, Any?> input) => Note.parse(input).ok();\n\n    public Letter letter(Map<string, Any?> input) => Letter.parse(input).unwrap();\n\n    public Money money() => Money.parse(\"1\");\n\n    public Hook hook(Map<string, Any?> input) => Hook.parse(input).unwrap();\n\n    public Drawing drawing(Map<string, Any?> input) => Drawing.parse(input).unwrap();\n\n    public Badge badge(Map<string, Any?> input) => Badge.parse(input).unwrap();\n\n    public Receipt receipt(Map<string, Any?> input) => Receipt.parse(input).unwrap();\n\n    public Wallet wallet(Map<string, Any?> input) => Wallet.parse(input).unwrap();\n\n    public void shape(Map<string, Any?> input)\n    {\n        Shape.parse(input).unwrap();\n    }\n\n    public void keyed([Key(\"other\")] Map<string, Any?> input) { }\n}\n",
         ),
         (
             "src/Demo/Deadline.sharp",
@@ -18473,11 +18483,11 @@ fn a_class_parses_as_a_struct_does() {
         ),
         (
             "src/Demo/Holder.sharp",
-            "namespace Demo;\n\nclass Holder\n{\n    public Holder(public Object thing { get; }) { }\n\n    public static Holder held(Map<string, Any?> input) => Holder.parse(input);\n}\n",
+            "namespace Demo;\n\nclass Holder\n{\n    public Holder(public Object thing { get; }) { }\n\n    public static Holder held(Map<string, Any?> input) => Holder.parse(input).unwrap();\n}\n",
         ),
         (
             "src/Demo/Gate.sharp",
-            "namespace Demo;\n\nclass Gate\n{\n    public Gate(public int id { get; }) { }\n\n    private Function<bool(int)> check = (int x) => x > 0;\n\n    public bool opens(int x) => this.check(x);\n\n    public static Gate read(Map<string, Any?> input) => Gate.parse(input);\n}\n",
+            "namespace Demo;\n\nclass Gate\n{\n    public Gate(public int id { get; }) { }\n\n    private Function<bool(int)> check = (int x) => x > 0;\n\n    public bool opens(int x) => this.check(x);\n\n    public static Gate read(Map<string, Any?> input) => Gate.parse(input).unwrap();\n}\n",
         ),
     ];
     let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
@@ -18485,6 +18495,9 @@ fn a_class_parses_as_a_struct_does() {
     let others = [
         ("src/Sharp/Key.sharp", key),
         ("src/Lib/Stamp.php", php),
+        PARSE_LIBRARY[0],
+        PARSE_LIBRARY[1],
+        PARSE_LIBRARY[2],
         (
             "src/Lib/Clock.php",
             "<?php namespace Lib; class Clock { public static function parse(string $text): static { return new static(); } }",
@@ -18496,6 +18509,7 @@ fn a_class_parses_as_a_struct_does() {
         [
             "5:19 invalid-struct `Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
             "9:57 invalid-struct `total` is read twice in `Bill`: by the main constructor parameter `amount` and the property `total`.",
+            "7:25 invalid-parse `Money.parse` is `static Result<Money, ParseError> parse(Any? value)`: the engine reads each `Money` through it.",
             "13:50 invalid-struct `Hook.parse` can't read `check`: `Function<bool(int)>` is a function.",
             "15:56 invalid-struct `Drawing.parse` can't read `shape`: `Shape` is abstract.",
             "17:52 invalid-struct `Badge.parse` can't read `owner`: `Named` is an interface.",
@@ -18509,12 +18523,12 @@ fn a_class_parses_as_a_struct_does() {
     );
 }
 
-/// Spec section 10: a key two fields of a class's stored form read is refused where `Json.encode` or `Json.decode` of
+/// Spec section 10: a key two fields of a class's stored form read is refused where `Json.encode` or `Json.parse<T>` of
 /// the class is called, also inside a collection, at the call, and a class that nothing stores compiles.
 #[test]
 fn a_key_read_twice_is_refused_where_the_class_is_stored() {
     let label = "namespace Demo;\n\nclass Label\n{\n    public Label(public string text { get; }, string tone) { this.shade = tone; }\n\n    private string tone = \"\";\n\n    public string shade { get; private set; } = \"\";\n\n    public string mood() => this.tone;\n}\n";
-    let wire = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\nclass Wire\n{\n    public string sent(Label label) => Json.encode(label);\n\n    public List<Label> got(string text) => Json.decode<List<Label>>(text);\n}\n";
+    let wire = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\nclass Wire\n{\n    public string sent(Label label) => Json.encode(label);\n\n    public List<Label> got(string text) => Json.parse<List<Label>>(text).unwrap();\n}\n";
     let files = [("src/Demo/Label.sharp", label), ("src/Demo/Wire.sharp", wire)];
 
     assert_eq!(each_file(reported, &files[..1], &[JSON, JSON_VALUE]).concat(), Vec::<String>::new());
@@ -18528,13 +18542,19 @@ fn a_key_read_twice_is_refused_where_the_class_is_stored() {
 }
 
 /// Spec section 10: a field whose type is a union of scalars holds plain data, which JSON and a stored row carry, so
-/// `parse` and `Json.decode<T>` read it, trying each member in the order the field writes them: every one of `string`,
+/// `parse` and `Json.parse<T>` read it, trying each member in the order the field writes them: every one of `string`,
 /// `int`, `float` and `bool`, nullable, and `int` with `string`.
 #[test]
 fn a_struct_parse_reads_a_field_of_a_union_of_scalars() {
-    let property = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\npublic struct ComponentProperty\n{\n    public ComponentProperty(public (string|int|float|bool)? default { get; }, public int|string size { get; } = 0) { }\n\n    public static ComponentProperty read(Map<string, Any?> input) => ComponentProperty.parse(input);\n\n    public static ComponentProperty decoded(string json) => Json.decode<ComponentProperty>(json);\n}\n";
+    let property = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\npublic struct ComponentProperty\n{\n    public ComponentProperty(public (string|int|float|bool)? default { get; }, public int|string size { get; } = 0) { }\n\n    public static ComponentProperty read(Map<string, Any?> input) => ComponentProperty.parse(input).unwrap();\n\n    public static ComponentProperty decoded(string json) => Json.parse<ComponentProperty>(json).unwrap();\n}\n";
 
-    assert_eq!(reported(("src/Demo/ComponentProperty.sharp", property), &[JSON]), Vec::<String>::new());
+    assert_eq!(
+        reported(
+            ("src/Demo/ComponentProperty.sharp", property),
+            &[JSON, PARSE_LIBRARY[0], PARSE_LIBRARY[1], PARSE_LIBRARY[2]]
+        ),
+        Vec::<String>::new()
+    );
 }
 
 /// `\Sharp\Struct` is the engine interface the bridge gives each struct, spec section 10, and no PHP# type, so a
@@ -21099,7 +21119,7 @@ fn a_required_named_constructor_passes_down() {
     let compiled = [
         (
             "src/Demo/Record.sharp",
-            "namespace Demo;\n\npublic class Record\n{\n    public Record() { }\n\n    public required Record.fromJson(string json) : this() { }\n\n    public static Record parse(string json) => new Self.fromJson(json);\n}\n",
+            "namespace Demo;\n\npublic class Record\n{\n    public Record() { }\n\n    public required Record.fromJson(string json) : this() { }\n\n    public static Record read(string json) => new Self.fromJson(json);\n}\n",
         ),
         (
             "src/Demo/Entity.sharp",
@@ -21120,7 +21140,7 @@ fn a_required_named_constructor_passes_down() {
     ];
     let plain = (
         "src/Demo/Plain.sharp",
-        "namespace Demo;\n\npublic class Plain\n{\n    public Plain() { }\n\n    public Plain.fromJson(string json) : this() { }\n\n    public static Plain parse() => new Self.fromJson(\"{}\");\n}\n",
+        "namespace Demo;\n\npublic class Plain\n{\n    public Plain() { }\n\n    public Plain.fromJson(string json) : this() { }\n\n    public static Plain read() => new Self.fromJson(\"{}\");\n}\n",
     );
 
     assert_eq!(each_file(messages, &compiled, &[plain]), vec![Vec::<String>::new(); 5]);
@@ -21128,7 +21148,7 @@ fn a_required_named_constructor_passes_down() {
         plain,
         &compiled,
         &[
-            "9:36 unsafe-instantiation: `new Self.fromJson(…)` needs a `required` named constructor: `Self` can be any subclass of `Plain`, so every subclass must declare a `fromJson` that `new Self.fromJson(…)` can call.",
+            "9:35 unsafe-instantiation: `new Self.fromJson(…)` needs a `required` named constructor: `Self` can be any subclass of `Plain`, so every subclass must declare a `fromJson` that `new Self.fromJson(…)` can call.",
         ],
     );
 }
@@ -33198,29 +33218,48 @@ const READING: [(&str, &str); 2] = [
     ),
 ];
 
-/// A reader of `app/Shop/{name}.sharp` that implements `interface` with `decode`, a `typeof(…).decode(row)` call.
-fn decoding(name: &str, interface: &str, decode: &str) -> (&'static str, &'static str) {
+/// A reader of `app/Shop/{name}.sharp` that implements `interface` with `parse`, a `typeof(…).parse(row)` call.
+fn parsing(name: &str, interface: &str, parse: &str) -> (&'static str, &'static str) {
     (
         leak(format!("app/Shop/{name}.sharp")),
         leak(format!(
-            "namespace App.Shop;\n\npublic class {name} : {interface}\n{{\n    public Any? read(Any? row) => {decode};\n}}\n"
+            "namespace App.Shop;\n\npublic class {name} : {interface}\n{{\n    public Any? read(Any? row) => {parse};\n}}\n"
         )),
     )
 }
 
-/// Spec sections 10, 25 and 29: `decode` runs the reader of the class its class value holds, its `parse`, which runs
-/// its constructor, so a pure method that decodes a `Saved`, whose `required` constructor writes to the database, is
+/// Spec sections 10, 25 and 29: `Class<T>.parse` runs the reader of the class its class value holds, its own `parse`,
+/// which runs its constructor, so a pure method that parses a `Saved`, whose `required` constructor writes to the database, is
 /// refused as `new Saved()` is, and one whose `uses` lists `Database` compiles.
 #[test]
-fn decode_has_the_effects_of_the_reader_it_runs() {
-    let pure = decoding("SavedReader", "Reading", "typeof(Saved).decode(row)");
-    let storing = decoding("StoredReader", "Storing", "typeof(Saved).decode(row)");
+fn class_parse_has_the_effects_of_the_reader_it_runs() {
+    let pure = parsing("SavedReader", "Reading", "typeof(Saved).parse(row).unwrap()");
+    let storing = parsing("StoredReader", "Storing", "typeof(Saved).parse(row).unwrap()");
     let [disk, stub, saved, note] = BUILT;
     let [reading, storing_interface] = READING;
     let [a, b, c, d, e, f, g] = REFLECTION;
 
     assert_eq!(
-        effect_issues(&[pure, storing, reading, storing_interface, disk, stub, saved, note, a, b, c, d, e, f, g]),
+        effect_issues(&[
+            pure,
+            storing,
+            reading,
+            storing_interface,
+            disk,
+            stub,
+            saved,
+            note,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+            PARSE_LIBRARY[0],
+            PARSE_LIBRARY[1],
+            PARSE_LIBRARY[2]
+        ]),
         [
             "app/Shop/SavedReader.sharp:5:35 incompatible-effects: `SavedReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
         ]
@@ -33233,22 +33272,39 @@ const MEMO: (&str, &str) = (
     "namespace App.Shop;\n\npublic final class Memo\n{\n    public Memo(public string text { get; }) { }\n}\n",
 );
 
-/// Spec section 29: no class extends a `final` class, so `decode` of it runs its own reader alone, and one with no
+/// Spec section 29: no class extends a `final` class, so `parse` of it runs its own reader alone, and one with no
 /// effect keeps a pure method pure.
 #[test]
-fn decode_of_a_final_class_with_no_effects_is_pure() {
-    let memo_reader = decoding("MemoReader", "Reading", "typeof(Memo).decode(row)");
+fn class_parse_of_a_final_class_with_no_effects_is_pure() {
+    let memo_reader = parsing("MemoReader", "Reading", "typeof(Memo).parse(row).unwrap()");
     let [reading, _] = READING;
     let [a, b, c, d, e, f, g] = REFLECTION;
 
-    assert_eq!(effect_issues(&[memo_reader, MEMO, reading, a, b, c, d, e, f, g]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[
+            memo_reader,
+            MEMO,
+            reading,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+            PARSE_LIBRARY[0],
+            PARSE_LIBRARY[1],
+            PARSE_LIBRARY[2]
+        ]),
+        Vec::<String>::new()
+    );
 }
 
 /// Spec section 29: an open class whose constructor is not `required` may be any subclass whose constructor differs, so
-/// `decode` of it may have every effect, as `createInstance` may. Once the class is `final` its reader is known.
+/// `parse` of it may have every effect, as `createInstance` may. Once the class is `final` its reader is known.
 #[test]
-fn decode_of_an_open_class_may_have_every_effect() {
-    let ledger_reader = decoding("LedgerReader", "Reading", "typeof(Ledger).decode(row)");
+fn class_parse_of_an_open_class_may_have_every_effect() {
+    let ledger_reader = parsing("LedgerReader", "Reading", "typeof(Ledger).parse(row).unwrap()");
     let open = (
         "app/Shop/Ledger.sharp",
         "namespace App.Shop;\n\npublic class Ledger\n{\n    public Ledger(public int total { get; }) { }\n}\n",
@@ -33261,19 +33317,50 @@ fn decode_of_an_open_class_may_have_every_effect() {
     let [a, b, c, d, e, f, g] = REFLECTION;
 
     assert_eq!(
-        effect_issues(&[ledger_reader, open, reading, a, b, c, d, e, f, g]),
+        effect_issues(&[
+            ledger_reader,
+            open,
+            reading,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+            PARSE_LIBRARY[0],
+            PARSE_LIBRARY[1],
+            PARSE_LIBRARY[2]
+        ]),
         [
-            "app/Shop/LedgerReader.sharp:5:35 incompatible-effects: `LedgerReader.read` reaches `ClassMembers.decode`, which may have every effect, so the pure `Reading.read` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects."
+            "app/Shop/LedgerReader.sharp:5:35 incompatible-effects: `LedgerReader.read` reaches `ClassMembers.parse`, which may have every effect, so the pure `Reading.read` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects."
         ]
     );
-    assert_eq!(effect_issues(&[ledger_reader, closed, reading, a, b, c, d, e, f, g]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[
+            ledger_reader,
+            closed,
+            reading,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+            PARSE_LIBRARY[0],
+            PARSE_LIBRARY[1],
+            PARSE_LIBRARY[2]
+        ]),
+        Vec::<String>::new()
+    );
 }
 
-/// Spec section 10: a family's `parse` reads one of its declared variants, so `decode` of the family has the effects of
-/// each variant's reader, and a variant whose constructor writes to the database makes a pure method's `decode` of the
+/// Spec section 10: a family's `parse` reads one of its declared variants, so `Class<T>.parse` of the family has the
+/// effects of each variant's reader, and a variant whose constructor writes to the database makes a pure method's parse of the
 /// family refused.
 #[test]
-fn decode_of_a_family_has_its_variants_readers_effects() {
+fn class_parse_of_a_family_has_its_variants_readers_effects() {
     let entry =
         ("app/Shop/Entry.sharp", "namespace App.Shop;\n\n[Tag(\"type\")]\npublic sealed interface Entry\n{\n}\n");
     let stored = (
@@ -33284,32 +33371,70 @@ fn decode_of_a_family_has_its_variants_readers_effects() {
         "app/Shop/NotedEntry.sharp",
         "namespace App.Shop;\n\n[Key(\"noted\")]\npublic final class NotedEntry : Entry\n{\n    public NotedEntry(public string text { get; }) { }\n}\n",
     );
-    let entry_reader = decoding("EntryReader", "Reading", "typeof(Entry).decode(row)");
+    let entry_reader = parsing("EntryReader", "Reading", "typeof(Entry).parse(row).unwrap()");
     let [disk, stub, _, _] = BUILT;
     let [reading, _] = READING;
     let [a, b, c, d, e, f, g] = REFLECTION;
 
     assert_eq!(
-        effect_issues(&[entry_reader, entry, stored, noted, reading, disk, stub, a, b, c, d, e, f, g]),
+        effect_issues(&[
+            entry_reader,
+            entry,
+            stored,
+            noted,
+            reading,
+            disk,
+            stub,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+            PARSE_LIBRARY[0],
+            PARSE_LIBRARY[1],
+            PARSE_LIBRARY[2]
+        ]),
         [
             "app/Shop/EntryReader.sharp:5:35 incompatible-effects: `EntryReader.read` reaches `StoredEntry.StoredEntry`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
         ]
     );
 }
 
-/// Spec sections 10 and 29: a type that is no class runs only the readers of the classes inside it, so `decode` of a
-/// `List<Memo>` or of an `int` keeps a pure method pure, and `decode` of a `List<Saved>` has `Saved`'s reader's effects.
+/// Spec sections 10 and 29: a type that is no class runs only the readers of the classes inside it, so `parse` of a
+/// `List<Memo>` or of an `int` keeps a pure method pure, and `parse` of a `List<Saved>` has `Saved`'s reader's effects.
 #[test]
-fn decode_of_a_list_takes_its_elements_readers_effects() {
-    let memos = decoding("MemosReader", "Reading", "typeof(List<Memo>).decode(row)");
-    let count = decoding("CountReader", "Reading", "typeof(int).decode(row)");
-    let saved_list = decoding("SavedListReader", "Reading", "typeof(List<Saved>).decode(row)");
+fn class_parse_of_a_list_takes_its_elements_readers_effects() {
+    let memos = parsing("MemosReader", "Reading", "typeof(List<Memo>).parse(row).unwrap()");
+    let count = parsing("CountReader", "Reading", "typeof(int).parse(row).unwrap()");
+    let saved_list = parsing("SavedListReader", "Reading", "typeof(List<Saved>).parse(row).unwrap()");
     let [disk, stub, saved, note] = BUILT;
     let [reading, _] = READING;
     let [a, b, c, d, e, f, g] = REFLECTION;
 
     assert_eq!(
-        effect_issues(&[memos, count, saved_list, MEMO, reading, disk, stub, saved, note, a, b, c, d, e, f, g]),
+        effect_issues(&[
+            memos,
+            count,
+            saved_list,
+            MEMO,
+            reading,
+            disk,
+            stub,
+            saved,
+            note,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+            PARSE_LIBRARY[0],
+            PARSE_LIBRARY[1],
+            PARSE_LIBRARY[2]
+        ]),
         [
             "app/Shop/SavedListReader.sharp:5:35 incompatible-effects: `SavedListReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
         ]
@@ -33817,7 +33942,7 @@ fn a_twin_of_a_default_class_in_the_namespace_leaves_the_default_class() {
 }
 
 /// Spec sections 10 and 24: a struct names its members as declared, so a `Parse` of its own leaves it the generated
-/// `parse` and `tryParse`, and a call of `Parse` is no call of the generated pair.
+/// `parse`, and a call of `Parse` is no call of it.
 #[test]
 fn a_struct_s_own_parse_twin_keeps_the_generated_parse() {
     let spot = (
@@ -33826,10 +33951,10 @@ fn a_struct_s_own_parse_twin_keeps_the_generated_parse() {
     );
     let reads = (
         "src/Reads.sharp",
-        "namespace Demo;\n\nclass Reads\n{\n    public Spot read(Map<string, Any?> input) => Spot.parse(input);\n\n    public Spot? tried(Map<string, Any?> input) => Spot.tryParse(input);\n\n    public Spot text() => Spot.Parse(\"1\");\n}\n",
+        "namespace Demo;\n\nclass Reads\n{\n    public Spot read(Map<string, Any?> input) => Spot.parse(input).unwrap();\n\n    public Spot? tried(Map<string, Any?> input) => Spot.parse(input).ok();\n\n    public Spot text() => Spot.Parse(\"1\");\n}\n",
     );
 
-    assert_eq!(messages(reads, &[spot]), Vec::<String>::new());
+    assert_eq!(messages(reads, &[spot, PARSE_LIBRARY[0], PARSE_LIBRARY[1], PARSE_LIBRARY[2]]), Vec::<String>::new());
 }
 
 /// Spec section 24: a PHP# enum keys its methods by their declared names, so a `Cases` its interface declares is no
@@ -36030,6 +36155,9 @@ fn json_encode_refuses_a_map_keyed_by_an_object_stored_as_no_int_or_string() {
     let shapes = [
         JSON,
         JSON_VALUE,
+        PARSE_LIBRARY[0],
+        PARSE_LIBRARY[1],
+        PARSE_LIBRARY[2],
         (
             "app/Shop/Point.sharp",
             "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n",
@@ -36048,7 +36176,7 @@ fn json_encode_refuses_a_map_keyed_by_an_object_stored_as_no_int_or_string() {
     );
     let point = "invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` is stored as no `int` or `string`. | Back `Point` by `string` or `int`, as `: string` after its name, or encode a `Map` keyed by text.";
 
-    assert_eq!(worded(JSON, &[JSON_VALUE]), Vec::<String>::new());
+    assert_eq!(worded(JSON, &[JSON_VALUE, PARSE_LIBRARY[0], PARSE_LIBRARY[1], PARSE_LIBRARY[2]]), Vec::<String>::new());
     assert_eq!(
         refusals(report, &shapes),
         [
@@ -37888,6 +38016,22 @@ const RESULT_LIBRARY: [(&str, &str); 2] = [
     ),
 ];
 
+/// The standard library's `Result`, `Error` and `ParseError`, which every `parse` gives, spec sections 10 and 31.
+const PARSE_LIBRARY: [(&str, &str); 3] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Result.sharp",
+        include_str!("../../../../composer/library/Sharp/Result.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Error.sharp",
+        include_str!("../../../../composer/library/Sharp/Error.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ParseError.sharp",
+        include_str!("../../../../composer/library/Sharp/ParseError.sharp"),
+    ),
+];
+
 /// The failure type and the gateway the section 31 tests share.
 const PAYMENTS: [(&str, &str); 3] = [
     (
@@ -37923,6 +38067,61 @@ fn a_statement_that_discards_a_result_is_refused() {
         refusals(("src/App/Checkout.sharp", code), &payments()),
         [refused(9, "this.gateway.charge"), refused(12, "Result<int, PaymentError>.Ok")]
     );
+}
+
+/// Spec sections 10, 24 and 31, as Rust's `str::parse`: every `parse` gives a `Result<T, ParseError>`, so the failure is
+/// matched as a value, and a statement that drops it is refused. The `tryParse` beside each `parse` and `Json.decode` are
+/// gone, so a call of either is the ordinary missing member, and `tryParse`'s help names `parse(…).ok()`. A type's own
+/// `parse` is `static Result<Self, ParseError> parse(Any? value)`, and any other `parse` it declares is refused.
+#[test]
+fn parse_gives_a_result_and_its_try_twin_is_gone() {
+    let library = "vendor/heyjordanparker/php-sharp-composer/library/Sharp";
+    let parse_error = format!("{library}/ParseError.sharp");
+    let int = format!("{library}/Int.sharp");
+    let decimal = format!("{library}/Decimal.sharp");
+    let json = format!("{library}/Encoding/Json.sharp");
+    let others: Vec<(&'static str, &'static str)> = RESULT_LIBRARY
+        .iter()
+        .copied()
+        .chain([
+            (
+                parse_error.leak() as &str,
+                "namespace Sharp;\n\npublic class ParseError : Error\n{\n    public ParseError(public Map<string, string> fields { get; }) { }\n\n    public string message => \"\";\n}\n",
+            ),
+            (
+                int.leak() as &str,
+                "namespace Sharp;\n\npublic static class Int\n{\n    public static Result<int, ParseError> parse(string text) => Result.Err(new ParseError([\"\": text]));\n}\n",
+            ),
+            (
+                decimal.leak() as &str,
+                "namespace Sharp;\n\npublic struct Decimal\n{\n    public Decimal(public string value { get; }) { }\n\n    public static Result<Decimal, ParseError> parse(string text) => Result.Ok(new Decimal(text));\n}\n",
+            ),
+            (
+                json.leak() as &str,
+                "namespace Sharp.Encoding;\n\npublic static class Json\n{\n    public static Result<T, ParseError> parse<T>(string json) => Result.Err(new ParseError([\"\": json]));\n}\n",
+            ),
+            ("src/App/Invoice.sharp", "namespace App;\n\npublic struct Invoice\n{\n    public Invoice(public int id { get; }) { }\n}\n"),
+        ])
+        .collect();
+    let reads = "namespace App;\n\nimport Sharp.Encoding.Json;\n\nclass Reads\n{\n    public string? amountError(string input) => match (Decimal.parse(input)) {\n        Result.Ok(Decimal amount) => null,\n        Result.Err(ParseError error) => error.message,\n    };\n\n    public void dropped(string input)\n    {\n        Int.parse(input);\n    }\n\n    public int? tried(string input) => Int.tryParse(input);\n\n    public Invoice decoded(string body) => Json.decode<Invoice>(body);\n}\n";
+    let own = "namespace App;\n\npublic struct Stamp\n{\n    public Stamp(public int at { get; }) { }\n\n    public static Stamp parse(string text) => new Stamp(1);\n}\n";
+    let kept = "namespace App;\n\npublic struct Mark\n{\n    public Mark(public int at { get; }) { }\n\n    public static Result<Mark, ParseError> parse(Any? value) => value is int at ? Result.Ok(new Mark(at)) : Result.Err(new ParseError([\"\": \"expected int\"]));\n}\n";
+
+    assert_eq!(
+        refusals(("src/App/Reads.sharp", reads), &others),
+        [
+            "14:9 discarded-result `Int.parse` returns a Result: handle it with try, match, ok() or unwrap(). | A dropped Result loses its failure: pass it up with `try`, or keep the Result in a `const`.",
+            "17:44 non-existent-method Method `Int.tryParse` does not exist. | `Int.parse(…).ok()` gives `int?`.",
+            "19:49 non-existent-method Method `Json.decode` does not exist. | Ensure the method `Json.decode` is defined.",
+        ]
+    );
+    assert_eq!(
+        refusals(("src/App/Stamp.sharp", own), &others),
+        [
+            "7:25 invalid-parse `Stamp.parse` is `static Result<Stamp, ParseError> parse(Any? value)`: the engine reads each `Stamp` through it. | Declare `public static Result<Stamp, ParseError> parse(Any? value)`, and return `Result.Err(new ParseError([\"\": problem]))` where the value can't be read, or give a method of another job another name."
+        ]
+    );
+    assert_eq!(refusals(("src/App/Mark.sharp", kept), &others), Vec::<String>::new());
 }
 
 /// Spec section 31: `try` gives the `Ok` value, and on `Err` the method returns an `Err` holding the same error. It is a
@@ -38471,10 +38670,13 @@ fn a_struct_reads_a_value_as_text_and_a_json_value_through_their_own_parse() {
     );
     let wallet = (
         "app/Shop/Wallet.sharp",
-        "namespace App.Shop;\n\nimport Sharp.Decimal;\nimport Sharp.Encoding.JsonValue;\n\npublic struct Wallet\n{\n    public Wallet(public Decimal amount { get; }, public JsonValue extra { get; }) { }\n\n    public static Wallet read(Map<string, Any?> input) => Wallet.parse(input);\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Decimal;\nimport Sharp.Encoding.JsonValue;\n\npublic struct Wallet\n{\n    public Wallet(public Decimal amount { get; }, public JsonValue extra { get; }) { }\n\n    public static Wallet read(Map<string, Any?> input) => Wallet.parse(input).unwrap();\n}\n",
     );
 
-    assert_eq!(refusals(wallet, &[decimal, rounding, JSON, JSON_VALUE]), Vec::<String>::new());
+    assert_eq!(
+        refusals(wallet, &[decimal, rounding, JSON, JSON_VALUE, PARSE_LIBRARY[0], PARSE_LIBRARY[1], PARSE_LIBRARY[2]]),
+        Vec::<String>::new()
+    );
 }
 
 /// Spec section 10: an enum whose cases carry data, marked `[Tag]`, is a family whose `[Key]` cases are its variants,
@@ -38489,7 +38691,7 @@ fn a_family_enum_reads_its_cases_by_name_and_tag_and_key_go_only_on_a_family() {
     );
     let code = (
         "app/Shop/Code.sharp",
-        "namespace App.Shop;\n\npublic struct Code\n{\n    private Code(private string text { get; }) { }\n\n    public static Code parse(string text) => new Code(text);\n\n    public string toString() => this.text;\n}\n",
+        "namespace App.Shop;\n\npublic struct Code\n{\n    private Code(private string text { get; }) { }\n\n    public static Result<Code, ParseError> parse(Any? value) => value is string text ? Result.Ok(new Code(text)) : Result.Err(new ParseError([\"\": \"expected string\"]));\n\n    public string toString() => this.text;\n}\n",
     );
     let plain = (
         "app/Shop/Plain.sharp",
@@ -38501,11 +38703,14 @@ fn a_family_enum_reads_its_cases_by_name_and_tag_and_key_go_only_on_a_family() {
     );
     let report = (
         "app/Shop/Report.sharp",
-        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class Report\n{\n    public static Outcome read(Map<string, Any?> input) => Outcome.parse(input);\n\n    public static string code(Code code) => Json.encode(code);\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class Report\n{\n    public static Outcome read(Map<string, Any?> input) => Outcome.parse(input).unwrap();\n\n    public static string code(Code code) => Json.encode(code);\n}\n",
     );
 
-    assert_eq!(refusals(result, &[KEY, TAG, JSON, JSON_VALUE]), Vec::<String>::new());
-    assert_eq!(refusals(code, &[]), Vec::<String>::new());
+    assert_eq!(
+        refusals(result, &[KEY, TAG, JSON, JSON_VALUE, PARSE_LIBRARY[0], PARSE_LIBRARY[1], PARSE_LIBRARY[2]]),
+        Vec::<String>::new()
+    );
+    assert_eq!(refusals(code, &PARSE_LIBRARY), Vec::<String>::new());
     assert_eq!(
         refusals(plain, &[TAG]),
         [
@@ -38519,7 +38724,10 @@ fn a_family_enum_reads_its_cases_by_name_and_tag_and_key_go_only_on_a_family() {
         ]
     );
     assert_eq!(
-        refusals(report, &[KEY, TAG, JSON, JSON_VALUE, result, code]),
+        refusals(
+            report,
+            &[KEY, TAG, JSON, JSON_VALUE, result, code, PARSE_LIBRARY[0], PARSE_LIBRARY[1], PARSE_LIBRARY[2]]
+        ),
         ["7:60 invalid-struct `Outcome.parse` can't read `Hooked.run`: `Function<int()>` is a function. | "]
     );
 }
@@ -38821,7 +39029,7 @@ fn an_internal_move_of_a_case_reaches_the_namespace_its_machine_is_declared_in()
 }
 
 /// Spec sections 10 and 20.2: a machine marked `[Tag]` is a family whose cases are its variants, so `Json.encode`
-/// writes a case and `Json.decode` reads one as a family's variant. A backed machine's values name its cases, so a
+/// writes a case and `Json.parse<T>` reads one as a family's variant. A backed machine's values name its cases, so a
 /// `[Key]` on its case is refused, naming the value, and a machine with no backing names each case with `[Key]`.
 #[test]
 fn a_tagged_machine_reads_and_writes_its_cases_as_a_family() {
@@ -38839,7 +39047,7 @@ fn a_tagged_machine_reads_and_writes_its_cases_as_a_family() {
     );
     let stored = (
         "src/Shop/Stored.sharp",
-        "namespace Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class Stored\n{\n    public static string encode(OrderStatus status) => Json.encode(status);\n\n    public static OrderStatus decode(string json) => Json.decode<OrderStatus>(json);\n}\n",
+        "namespace Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class Stored\n{\n    public static string encode(OrderStatus status) => Json.encode(status);\n\n    public static OrderStatus decode(string json) => Json.parse<OrderStatus>(json).unwrap();\n}\n",
     );
 
     assert_eq!(refusals(status, &[KEY, TAG]), Vec::<String>::new());

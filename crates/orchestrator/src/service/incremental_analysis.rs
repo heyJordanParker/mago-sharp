@@ -5049,8 +5049,8 @@ mod tests {
     }
 
     /// The standard library's reflection classes, whose `attributes<T>()` and `defaultValue()` read the whole program,
-    /// and its `Json`, whose `decode<T>()` takes a type argument and reads no attributes.
-    const LIBRARY: [(&str, &str); 9] = [
+    /// and its `Json`, whose `parse<T>()` takes a type argument, reads no attributes and gives a `Result`.
+    const LIBRARY: [(&str, &str); 12] = [
         (
             "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ClassMembers.sharp",
             include_str!("../../../../../composer/library/Sharp/ClassMembers.sharp"),
@@ -5086,6 +5086,18 @@ mod tests {
         (
             "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/JsonValue.sharp",
             include_str!("../../../../../composer/library/Sharp/Encoding/JsonValue.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Result.sharp",
+            include_str!("../../../../../composer/library/Sharp/Result.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Error.sharp",
+            include_str!("../../../../../composer/library/Sharp/Error.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ParseError.sharp",
+            include_str!("../../../../../composer/library/Sharp/ParseError.sharp"),
         ),
     ];
 
@@ -5123,14 +5135,14 @@ mod tests {
     /// Spec sections 1 and 25: `attributes<Column>()` of a PHP# attribute class is pure only while no plain PHP class
     /// extends `Column`, so a plain PHP descendant added in another file refuses the pure caller in a watch, as a full
     /// analysis refuses it, though the caller's file is unchanged. A call that takes a class as its type argument and
-    /// reads no attributes, as `Json.decode<Order>()`, keeps its file unanalyzed when the class gains a descendant.
+    /// reads no attributes, as `Json.parse<Order>()`, keeps its file unanalyzed when the class gains a descendant.
     #[test]
     fn test_watch_a_plain_descendant_of_an_attribute_class_refuses_its_pure_reader() {
         let column = "namespace App;\n\n[Attribute]\npublic class Column\n{\n    public Column(public string name { get; } = \"\") { }\n}\n";
         let ledger = "namespace App;\n\npublic interface Ledger\n{\n    bool marked(Class<Object> type);\n}\n";
         let entry = "namespace App;\n\n[Column(\"entries\")]\npublic class Entry : Ledger\n{\n    public bool marked(Class<Object> type) => type.attributes<Column>().count() > 0;\n}\n";
         let order = "namespace App;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n}\n";
-        let orders = "namespace App;\n\nimport Sharp.Encoding.Json;\n\npublic class Orders\n{\n    public Order read(string json) => Json.decode<Order>(json);\n}\n";
+        let orders = "namespace App;\n\nimport Sharp.Encoding.Json;\n\npublic class Orders\n{\n    public Order read(string json) => Json.parse<Order>(json).unwrap();\n}\n";
         let loud = "<?php\n\nnamespace Lib;\n\nclass LoudColumn extends \\App\\Column\n{\n    public function __construct()\n    {\n        echo \"loud\\n\";\n        parent::__construct(\"loud\");\n    }\n}\n";
         let big_order = "<?php\n\nnamespace Lib;\n\nclass BigOrder extends \\App\\Order\n{\n}\n";
         let files = [

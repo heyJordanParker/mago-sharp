@@ -1424,6 +1424,7 @@ where
     if context.dialect.is_sharp() && has_complete_hierarchy && class_like_metadata.kind.is_class() {
         method::check_super_call(context, class_like_metadata, members, name_span.unwrap_or(declaration_span));
         method::check_test_method_parameters(context, class_like_metadata, members);
+        method::check_own_parse(context, class_like_metadata, members);
     }
 
     if context.dialect.is_sharp() {

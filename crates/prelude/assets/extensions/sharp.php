@@ -294,7 +294,7 @@ function jsonEncode(mixed $value, int $flags, int $indent): string {}
 /**
  * The value the JSON text `$json` holds, as `json_decode` reads it with `JSON_OBJECT_AS_ARRAY`, each object a PHP
  * array, but an empty object an empty `Map`, which `jsonEncode` writes as `{}` again. The standard library's
- * `Json.parse` and `Json.decode` read by it.
+ * `Json.parse<T>` reads by it.
  *
  * @throws \JsonException
  */
@@ -543,7 +543,7 @@ final class DispatchesEmits {}
 
 /**
  * Marks a standard library generic method that parses a value into its type argument with the type's `parse`, as
- * `Json.decode<T>` does, so the checker gives each call's type argument the struct parse check.
+ * `Json.parse<T>` does, so the checker gives each call's type argument the struct parse check.
  */
 #[\Attribute(\Attribute::TARGET_METHOD)]
 final class ParsesTypeArgument {}

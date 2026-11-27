@@ -2800,7 +2800,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The `#invariants` of the class of the case `case` of the machine `machine`, spec section 20.2, which the engine
-    /// calls on each case it reads, as `Json.decode` and `parse` do: each law of the machine whose one parameter is the
+    /// calls on each case it reads, as `Json.parse<T>` and `parse` do: each law of the machine whose one parameter is the
     /// case, an invariant, holds of it, or the method throws a `ValueError` that names the invariant:
     /// `public function '#invariants'() { $paid = $this; if (!($paid->cents > 0)) { throw new \ValueError('OrderStatus.Paid breaks paidIsPositive.'); } }`.
     /// A law with a `when` condition holds where the condition does. None for a case no invariant names.
