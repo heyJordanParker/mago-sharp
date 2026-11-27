@@ -2053,7 +2053,10 @@ fn compiled(
         std::panic::set_hook(printing);
     }
     drop(hosts_files);
-    let ((compilations, compiled_files), hosts_compiled) = compilations?;
+    let ((compilations, mut compiled_files), hosts_compiled) = compilations?;
+    if !outcomes_kept {
+        compiled_files.forget_law_refusals();
+    }
     let codex_bytes = if releases_library {
         Some(server.library_codex(|issues| hidden.shown(issues, &read_database))?.encode(VERSION)?)
     } else {
