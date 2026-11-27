@@ -1957,9 +1957,13 @@ impl<'body, 'program> Body<'body, 'program> {
             ("isNotEmpty", _) => format!("(!(List.isEmpty {list}))"),
             ("join", Some(separator)) => format!("(Sharp.join {} {list})", self.value(separator.value())),
             ("map" | "filter" | "any" | "all", Some(argument)) => {
-                let Some(function) = self.lambda(argument.value()) else {
+                let Some((parameters, steps, body)) = self.lambda(argument.value()) else {
                     return "default".to_owned();
                 };
+                if !steps.is_empty() {
+                    return self.monadic(&format!("List.{name}M"), (&parameters, &steps, &body), &list);
+                }
+                let function = format!("(fun {parameters} => {body})");
                 if name == "any" || name == "all" {
                     return format!("(List.{name} {list} {function})");
                 }
@@ -2020,11 +2024,18 @@ impl<'body, 'program> Body<'body, 'program> {
         }
         let map = self.value(call.object);
         if let ("filter" | "any", [argument]) = (name.as_str(), call.argument_list.arguments.as_slice()) {
-            let Some(predicate) = self.lambda(argument.value()) else {
+            let Some((parameters, steps, body)) = self.lambda(argument.value()) else {
                 return "default".to_owned();
             };
+            if !steps.is_empty() {
+                let entries = format!("(Sharp.Map.entries {map})");
+                let entry = format!("(_, {parameters})");
+                let kept = self.monadic(&format!("List.{name}M"), (&entry, &steps, &body), &entries);
 
-            return format!("(Sharp.Map.{name} {predicate} {map})");
+                return if name == "filter" { format!("(Sharp.Map.ofList {kept})") } else { kept };
+            }
+
+            return format!("(Sharp.Map.{name} (fun {parameters} => {body}) {map})");
         }
         let Some(arguments) = self.arguments(&call.argument_list, None) else {
             return "default".to_owned();
@@ -2088,9 +2099,23 @@ impl<'body, 'program> Body<'body, 'program> {
         })
     }
 
-    /// A lambda `map` or `filter` takes, as a Lean `fun`. Its body is one expression that cannot throw, so the function
-    /// is pure, as `List.map` and `List.filter` take it.
-    fn lambda(&mut self, expression: &Expression) -> Option<String> {
+    /// The name bound to `function` of a lambda over `list`, where `function` is Lean's list function of a monadic
+    /// lambda, as `List.filterM`, and the lambda takes `parameters`, binds `steps` and gives `body`. A `Map`'s `filter`
+    /// and `any` run it over the map's entries, since `ofList` of entries whose keys are distinct keeps their order.
+    fn monadic(&mut self, function: &str, (parameters, steps, body): (&str, &[String], &str), list: &str) -> String {
+        let temporary = self.fresh();
+        self.lines.push(format!("let {temporary} ← {function} (fun {parameters} => do"));
+        self.lines.extend(indented(steps, 4));
+        self.lines.push(format!("    pure {body}"));
+        self.lines.push(format!("  ) {list}"));
+
+        temporary
+    }
+
+    /// A lambda `map`, `filter`, `any` or `all` takes: its parameters' Lean names, the steps its body binds, and its
+    /// body's term. A body with no steps is a pure function, as `List.map` takes it, and one with steps, as a call of a
+    /// PHP# method or arithmetic that can overflow, runs in `M`, as `List.mapM` takes it.
+    fn lambda(&mut self, expression: &Expression) -> Option<(String, Vec<String>, String)> {
         let Expression::ArrowFunction(arrow) = expression else {
             self.unmodeled(expression.span(), "a function value that is no lambda".to_owned(), issues::LAMBDA);
             return None;
@@ -2103,13 +2128,9 @@ impl<'body, 'program> Body<'body, 'program> {
                 names::identifier(parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name))
             })
             .collect();
-        let (lines, body) = self.code_term(arrow.expression);
-        if !lines.is_empty() {
-            self.unmodeled(arrow.expression.span(), "a lambda whose body can throw".to_owned(), issues::LAMBDA);
-            return None;
-        }
+        let (steps, body) = self.code_term(arrow.expression);
 
-        Some(format!("(fun {} => {body})", parameters.join(" ")))
+        Some((parameters.join(" "), steps, body))
     }
 
     /// `object?.m(…)`, which calls `m` only when `object` is not null.
