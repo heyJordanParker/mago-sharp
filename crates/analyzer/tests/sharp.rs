@@ -32180,10 +32180,7 @@ fn a_using_local_holds_a_disposable() {
         "namespace App.Shop;\n\npublic class Export\n{\n    public int count()\n    {\n        using archive = new Archive();\n        using total = 3;\n        return total;\n    }\n}\n",
     );
 
-    assert_eq!(
-        messages(export, &[archive]),
-        ["A `using` local holds a `Disposable`, and the type of `3` is `int`."]
-    );
+    assert_eq!(messages(export, &[archive]), ["A `using` local holds a `Disposable`, and the type of `3` is `int`."]);
 }
 
 /// Spec sections 2 and 29: a `Disposable`'s `dispose()` may have any effect, as `Transaction`'s reads the database,
