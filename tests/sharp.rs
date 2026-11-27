@@ -2300,3 +2300,111 @@ fn two_moves_leave_each_import_line_whole_in_either_order() {
         );
     }
 }
+
+/// `App.Shop.Behavior`, a class named like the standard library's `Behavior`, which `Order` of its namespace names
+/// bare, with the standard library's `Behavior` in its package, and `extra`, more files of the project.
+fn write_behavior_project(root: &Path, extra: &[(&str, &str)]) {
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"src\", \"vendor/heyjordanparker\"]\nincludes = [\"vendor\"]\nextensions = [\"php\", \"sharp\"]\n",
+    );
+    write(root, "composer.json", r#"{"type": "library", "autoload": {"psr-4": {"App\\": "src/App/"}}}"#);
+    write(root, "vendor/heyjordanparker/php-sharp-composer/composer.json", LIBRARY_PACKAGE);
+    write(
+        root,
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+        include_str!("../../composer/library/Sharp/Behavior.sharp"),
+    );
+    write(root, "src/App/Shop/Behavior.sharp", BEHAVIOR_CLASS);
+    write(root, "src/App/Shop/Order.sharp", BEHAVIOR_ORDER);
+    for (path, code) in extra {
+        write(root, path, code);
+    }
+    analyzes_clean(root);
+}
+
+const BEHAVIOR_CLASS: &str =
+    "namespace App.Shop;\n\npublic class Behavior\n{\n    public string name() => \"shop\";\n}\n";
+
+const BEHAVIOR_ORDER: &str =
+    "namespace App.Shop;\n\npublic class Order\n{\n    public string label(Behavior behavior) => behavior.name();\n}\n";
+
+fn compiles_clean(root: &Path) {
+    let compiled = run(root, "compile", &[]);
+
+    assert!(
+        compiled.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+}
+
+/// A bare `Behavior` in `App.Shop` names the class of its namespace over the standard library's `Behavior`, spec
+/// section 23, so moving the class out of `App.Shop` gives `Order` the import that keeps it naming the class.
+#[test]
+fn move_imports_a_class_a_bare_name_reached_through_its_namespace_over_a_standard_class() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_behavior_project(root, &[]);
+
+    let output = run(root, "move", &["App.Shop.Behavior", "App.Shop.Behaviors"]);
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/App/Shop/Order.sharp")).unwrap(),
+        BEHAVIOR_ORDER.replace("App.Shop;\n", "App.Shop;\n\nimport App.Shop.Behaviors.Behavior;\n")
+    );
+    compiles_clean(root);
+}
+
+/// A bare `Behavior` in `App.Shop.Behaviors` names the standard library's `Behavior` until the move puts a class of
+/// that name in its namespace, so the move gives `Counter` the import that keeps it naming the standard one.
+#[test]
+fn move_imports_the_standard_class_a_bare_name_named_before_a_class_of_its_name_joins_its_namespace() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let counter = "namespace App.Shop.Behaviors;\n\npublic class Counter : Behavior<int>\n{\n    public int get(int value) => value;\n\n    public int set(int value) => value;\n}\n";
+    write_behavior_project(root, &[("src/App/Shop/Behaviors/Counter.sharp", counter)]);
+
+    let output = run(root, "move", &["App.Shop.Behavior", "App.Shop.Behaviors"]);
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/App/Shop/Behaviors/Counter.sharp")).unwrap(),
+        counter.replace("App.Shop.Behaviors;\n", "App.Shop.Behaviors;\n\nimport Sharp.Behavior;\n")
+    );
+    compiles_clean(root);
+}
+
+/// A plain PHP file whose `App\Shop` block names `Behavior` bare and whose `Lib` block declares a `Behavior` can't
+/// take the `use` that would keep the bare name naming the moved class, as PHP refuses a `use` of a name the file
+/// declares, so the move refuses, naming the file, the line and the name, and changes no file.
+#[test]
+fn move_refuses_an_import_a_file_takes_by_a_name_it_declares_and_changes_no_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let rules = "<?php\n\nnamespace App\\Shop {\n    final class Rule\n    {\n        public function name(Behavior $behavior): string\n        {\n            return $behavior->name();\n        }\n    }\n}\n\nnamespace Lib {\n    final class Behavior\n    {\n    }\n}\n";
+    write_behavior_project(root, &[("src/Legacy/Rules.php", rules)]);
+
+    let output = run(root, "move", &["App.Shop.Behavior", "App.Shop.Behaviors"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("Can't move `App.Shop.Behavior` into `App.Shop.Behaviors`, so no file changed:"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            r"src/Legacy/Rules.php:6: `Behavior` names `App.Shop.Behaviors.Behavior`, and keeping it needs `use App\Shop\Behaviors\Behavior;`, but the file declares a class `Behavior`."
+        ),
+        "{stderr}"
+    );
+    assert_eq!(read("src/App/Shop/Behavior.sharp"), BEHAVIOR_CLASS);
+    assert_eq!(read("src/App/Shop/Order.sharp"), BEHAVIOR_ORDER);
+    assert_eq!(read("src/Legacy/Rules.php"), rules);
+    assert!(!root.join("src/App/Shop/Behaviors").exists());
+}
