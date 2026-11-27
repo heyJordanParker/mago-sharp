@@ -266,7 +266,8 @@ enum Record {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CompiledFile {
     key: [u8; 16],
-    /// Each library method whose body the file inlines, named `Class::method`.
+    /// Each library method whose body the file inlines, named as the library names the form it inlined, as
+    /// `Reads::inlined` names it.
     inlined: Vec<Vec<u8>>,
     /// Each method and lambda the file declares whose function type its key reads.
     function_types: Vec<Vec<u8>>,
@@ -3861,6 +3862,27 @@ mod tests {
             assert!(!kept.contains(edit.edited), "{}", edit.name);
             assert!(kept.contains("app/Unrelated.sharp"), "{}", edit.name);
         }
+    }
+
+    /// A call that leaves out a library method's last arguments inlines the method's form for that call, which the
+    /// library names apart from the form of a call that passes them all, as `cased#1`. The compiled file names the form
+    /// it inlined, so a compile of the unchanged tree keeps it.
+    #[test]
+    fn a_compile_of_an_unchanged_tree_keeps_a_file_that_leaves_out_a_library_method_s_last_arguments() {
+        let text = "namespace Sharp;\n\nextern global.ucfirst uses none;\nextern global.lcfirst uses none;\n\npublic class Text\n{\n    public static string cased(string text, bool lower = false) => lower ? global.lcfirst(text) : global.ucfirst(text);\n}\n";
+        let title = "namespace App;\n\nimport Sharp.Text;\n\npublic class Title\n{\n    public string of(string name)\n    {\n        return Text.cased(name);\n    }\n}\n";
+        let database = project(&[(TEXT_PATH, text), ("app/Title.sharp", title)]);
+        let mut warm = analyzed(&database);
+        let (first, last, _) =
+            compile_keeping(&mut warm, &CompiledFiles::default(), &BTreeMap::new(), empty_stamp, |_| false);
+        let last = CompiledFiles::decode(&last.encode(CHECKER, [0; 16]).expect("the record encodes"), CHECKER, [0; 16]);
+        warm.analyze_incremental(None).expect("the warm path runs");
+
+        let (_, _, kept) = compile_keeping(&mut warm, &last, &first, empty_stamp, |_| false);
+
+        let compiled = accepted(&first, "app/Title.sharp");
+        assert!(compiled.windows(b"ucfirst".len()).any(|window| window == b"ucfirst"), "the form is inlined");
+        assert!(kept.contains("app/Title.sharp"), "{kept:?}");
     }
 
     /// The lowering reads the configuration, which no key holds, so the record of another configuration's compile

@@ -908,7 +908,7 @@ impl Lowering<'_, '_> {
 
             values.push(InlineReceiver::Expression(argument.value));
         }
-        let form = self.types.inline_form_passing(declaration, values.len())?;
+        let (name, form) = self.types.inline_form_passing(declaration, values.len())?;
         // A form that fixes an argument folded the branch its literal takes, which another value may not take.
         let fixes = form.fixed.iter().all(|fixed| {
             matches!(values.get(fixed.slot), Some(InlineReceiver::Expression(argument)) if fixed.holds(argument))
@@ -942,7 +942,7 @@ impl Lowering<'_, '_> {
         let key_order = form.key_order.map(|_| self.key_order_argument(call, line));
         values.extend(result_type.into_iter().chain(key_order));
 
-        Some(self.copied(declaration, form, &values, line))
+        Some(self.copied(name, form, &values, line))
     }
 
     /// The member `declaration` an operation runs, as `list[i] = v` runs a `List`'s `set`, with `values` lowered
@@ -959,16 +959,13 @@ impl Lowering<'_, '_> {
             return None;
         }
 
-        Some(self.copied(declaration, form, values, line))
+        Some(self.copied(key(declaration.class.as_bytes(), declaration.name.as_bytes()), form, values, line))
     }
 
-    /// `form`, the inline form of `declaration`, with `values` in its slots on `line`, which the unit names among the
-    /// forms it inlines.
-    fn copied(&mut self, declaration: &Declaration, form: &InlineForm, values: &[u32], line: u32) -> u32 {
-        self.inlined.push(Read {
-            name: key(declaration.class.as_bytes(), declaration.name.as_bytes()),
-            fingerprint: form.fingerprint(),
-        });
+    /// `form`, the inline form the standard library names `name`, with `values` in its slots on `line`, which the unit
+    /// names among the forms it inlines by that name, so the next compile checks the fingerprint of the form it inlined.
+    fn copied(&mut self, name: Vec<u8>, form: &InlineForm, values: &[u32], line: u32) -> u32 {
+        self.inlined.push(Read { name, fingerprint: form.fingerprint() });
 
         self.copy(form, form.root, values, line)
     }

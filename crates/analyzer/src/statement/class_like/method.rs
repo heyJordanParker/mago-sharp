@@ -663,6 +663,24 @@ pub(super) fn check_super_call<A>(
 ) where
     A: Arena,
 {
+    // Spec section 32: PHPUnit creates a test class with each test's name and passes it to `TestCase` itself, so a test
+    // class's constructor takes only its services and calls no super.
+    if context.codebase.class_extends(class.name, word(TEST_CASE)) {
+        let called = members.iter().find_map(|member| match member {
+            ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => method.initializer.as_ref(),
+            _ => None,
+        });
+        if let Some(initializer) = called {
+            context.collector.report_with_code(
+                IssueCode::TestClassSuperCall,
+                Issue::error("PHPUnit names each test, so a test class's constructor calls no super.")
+                    .with_annotation(Annotation::primary(initializer.span()).with_message("Called here."))
+                    .with_help("Remove `: super(…)`, and take the class's services as the constructor's parameters."),
+            );
+        }
+
+        return;
+    }
     let (Some(base), Some(constructor_of_base)) =
         (class.direct_parent_class, context.codebase.get_parent_constructor(class.name))
     else {
@@ -745,6 +763,61 @@ pub(super) fn check_super_call<A>(
         _ => {}
     }
 }
+
+/// Spec section 32: a test class takes its services in its constructor, so a test method takes only the values its data
+/// provider gives, and a method that runs before or after each test takes none. Reports each parameter of a `[Test]`
+/// method that no `[DataProvider]`, `[DataProviderExternal]` or `[TestWith]` gives values, and each parameter of a
+/// `[Before]` or `[After]` method, in a class that extends PHPUnit's `TestCase`.
+pub(super) fn check_test_method_parameters<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    members: &[ClassLikeMember<'_>],
+) where
+    A: Arena,
+{
+    if !context.codebase.class_extends(class.name, word(TEST_CASE)) {
+        return;
+    }
+    for member in members {
+        let ClassLikeMember::Method(method) = member else {
+            continue;
+        };
+        let Some(first) = method.parameter_list.parameters.first() else {
+            continue;
+        };
+        let marks: Vec<&[u8]> = method
+            .attribute_lists
+            .iter()
+            .flat_map(|list| list.attributes.iter())
+            .map(|attribute| context.resolved_names.get(&attribute.name))
+            .collect();
+        let marked =
+            |names: &[&[u8]]| marks.iter().any(|mark| names.iter().any(|name| mark.eq_ignore_ascii_case(name)));
+        let refused = marked(&[BEFORE, AFTER])
+            || (marked(&[TEST]) && !marked(&[DATA_PROVIDER, DATA_PROVIDER_EXTERNAL, TEST_WITH]));
+        if refused {
+            context.collector.report_with_code(
+                IssueCode::TestMethodParameter,
+                Issue::error(
+                    "A test method takes only its data provider's values: take services in the test class's constructor.",
+                )
+                .with_annotation(Annotation::primary(first.span()).with_message("Taken here."))
+                .with_help("Move the parameter to the test class's constructor, and read it from `this`."),
+            );
+        }
+    }
+}
+
+/// The class every PHPUnit test extends.
+const TEST_CASE: &str = "PHPUnit\\Framework\\TestCase";
+
+/// The PHPUnit attributes that mark a test, a method run before or after each test, and the values of a test.
+const TEST: &[u8] = b"PHPUnit\\Framework\\Attributes\\Test";
+const BEFORE: &[u8] = b"PHPUnit\\Framework\\Attributes\\Before";
+const AFTER: &[u8] = b"PHPUnit\\Framework\\Attributes\\After";
+const DATA_PROVIDER: &[u8] = b"PHPUnit\\Framework\\Attributes\\DataProvider";
+const DATA_PROVIDER_EXTERNAL: &[u8] = b"PHPUnit\\Framework\\Attributes\\DataProviderExternal";
+const TEST_WITH: &[u8] = b"PHPUnit\\Framework\\Attributes\\TestWith";
 
 /// The default value of a parameter of type `hint` as PHP# code writes it, when the default is a literal PHP# writes
 /// alike. An empty PHP array is `[:]` where the parameter is a map.
