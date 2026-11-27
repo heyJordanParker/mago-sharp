@@ -4033,9 +4033,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A parameter's default, `value`. Spec section 9: it is any expression, which runs each time a call leaves the
-    /// argument out, as [`Self::computed`] makes it.
+    /// argument out, as [`Self::computed`] makes it. A `Map` or `Set` literal of constants stays a constant expression
+    /// with its type arguments, spec section 25, so reflection reads it and an invoker fills it.
     fn default_value(&mut self, value: &Expression) -> u32 {
         let (lowered, _) = self.lambda_body(|lowering| lowering.default_expression(value, None));
+        if self.is_constant_expression(lowered, true) {
+            return lowered;
+        }
 
         self.computed(value, lowered)
     }
@@ -4044,7 +4048,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// static closure called with no arguments, `(static function () { return \time(); })()`, which the engine runs
     /// there each time it evaluates the expression.
     fn computed(&mut self, value: &Expression, lowered: u32) -> u32 {
-        if self.is_constant_expression(lowered) {
+        if self.is_constant_expression(lowered, false) {
             return lowered;
         }
         let line = self.line(value);
@@ -4068,13 +4072,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `zend_is_allowed_in_const_expr` says, leaving out the closures and first-class callables a default never is, and
     /// an index read, which a method body runs, as `Billing.PLANS[5]` throws `OutOfRangeException` there, where PHP's
     /// constant expression warns and gives null. PHP reads a property there only of an enum case, so only a property of
-    /// a class constant, `Plan::Free->value`, is one, where `new Box(7)->size` is not.
-    fn is_constant_expression(&self, node: u32) -> bool {
+    /// a class constant, `Plan::Free->value`, is one, where `new Box(7)->size` is not. With `tables`, a `Map` or `Set`
+    /// that [`Self::collection_new`] makes with its type arguments is one too, which the engine takes in a parameter's
+    /// default only.
+    fn is_constant_expression(&self, node: u32, tables: bool) -> bool {
         if node == NULL {
             return true;
         }
         let node = &self.nodes[node as usize];
         let first = || &self.nodes[self.children[node.first_child as usize] as usize];
+        let text =
+            |node: &sharp_node| &self.texts[node.text.offset as usize..(node.text.offset + node.text.len) as usize];
+        let makes_table = || {
+            let new = first();
+            let class = &self.nodes[self.children[new.first_child as usize] as usize];
+
+            new.kind == SHARP_AST_NEW
+                && class.kind == SHARP_AST_ZVAL
+                && matches!(text(class), b"Sharp\\Map" | b"Sharp\\Set")
+        };
         // `Self.TABLE`, `static::TABLE`, reads the class the call ran on, which a constant expression never knows.
         if node.kind == SHARP_AST_CLASS_CONST
             && first().kind == SHARP_AST_ZVAL
@@ -4084,6 +4100,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         let reads_case = node.kind == SHARP_AST_PROP && first().kind == SHARP_AST_CLASS_CONST;
         let constant = reads_case
+            || (tables && node.kind == SHARP_AST_SHARP_TYPE_ARGS && makes_table())
             || matches!(
                 node.kind,
                 SHARP_AST_ZVAL
@@ -4114,7 +4131,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         constant
             && ensure_sufficient_stack(|| {
-                children.into_iter().all(|child| self.is_constant_expression(self.children[child]))
+                children.into_iter().all(|child| self.is_constant_expression(self.children[child], tables))
             })
     }
 

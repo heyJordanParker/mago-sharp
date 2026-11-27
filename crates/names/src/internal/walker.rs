@@ -51,6 +51,7 @@ use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Is;
 use mago_syntax::cst::Law;
+use mago_syntax::cst::LawProof;
 use mago_syntax::cst::ListPattern;
 use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::LocalDeclaration;
@@ -105,6 +106,7 @@ use mago_syntax::walker::MutWalker;
 use mago_syntax::walker::walk_binary_mut;
 use mago_syntax::walker::walk_conditional_mut;
 use mago_syntax::walker::walk_if_mut;
+use mago_syntax::walker::walk_law_mut;
 use mago_syntax::walker::walk_while_mut;
 
 use crate::ResolvedNames;
@@ -957,6 +959,28 @@ where
 
     fn walk_out_law(&mut self, _law: &'ast Law<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         self.locals.exit_method();
+    }
+
+    /// A law's claim and body hold where its `when` condition is true, spec section 28, so they see the variables the
+    /// condition assigns when it is true, as an `if` block does.
+    fn walk_law(&mut self, law: &'ast Law<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        let Some(condition) = &law.condition else {
+            return walk_law_mut(self, law, context);
+        };
+
+        self.walk_in_law(law, context);
+        self.walk_keyword(&law.law, context);
+        self.walk_local_identifier(&law.name, context);
+        self.walk_function_like_parameter_list(&law.parameter_list, context);
+        self.walk_keyword(&condition.when, context);
+        self.walk_expression(condition.expression, context);
+        self.walk_where(condition.expression, true, context, |walker, context| {
+            walker.walk_expression(law.claim, context);
+            if let LawProof::Body(body) = &law.proof {
+                walker.walk_block(body, context);
+            }
+        });
+        self.walk_out_law(law, context);
     }
 
     /// An extension block's receiver is the first parameter of each member, spec section 26. The block's own frame

@@ -33011,6 +33011,122 @@ fn a_reflection_call_read_or_write_may_have_every_effect() {
     );
 }
 
+/// A plain PHP `Disk.save()` with the effect `Database`, the `extern` line that declares it, and `Saved`, whose `required`
+/// constructor calls it, beside `Note`, whose `required` constructor has no effect.
+const BUILT: [(&str, &str); 4] = [
+    (
+        "src/Lib/Disk.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Disk\n{\n    public static function save(): void\n    {\n    }\n}\n",
+    ),
+    ("app/Stubs/Disk.sharp", "namespace App.Stubs;\n\nimport Lib.Disk;\n\nextern Disk uses Database;\n"),
+    (
+        "app/Shop/Saved.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\npublic class Saved\n{\n    public required Saved() { Disk.save(); }\n}\n",
+    ),
+    ("app/Shop/Note.sharp", "namespace App.Shop;\n\npublic class Note\n{\n    public required Note() { }\n}\n"),
+];
+
+/// The pure `Maker.make` that builds a `Saved`.
+const MAKER: (&str, &str) =
+    ("app/Shop/Maker.sharp", "namespace App.Shop;\n\npublic interface Maker\n{\n    Saved make();\n}\n");
+
+/// Spec sections 25 and 29: `new (type)(…)` has the effects of the `required` constructor of the class `type`'s
+/// `Class<T>` names, as `new T(…)` has them. So a pure method that builds a `Saved` through a `Class<Saved>` is refused
+/// as one that writes `new Saved()` is, one whose `uses` lists `Database` compiles, and one that builds a `Note`, whose
+/// constructor has no effect, compiles.
+#[test]
+fn a_class_value_new_has_its_required_constructors_effects() {
+    let storing = (
+        "app/Shop/Storing.sharp",
+        "namespace App.Shop;\n\npublic interface Storing\n{\n    Saved make() uses Database;\n}\n",
+    );
+    let noting = ("app/Shop/Noting.sharp", "namespace App.Shop;\n\npublic interface Noting\n{\n    Note make();\n}\n");
+    let direct = (
+        "app/Shop/DirectMaker.sharp",
+        "namespace App.Shop;\n\npublic class DirectMaker : Maker\n{\n    public Saved make() => new Saved();\n}\n",
+    );
+    let value = (
+        "app/Shop/ValueMaker.sharp",
+        "namespace App.Shop;\n\npublic class ValueMaker : Maker\n{\n    public ValueMaker(private Class<Saved> type) { }\n\n    public Saved make() => new (this.type)();\n}\n",
+    );
+    let stored = (
+        "app/Shop/StoredMaker.sharp",
+        "namespace App.Shop;\n\npublic class StoredMaker : Storing\n{\n    public StoredMaker(private Class<Saved> type) { }\n\n    public Saved make() => new (this.type)();\n}\n",
+    );
+    let noted = (
+        "app/Shop/NoteMaker.sharp",
+        "namespace App.Shop;\n\npublic class NoteMaker : Noting\n{\n    public NoteMaker(private Class<Note> notes) { }\n\n    public Note make() => new (this.notes)();\n}\n",
+    );
+    let [disk, stub, saved, note] = BUILT;
+
+    assert_eq!(
+        effect_issues(&[direct, value, stored, noted, MAKER, storing, noting, disk, stub, saved, note]),
+        [
+            "app/Shop/DirectMaker.sharp:5:28 incompatible-effects: `DirectMaker.make` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Maker.make` cannot accept it.",
+            "app/Shop/ValueMaker.sharp:7:28 incompatible-effects: `ValueMaker.make` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Maker.make` cannot accept it.",
+        ]
+    );
+}
+
+/// Spec section 29: a constructor below a `required` one may add no effect to it, as an implementation adds none to
+/// its interface method, since `new (type)(…)` of a `Class<Saved>` may build any subclass with the effects of `Saved`'s
+/// constructor alone. So `Archived`, whose constructor also sends mail, is refused naming the effect it adds, and so is
+/// `Stamped`, which gives `Note`'s pure constructor the effect `Database`. `Kept`, with `Saved`'s own effect, compiles.
+#[test]
+fn a_subclass_required_constructor_adds_no_effect() {
+    let outbox = (
+        "src/Lib/Outbox.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Outbox\n{\n    public static function send(): void\n    {\n    }\n}\n",
+    );
+    let outbox_stub =
+        ("app/Stubs/Outbox.sharp", "namespace App.Stubs;\n\nimport Lib.Outbox;\n\nextern Outbox uses Mail;\n");
+    let archived = (
+        "app/Shop/Archived.sharp",
+        "namespace App.Shop;\n\nimport Lib.Outbox;\n\npublic class Archived : Saved\n{\n    public required Archived() : super() { Outbox.send(); }\n}\n",
+    );
+    let stamped = (
+        "app/Shop/Stamped.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\npublic class Stamped : Note\n{\n    public required Stamped() : super() { Disk.save(); }\n}\n",
+    );
+    let kept = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\npublic class Kept : Saved\n{\n    public required Kept() : super() { Disk.save(); }\n}\n",
+    );
+    let [disk, stub, saved, note] = BUILT;
+
+    assert_eq!(
+        effect_issues(&[archived, stamped, kept, outbox, outbox_stub, disk, stub, saved, note]),
+        [
+            "app/Shop/Archived.sharp:7:44 incompatible-effects: `Archived.Archived` calls `Outbox.send`, which has the effect `Mail`, so it adds an effect to the `required` constructor `Saved.Saved`, which has the effect `Database`. Help: `new (type)(…)` of a `Class<Saved>` runs a subclass's constructor with the effects of `Saved.Saved` alone, so a subclass's constructor adds none. Do this work outside the constructor.",
+            "app/Shop/Stamped.sharp:7:43 incompatible-effects: `Stamped.Stamped` calls `Disk.save`, which has the effect `Database`, so it adds an effect to the `required` constructor `Note.Note`, which has no effect. Help: `new (type)(…)` of a `Class<Note>` runs a subclass's constructor with the effects of `Note.Note` alone, so a subclass's constructor adds none. Do this work outside the constructor.",
+        ]
+    );
+}
+
+/// Spec sections 25 and 29: `createInstance` takes its arguments as a runtime list and may build any subclass, so it may
+/// have every effect, as `Property.get` does. A method that implements the pure `Maker.make` can't call it, and a
+/// method with no `uses` to keep may.
+#[test]
+fn create_instance_may_have_every_effect() {
+    let making = (
+        "app/Shop/Making.sharp",
+        "namespace App.Shop;\n\npublic class Making : Maker\n{\n    public Saved make() => typeof(Saved).createInstance([]);\n}\n",
+    );
+    let building = (
+        "app/Shop/Building.sharp",
+        "namespace App.Shop;\n\npublic class Building\n{\n    public Saved make() => typeof(Saved).createInstance([]);\n}\n",
+    );
+    let [disk, stub, saved, note] = BUILT;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[making, building, MAKER, disk, stub, saved, note, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/Making.sharp:5:28 incompatible-effects: `Making.make` reaches `ClassMembers.createInstance`, which may have every effect, so the pure `Maker.make` cannot accept it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
 /// Spec sections 25 and 29: `Method.createDelegate<TFunction>()` gives a value of the function type `TFunction`, whose
 /// `uses` says the effects a call of it has, and whose result type types the call, and making it is pure. So a base
 /// class whose `relations` is held to `uses Database` builds each method it walks by an attribute as a
@@ -34506,6 +34622,19 @@ fn a_law_s_claim_and_body_read_what_its_when_condition_shows() {
     );
 
     assert_eq!(issues(order, &[]), Vec::<String>::new());
+}
+
+/// Spec section 28: a law's claim holds where its `when` condition is true, so a variable a pattern of the condition
+/// assigns when it is true, alone or under `&&`, is in scope in the claim, as in an `if` block. One assigned under `||`
+/// is not.
+#[test]
+fn a_law_when_pattern_variable_is_in_scope_in_its_body() {
+    let order = (
+        "app/Shared/Order.sharp",
+        "namespace App.Shared;\n\npublic class Order\n{\n    public Order(public int total { get; }) { }\n\n    law aFamilyIsItself(Any? value) when value is Class<Object> family => family == family;\n    law positive(Any? value) when value is Order order && order.total > 0 => order.total >= 1;\n    law either(Any? value) when value is Order order || value is null => order.total > 0;\n}\n",
+    );
+
+    assert_eq!(messages(order, &[]), ["`order` exists only where `value is Order order` is true."]);
 }
 
 /// A PHP caller of a law gets the same refusal, with the law named as PHP writes a static method.
