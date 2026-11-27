@@ -959,7 +959,7 @@ fn unseen_reaches(codebase: &CodebaseMetadata, test_files: &[FileId]) -> Vec<Rea
         let methods: Vec<(Word, &FunctionLikeMetadata)> = class
             .methods
             .iter()
-            .filter_map(|name| Some((*name, codebase.function_likes.get(&(*class_name, *name))?)))
+            .filter_map(|name| Some((*name, &**codebase.function_likes.get(&(*class_name, *name))?)))
             .collect();
         let mut members: Vec<(Word, ReachedBy)> = Vec::new();
         if test_files.contains(&class.span.file_id) {
