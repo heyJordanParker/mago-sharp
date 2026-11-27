@@ -1632,6 +1632,7 @@ dependencies = [
  "foldhash",
  "glob",
  "globset",
+ "libc",
  "memchr",
  "notify",
  "rayon",
