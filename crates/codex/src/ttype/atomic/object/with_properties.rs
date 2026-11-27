@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 
 use mago_word::Word;
 use mago_word::word;
@@ -31,13 +32,8 @@ impl TObjectWithProperties {
 }
 
 impl TType for TObjectWithProperties {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        let mut children = vec![];
-        for (_, item_type) in self.known_properties.values() {
-            children.push(TypeRef::Union(item_type));
-        }
-
-        children
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.known_properties.values().try_for_each(|(_, item_type)| visit(TypeRef::Union(item_type)))
     }
 
     fn needs_population(&self) -> bool {

@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -223,11 +224,11 @@ impl TClassLikeString {
 }
 
 impl TType for TClassLikeString {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
         match self {
-            TClassLikeString::Generic { constraint, .. } => vec![TypeRef::Atomic(constraint)],
-            TClassLikeString::OfType { constraint, .. } => vec![TypeRef::Union(constraint)],
-            TClassLikeString::Any { .. } | TClassLikeString::Literal { .. } => vec![],
+            TClassLikeString::Generic { constraint, .. } => visit(TypeRef::Atomic(constraint)),
+            TClassLikeString::OfType { constraint, .. } => visit(TypeRef::Union(constraint)),
+            TClassLikeString::Any { .. } | TClassLikeString::Literal { .. } => ControlFlow::Continue(()),
         }
     }
 

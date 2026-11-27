@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -739,8 +740,8 @@ macro_rules! with_inner_ttype {
 }
 
 impl TType for TAtomic {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        with_inner_ttype!(self, ttype => ttype.get_child_nodes(), vec![])
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        with_inner_ttype!(self, ttype => ttype.visit_child_nodes(visit), ControlFlow::Continue(()))
     }
 
     fn can_be_intersected(&self) -> bool {

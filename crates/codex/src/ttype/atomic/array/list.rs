@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -170,16 +171,14 @@ impl TList {
 }
 
 impl TType for TList {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        let mut children = vec![];
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
         if let Some(known_items) = self.get_known_elements() {
             for (_, item_type) in known_items.values() {
-                children.push(TypeRef::Union(item_type));
+                visit(TypeRef::Union(item_type))?;
             }
         }
 
-        children.push(TypeRef::Union(self.get_element_type()));
-        children
+        visit(TypeRef::Union(self.get_element_type()))
     }
 
     fn needs_population(&self) -> bool {
