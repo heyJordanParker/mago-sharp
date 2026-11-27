@@ -32167,11 +32167,6 @@ fn a_use_of_a_class_s_statics_has_the_effects_of_their_initial_values() {
     );
 }
 
-const DISPOSABLE_LIBRARY: (&str, &str) = (
-    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Disposable.sharp",
-    include_str!("../../../../composer/library/Sharp/Disposable.sharp"),
-);
-
 /// Spec section 2: a `using` local's block calls `dispose()` on the value it holds when it ends, so the value is a
 /// `Disposable`, as `Archive` is. Any other value is refused.
 #[test]
@@ -32186,7 +32181,7 @@ fn a_using_local_holds_a_disposable() {
     );
 
     assert_eq!(
-        messages(export, &[archive, DISPOSABLE_LIBRARY]),
+        messages(export, &[archive]),
         ["A `using` local holds a `Disposable`, and the type of `3` is `int`."]
     );
 }
@@ -32212,11 +32207,28 @@ fn a_using_local_carries_the_effects_of_its_value_s_dispose() {
     );
 
     assert_eq!(
-        effect_issues(&[report, transaction, database, counter, DISPOSABLE_LIBRARY]),
+        effect_issues(&[report, transaction, database, counter]),
         [
             "src/App/Shop/Report.sharp:9:9 incompatible-effects: `Report.count` reaches `Transaction.dispose`, which calls `App.Shop.Database.rows` with the effect `App.Shop.Database`, so the pure `Counter.count` cannot accept it."
         ]
     );
+}
+
+const ZIP_ARCHIVE_LIBRARY: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/IO/ZipArchive.sharp",
+    include_str!("../../../../composer/library/Sharp/IO/ZipArchive.sharp"),
+);
+
+/// Spec sections 2 and 29: a `ZipArchive` is `Disposable`, so a `using` local holds it and writes it when its block
+/// ends, and it has no `close()`.
+#[test]
+fn a_zip_archive_is_disposed_by_its_using_local_and_has_no_close() {
+    let export = (
+        "app/Shop/Export.sharp",
+        "namespace App.Shop;\n\nimport Sharp.IO.ZipArchive;\n\npublic class Export\n{\n    public string? readme(string path)\n    {\n        using archive = ZipArchive.open(path);\n        return archive.read(\"readme.txt\");\n    }\n\n    public void closed(string path)\n    {\n        using archive = ZipArchive.open(path);\n        archive.close();\n    }\n}\n",
+    );
+
+    assert_eq!(messages(export, &[ZIP_ARCHIVE_LIBRARY]), ["Method `ZipArchive.close` does not exist."]);
 }
 
 const BEHAVIOR_LIBRARY: (&str, &str) = (
