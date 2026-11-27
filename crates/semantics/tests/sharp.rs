@@ -7524,31 +7524,38 @@ fn readonly_that_cannot_matter_is_an_error() {
     );
 }
 
-/// Spec section 27: a class's `main` runs it as a program, and the engine calls it with no arguments, so it is
-/// `public int main()` or `public void main()`.
+/// Spec section 27: a class's `main` runs it as a program, and the engine calls it with no arguments and exits with the
+/// code it returns, so it is `public void main()`, `public ExitCode main()` or `public Result<ExitCode, TError> main()`.
+/// An `int` is no exit code, so `int main` is refused.
 #[test]
-fn a_class_main_is_public_and_takes_nothing_and_returns_int_or_void() {
-    let exits = "namespace App.Console;\n\nclass Import\n{\n    public int main() => 0;\n}\n";
+fn a_class_main_is_public_and_takes_nothing_and_returns_void_an_exit_code_or_a_result_of_one() {
+    let exits = "namespace App.Console;\n\nimport Sharp.System.ExitCode;\n\nclass Import\n{\n    public ExitCode main() => ExitCode.SUCCESS;\n}\n";
+    let results = "namespace App.Console;\n\nimport Sharp.Result;\nimport Sharp.System.ExitCode;\n\nclass Import\n{\n    public Result<ExitCode, ImportError> main() => Result.Ok(ExitCode.SUCCESS);\n}\n";
     let returns = "namespace App.Http;\n\nclass Boot\n{\n    public void main() { }\n}\n";
+    let integer = "namespace App.Console;\n\nclass Import\n{\n    public int main() => 0;\n}\n";
+    let result_of_int = "namespace App.Console;\n\nimport Sharp.Result;\n\nclass Import\n{\n    public Result<int, ImportError> main() => Result.Ok(0);\n}\n";
     let code = "namespace App.Console;\n\nclass Import\n{\n    public int main(int x) => x;\n}\n";
     let text = "namespace App.Console;\n\nclass Import\n{\n    public string main() => \"done\";\n}\n";
-    let hidden = "namespace App.Console;\n\nclass Import\n{\n    private int main() => 0;\n}\n";
-    let shared = "namespace App.Console;\n\nclass Import\n{\n    public static int main() => 0;\n}\n";
-    let refusal = "A class's `main` runs it as a program: declare it `public int main()` or `public void main()`.";
+    let hidden = "namespace App.Console;\n\nclass Import\n{\n    private void main() { }\n}\n";
+    let shared = "namespace App.Console;\n\nclass Import\n{\n    public static void main() { }\n}\n";
+    let refusal = "A class's `main` runs it as a program: declare it `public void main()`, `public ExitCode main()` or `public Result<ExitCode, TError> main()`.";
 
     assert_eq!(issues(exits), Vec::<String>::new());
+    assert_eq!(issues(results), Vec::<String>::new());
     assert_eq!(issues(returns), Vec::<String>::new());
+    assert_eq!(issues(integer), [format!("5:16 {refusal}")]);
+    assert_eq!(issues(result_of_int), [format!("7:37 {refusal}")]);
     assert_eq!(issues(code), [format!("5:16 {refusal}")]);
     assert_eq!(issues(text), [format!("5:19 {refusal}")]);
-    assert_eq!(issues(hidden), [format!("5:17 {refusal}")]);
-    assert_eq!(issues(shared), [format!("5:23 {refusal}")]);
+    assert_eq!(issues(hidden), [format!("5:18 {refusal}")]);
+    assert_eq!(issues(shared), [format!("5:24 {refusal}")]);
 }
 
 /// Spec section 27: a `#!` line runs a `.sharp` file as a program from a shell, which reads only the file's first line.
 #[test]
 fn a_hash_bang_line_is_a_files_first_line_only() {
-    let first = "#!/usr/bin/env php\nnamespace App.Console;\n\nclass Import\n{\n    public int main() => 0;\n}\n";
-    let second = "namespace App.Console;\n#!/usr/bin/env php\n\nclass Import\n{\n    public int main() => 0;\n}\n";
+    let first = "#!/usr/bin/env php\nnamespace App.Console;\n\nclass Import\n{\n    public void main() { }\n}\n";
+    let second = "namespace App.Console;\n#!/usr/bin/env php\n\nclass Import\n{\n    public void main() { }\n}\n";
 
     assert_eq!(issues(first), Vec::<String>::new());
     assert_eq!(issues(second), ["2:1 A `#!` line is a `.sharp` file's first line, where a shell reads it."]);

@@ -62,8 +62,8 @@ pub const DYNAMICALLY_ACCESSED: &str = "Sharp\\DynamicallyAccessed";
 
 /// The method of a class that runs as a program, spec section 27.
 ///
-/// PHP runs the `.sharp` file of a class that declares `public int main()` or `public void main()` as its script, and
-/// the engine builds the class and calls it.
+/// PHP runs the `.sharp` file of a class that declares `public void main()`, `public ExitCode main()` or
+/// `public Result<ExitCode, TError> main()` as its script, and the engine builds the class and calls it.
 pub const PROGRAM_ENTRY: &str = "main";
 
 /// The mark of a parameter whose argument a method writes as JSON text.

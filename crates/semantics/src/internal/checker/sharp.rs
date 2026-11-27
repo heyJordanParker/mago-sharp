@@ -7666,27 +7666,45 @@ fn enclosing_iterator_method<'ast, 'arena>(program: &'ast Program<'arena>, span:
     (returns_iterable(method) && !in_lambda).then_some(method)
 }
 
-/// Reports a class's `main` that isn't `public int main()` or `public void main()`. Spec section 27: PHP runs the
-/// class's file as a program, the engine builds the class and calls `main` with no arguments, and an `int` it returns
-/// is the process's exit code.
+/// Reports a class's `main` that isn't `public void main()`, `public ExitCode main()` or
+/// `public Result<ExitCode, TError> main()`. Spec section 27: PHP runs the class's file as a program, the engine builds
+/// the class and calls `main` with no arguments, and exits with the code it returns, after Rust's `Termination`.
 fn check_program_entry(method: &Method, context: &mut Context<'_, '_, '_>) {
-    let returns = method.return_type_hint.as_ref().map(|returned| &returned.hint);
+    let is_exit_code = |hint: &Hint| matches!(hint, Hint::Identifier(identifier) if context.names.get(identifier).eq_ignore_ascii_case(EXIT_CODE));
+    let returns_status = match method.return_type_hint.as_ref().map(|returned| &returned.hint) {
+        Some(Hint::Void(_)) => true,
+        Some(hint @ Hint::Identifier(_)) => is_exit_code(hint),
+        Some(Hint::Generic(generic)) => {
+            context.names.resolve(&generic.name).unwrap_or(generic.name.value).eq_ignore_ascii_case(RESULT)
+                && generic.type_arguments.arguments.len() == 2
+                && generic.type_arguments.arguments.first().is_some_and(is_exit_code)
+        }
+        _ => false,
+    };
     if method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Public(_)))
         && !method.modifiers.contains_static()
         && !method.modifiers.contains_abstract()
         && method.type_parameters.is_none()
         && method.parameter_list.parameters.is_empty()
-        && matches!(returns, Some(Hint::Integer(_) | Hint::Void(_)))
+        && returns_status
     {
         return;
     }
 
     context.report(
-        Issue::error("A class's `main` runs it as a program: declare it `public int main()` or `public void main()`.")
-            .with_annotation(Annotation::primary(method.name.span).with_message("Declared here."))
-            .with_note("The engine calls `main` with no arguments, and exits with the `int` it returns."),
+        Issue::error(
+            "A class's `main` runs it as a program: declare it `public void main()`, `public ExitCode main()` or `public Result<ExitCode, TError> main()`.",
+        )
+        .with_annotation(Annotation::primary(method.name.span).with_message("Declared here."))
+        .with_note("The engine calls `main` with no arguments, and exits with the code it returns: 0 for `void`, the `ExitCode`'s code, and 1 for an `Err`."),
     );
 }
+
+/// The `ExitCode` a program's `main` returns, spec section 27.
+const EXIT_CODE: &[u8] = b"Sharp\\System\\ExitCode";
+
+/// The `Result` a program's `main` may return, spec section 31.
+const RESULT: &[u8] = b"Sharp\\Result";
 
 /// Whether a method's declared return type is `Iterable<T>`. A method that yields gives one, which is never null, so
 /// `Iterable<T>?` is not one.

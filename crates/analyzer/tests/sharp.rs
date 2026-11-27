@@ -599,7 +599,7 @@ fn a_class_with_an_exported_method_is_used() {
 fn a_program_class_is_used_and_neither_it_nor_its_main_is_too_wide() {
     let import = (
         "src/App/Console/Import.sharp",
-        "namespace App.Console;\n\npublic class Import\n{\n    public int main() => 0;\n\n    public int size() => 1;\n}\n",
+        "namespace App.Console;\n\npublic class Import\n{\n    public void main() { }\n\n    public int size() => 1;\n}\n",
     );
 
     assert_eq!(unused_classes(&[import]), Vec::<String>::new());
@@ -1291,7 +1291,7 @@ fn an_internal_class_or_member_a_framework_reaches_is_too_narrow() {
     let hooks = "namespace App.Payments;\n\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\npublic class Hooks\n{\n    [AsEventListener]\n    internal void paid() { }\n}\n";
     let offer = "namespace App.Store;\n\nimport Illuminate.Database.Eloquent.Casts.Attribute;\nimport Illuminate.Database.Eloquent.Model;\n\npublic final class CartOffer : Model\n{\n    internal string offer() => \"offer\";\n\n    private Attribute label() => Attribute.make(get: (string value) => value.trim());\n}\n";
     let overrides = "namespace App.Hooks;\n\nimport Sharp.Interop.Export;\n\npublic static class Overrides\n{\n    [Export(\"app_title\")]\n    internal static string title(string text) => text;\n}\n";
-    let import = "namespace App.Console;\n\nclass Import\n{\n    public int main() => 0;\n}\n";
+    let import = "namespace App.Console;\n\nclass Import\n{\n    public void main() { }\n}\n";
     let mut files = PHPUNIT.to_vec();
     files.extend(ELOQUENT_MODEL);
     files.extend([
@@ -38493,7 +38493,7 @@ const GENERIC_READS: [(&str, &str); 2] = [
 fn a_generic_attribute_read_is_pure_for_a_sharp_attribute_class() {
     let probe = (
         "app/Reads/Probe.sharp",
-        "namespace App.Reads;\n\ninternal class Probe : Marker\n{\n    public bool marked(Class<Object> type) => Probe.has<Renders>(type);\n\n    private static bool has<TAttribute : Object>(Class<Object> type) => type.attributes<TAttribute>().count() > 0;\n\n    public int main() => this.marked(typeof(Renders)) ? 0 : 1;\n}\n",
+        "namespace App.Reads;\n\ninternal class Probe : Marker\n{\n    public bool marked(Class<Object> type) => Probe.has<Renders>(type);\n\n    private static bool has<TAttribute : Object>(Class<Object> type) => type.attributes<TAttribute>().count() > 0;\n\n    public void main()\n    {\n        if (!this.marked(typeof(Renders))) {\n            throw new LogicException(\"Renders is not marked\");\n        }\n    }\n}\n",
     );
     let [renders, marker] = GENERIC_READS;
     let [a, b, c, d, e, f, g] = REFLECTION;
