@@ -23,6 +23,7 @@ use mago_codex::ttype::combine_union_types;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::get_bool;
 use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_literal_string;
@@ -732,7 +733,7 @@ where
     // An `as`, or an `is` of a type, whose value is always of the type tests nothing. PHP# says so in the words the user
     // wrote, in place of PHP's report on the conditional it runs as. A type with fields or properties tests them too,
     // and each reports its own redundant test.
-    let redundant_test = match node {
+    let type_test = match node {
         Node::Expression(Expression::Is(is))
             if let Pattern::Type(TypePattern { hint, fields: None, properties: None, .. }) = is.pattern =>
         {
@@ -742,16 +743,20 @@ where
             Some((r#as.value, r#as.hint.span(), r#as.r#as.span.join(r#as.hint.span())))
         }
         _ => None,
-    }
-    .filter(|(value, hint, _)| {
+    };
+    // Under PHP#'s rules a `List` is never a `Map`, spec section 12, so a value that may be either, as plain PHP's
+    // `array<V>`, is never already the one kind its test names, which narrows it, though PHP's test of it, a test of
+    // an array, always holds.
+    let narrows_kinds = type_test.is_some_and(|(value, hint, _)| {
+        artifacts.get_tested_type(&hint).is_some_and(|tested| {
+            artifacts.get_expression_type(value).is_some_and(|value| narrows_list_or_map(value, tested))
+        })
+    });
+    let redundant_test = type_test.filter(|(value, hint, _)| {
         // A value whose expression is refused has no type to be already of, and a refused type names no type to be of.
         !is_refused
+            && !narrows_kinds
             && artifacts.get_expression_type(*value).is_some_and(|value| !is_refused_type(value))
-            // Under PHP#'s rules a `List` is never a `Map`, spec section 12, so a value that may be either, as plain
-            // PHP's `array<V>`, is never already the one kind its test names, which narrows it.
-            && !artifacts.get_tested_type(hint).is_some_and(|tested| {
-                artifacts.get_expression_type(*value).is_some_and(|value| narrows_list_or_map(value, tested))
-            })
             && tests.iter().any(|(pattern, test)| {
                 pattern.contains(&hint.start)
                     && artifacts.get_rc_expression_type(*test).is_some_and(|test| test.is_true())
@@ -806,10 +811,12 @@ where
                 && (!always_true
                     || span.is_none_or(|span| {
                         !last_arm_test.is_some_and(|test| test.contains(&span.start))
-                            && !redundant_test.is_some_and(|(value, _, test)| {
-                                test.contains(&span.start)
-                                    || (span.start == value.span().start && span.end > value.span().end)
-                            })
+                            && !redundant_test.or_else(|| type_test.filter(|_| narrows_kinds)).is_some_and(
+                                |(value, _, test)| {
+                                    test.contains(&span.start)
+                                        || (span.start == value.span().start && span.end > value.span().end)
+                                },
+                            )
                     }))
         })
         .map(|issue| reword_list_element_test(issue, &pattern_calls.list_elements, &list_reads, context, artifacts))
@@ -942,6 +949,8 @@ where
         && (is_refused || always_null.is_some())
     {
         artifacts.set_expression_type(expression, wrap_atomic(TAtomic::Error));
+    } else if narrows_kinds && let Node::Expression(expression @ Expression::Is(_)) = node {
+        artifacts.set_expression_type(expression, get_bool());
     } else if let (Node::Expression(expression), Node::Expression(php)) = (node, php)
         && let Some(php_type) = artifacts.get_rc_expression_type(php).cloned()
     {

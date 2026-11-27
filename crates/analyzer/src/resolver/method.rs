@@ -31,9 +31,9 @@ use mago_codex::ttype::get_iterable_parameters;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
-use mago_codex::ttype::get_sharp_received_list;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_specialized_template_type;
+use mago_codex::ttype::is_sharp_received_either_list;
 use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
@@ -1882,17 +1882,17 @@ fn collection_kinds(mut parts: Vec<TAtomic>) -> Vec<(CollectionKind, TUnion)> {
 }
 
 /// The value type `V` of plain PHP's `array<V>`, whose `List<V>` and `Map<int|string, V>` the receiver's parts `parts`
-/// and `other` are, one each, as [`get_sharp_received_list`] reads it. None for any other pair.
+/// and `other` are, one each, as [`is_sharp_received_either_list`] reads it. None for any other pair.
 fn plain_either_value(parts: &TUnion, other: &TUnion) -> Option<TUnion> {
-    let (list, map) = match (parts.types.as_ref(), other.types.as_ref()) {
-        ([TAtomic::Array(TArray::List(list))], [TAtomic::Array(map @ TArray::Keyed(_))])
-        | ([TAtomic::Array(map @ TArray::Keyed(_))], [TAtomic::Array(TArray::List(list))]) => (list, map),
-        _ => return None,
+    let ([part], [other_part]) = (parts.types.as_ref(), other.types.as_ref()) else {
+        return None;
     };
-    let either = get_sharp_received_list(map)?;
+    let list = [part, other_part].into_iter().find_map(|atomic| match atomic {
+        TAtomic::Array(TArray::List(list)) => Some(list),
+        _ => None,
+    })?;
 
-    (list.known_elements.is_none() && list.element_type == either.element_type)
-        .then(|| either.element_type.as_ref().clone())
+    is_sharp_received_either_list(list, [part, other_part].into_iter()).then(|| list.element_type.as_ref().clone())
 }
 
 /// Reports `method_name`, a member of the `having` kind alone, called on a value plain PHP's `array<V>` gives, whose
