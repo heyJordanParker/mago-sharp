@@ -35,6 +35,7 @@ pub(crate) mod summary;
 
 /// A reason a body is impure other than a change of state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum Effect {
     /// An effect named by its class, such as `Sharp\Http`: one an `extern` line lists for the plain PHP called, or the
     /// effect class of an object code reaches.
@@ -60,6 +61,7 @@ impl Effect {
 
 /// The state a body changes, named by the root of the place it writes. The same roots name the values a call passes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum Changed {
     /// The object the body runs on.
     This,
@@ -99,6 +101,7 @@ pub(crate) type Roots = BTreeSet<Changed>;
 /// module binding's expression, by the name of the lambda it is scanned as, or a class constant's value, by its
 /// lowercase class and its name. No call reaches a binding or a constant: the container runs one, and a read the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum Body {
     Method(Word, Word),
     Accessor(Word, Word, Word),
@@ -111,6 +114,7 @@ pub(crate) enum Body {
 
 /// What a function value runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum Runs {
     /// A PHP# lambda or method, whose effects only the solve knows.
     Body(Body),
@@ -126,6 +130,7 @@ pub(crate) enum Runs {
 /// A lambda or a method value a body gives a place whose PHP# function type lists its effects. Spec section 29 holds
 /// it to that list.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct FunctionValue {
     pub(crate) runs: Runs,
     /// The effects the place's function type lists, by full class name.
@@ -140,6 +145,7 @@ pub(crate) struct FunctionValue {
 /// A call of a PHP# method without `readonly` through a readonly value, spec section 13. Only the solve knows whether
 /// the method changes `this`, which its message says. Each text is as the calling file writes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct ReadonlyCall {
     pub(crate) callee: Body,
     pub(crate) span: Span,
@@ -157,6 +163,7 @@ pub(crate) struct ReadonlyCall {
 
 /// A call from one PHP# body to another, with the roots of what it passes.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct Call {
     pub(crate) callee: Body,
     pub(crate) span: Span,
@@ -171,6 +178,7 @@ pub(crate) struct Call {
 /// What a call's type argument is to a read of the attributes of the class it names, `attributes<TAttribute>()`, spec
 /// sections 1 and 25.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum AttributeArgument {
     /// A class-like by its name, whose attributes a read creates with no effects when [`sharp_attributes`] holds for
     /// it in the codebase the effects are solved against, and with every effect otherwise.
@@ -200,6 +208,7 @@ pub(crate) fn sharp_attributes(codebase: &CodebaseMetadata, class: Word) -> bool
 /// What one PHP# body does by itself: the effects of the plain PHP it calls, the PHP# bodies it calls, and the state
 /// it changes. A lambda is part of the body that calls it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EffectSummary {
     pub(crate) body: Body,
     /// The body's member as messages name it: `price`, `total` for an accessor of `total`, or `operator +`.
@@ -223,8 +232,64 @@ pub struct EffectSummary {
     /// The name each import of the body's file gives its class, and the file's namespace and imports, as
     /// `Context::imported_names` and `Context::scope` hold them, shared by the file's bodies. A message about the body
     /// names classes, and the imports its code needs, as its file does.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) imports: Arc<WordMap<Word>>,
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) scope: Arc<NamespaceScope>,
+}
+
+/// The effect summaries of one file's bodies, encoded with the file's imports and scope once.
+///
+/// The summaries share the two, and `#[serde(with = "mago_analyzer::effects::file_summaries")]` reads and writes them
+/// this way. Decoding gives every summary the same two again, as the file's analysis gave them.
+#[cfg(feature = "serde")]
+pub mod file_summaries {
+    use std::sync::Arc;
+
+    use mago_names::scope::NamespaceScope;
+    use mago_word::Word;
+    use mago_word::WordMap;
+    use serde::Deserialize;
+    use serde::Deserializer;
+    use serde::Serialize;
+    use serde::Serializer;
+
+    use super::EffectSummary;
+
+    /// Writes the imports and scope of the file's first summary, then every summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns the serializer's error.
+    pub fn serialize<S>(summaries: &[EffectSummary], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let shared = summaries.first().map(|summary| (&*summary.imports, &*summary.scope));
+        (shared, summaries).serialize(serializer)
+    }
+
+    /// Reads what [`serialize`] writes, and gives each summary the file's imports and scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns the deserializer's error.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<EffectSummary>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let (shared, mut summaries): (Option<(WordMap<Word>, NamespaceScope)>, Vec<EffectSummary>) =
+            Deserialize::deserialize(deserializer)?;
+        if let Some((imports, scope)) = shared {
+            let (imports, scope) = (Arc::new(imports), Arc::new(scope));
+            for summary in &mut summaries {
+                summary.imports = Arc::clone(&imports);
+                summary.scope = Arc::clone(&scope);
+            }
+        }
+
+        Ok(summaries)
+    }
 }
 
 /// Why a body is impure, as the first call or write in it that leads there. Each name is a full class name and a

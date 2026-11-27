@@ -162,8 +162,9 @@ pub struct Reads {
     /// Each method whose inferred return the check read, named `Class::method` and fingerprinted by the xxh3-64 of
     /// that return type's `TUnion::get_id()`.
     pub bodies: Vec<Read>,
-    /// Each library method whose body the file inlines, named `Class::method` and fingerprinted by the xxh3-64 of the
-    /// inlined form's bytes.
+    /// Each library method whose body the file inlines, named as the library names the form it inlined, `Class::method`
+    /// or `Class::method#2` for the form of a call that leaves out its last arguments, and fingerprinted by the xxh3-64
+    /// of the inlined form's bytes.
     pub inlined: Vec<Read>,
     /// Each set of names an extension listed in the analysis, for any file, since a hook may answer the file from a set
     /// it kept from another, fingerprinted by a hash of the names the set holds, so a name joining or leaving it changes

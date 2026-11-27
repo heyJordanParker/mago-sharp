@@ -86,6 +86,7 @@ pub mod version_constraint;
 /// merged codebase without keeping a full `CodebaseMetadata` clone per file.
 /// Created via [`CodebaseMetadata::extract_keys()`].
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CodebaseEntryKeys {
     /// Class-like FQCN atoms (also used for symbol removal).
     pub class_like_names: Vec<Word>,
@@ -218,8 +219,10 @@ pub struct CodebaseMetadata {
     #[cfg_attr(feature = "serde", serde(default))]
     dev_packages: HashMap<FileId, Vec<DevPackage>>,
     /// Each user-defined class-like population filled, as its scan gave it, by its key. Population fills such a
-    /// class-like again from it, as a full analysis does, so nothing an earlier fill derived stays.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    /// class-like again from it, as a full analysis does, so nothing an earlier fill derived stays. A codebase decoded
+    /// to analyze again, as a compile restores the last one, keeps it for that. The prelude holds no user-defined
+    /// class-like, so its encoding holds none of it.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub(crate) scanned_class_likes: WordMap<Shared<ClassLikeMetadata>>,
 }
 
@@ -405,6 +408,14 @@ impl CodebaseMetadata {
 
         self.class_like_aliases_dirty = false;
         aliases_changed
+    }
+
+    /// Makes again each map the codebase's encoding leaves out, as each population ends by: the import cycles, the
+    /// short names and the interop names. A codebase decoded to analyze again makes them once it is decoded.
+    pub fn populate_derived_maps(&mut self) {
+        self.populate_import_cycles();
+        self.populate_short_names();
+        self.populate_interop_names();
     }
 
     /// Counts the class-likes of each short name that [`Self::shares_short_name`] reads.

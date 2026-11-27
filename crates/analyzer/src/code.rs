@@ -7,6 +7,7 @@
 ///
 /// This enum is non-exhaustive; new issue codes may be added in future versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u16)]
 #[non_exhaustive]
 pub enum IssueCode {

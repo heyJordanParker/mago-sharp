@@ -19,7 +19,20 @@ path = "tests/main.rs"
 [lints]
 workspace = true
 
+[features]
+default = []
+serde = [
+    "dep:serde",
+    "mago-codex/serde",
+    "mago-reporting/serde",
+    "mago-word/serde",
+    "mago-span/serde",
+    "mago-names/serde",
+    "mago-database/serde",
+]
+
 [dependencies]
+serde = { workspace = true, optional = true }
 mago-codex = { workspace = true }
 mago-reporting = { workspace = true }
 mago-text-edit = { workspace = true }
