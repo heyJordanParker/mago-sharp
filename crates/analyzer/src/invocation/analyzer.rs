@@ -2090,9 +2090,13 @@ fn report_abstract_called_statics<A>(
         let Some(found) = abstract_called_static(context.codebase, *name, template, type_argument) else {
             continue;
         };
-        // The parameter's type names the type parameter at any depth, as `Class<T>` does.
+        // The parameter's type names the type parameter at any depth, as `Class<T>`, a class string of `T`, does.
         let names_parameter = |node: TypeRef<'_>| match node {
             TypeRef::Atomic(TAtomic::GenericParameter(parameter)) => parameter.parameter_name == *name,
+            TypeRef::Atomic(TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic {
+                parameter_name,
+                ..
+            }))) => parameter_name == name,
             _ => false,
         };
         let span = metadata
