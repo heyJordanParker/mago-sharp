@@ -1491,7 +1491,7 @@ where
     else {
         return false;
     };
-    let property = word(&[b"$".as_slice(), name.value].concat());
+    let property = word([b"$".as_slice(), name.value].concat());
     let mut classes = object.types.iter().filter(|atomic| !atomic.is_null()).peekable();
 
     classes.peek().is_some()
