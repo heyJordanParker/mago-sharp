@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 
 use mago_word::Word;
 use mago_word::word;
@@ -16,11 +17,11 @@ use crate::ttype::union::TUnion;
 macro_rules! has_member_ttype_impl {
     ($member_type:ident, $member_field:ident, $id_prefix:literal) => {
         impl TType for $member_type {
-            fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-                self.intersection_types
-                    .as_ref()
-                    .map(|types| types.iter().map(TypeRef::Atomic).collect())
-                    .unwrap_or_default()
+            fn visit_child_nodes<'ty>(
+                &'ty self,
+                visit: &mut dyn FnMut(TypeRef<'ty>) -> ::std::ops::ControlFlow<()>,
+            ) -> ::std::ops::ControlFlow<()> {
+                self.intersection_types.iter().flatten().try_for_each(|atomic| visit(TypeRef::Atomic(atomic)))
             }
 
             fn can_be_intersected(&self) -> bool {
@@ -182,14 +183,14 @@ impl TObject {
 }
 
 impl TType for TObject {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
         match self {
-            TObject::Any => vec![],
-            TObject::HasMethod(has_method) => has_method.get_child_nodes(),
-            TObject::HasProperty(has_property) => has_property.get_child_nodes(),
-            TObject::Enum(ttype) => ttype.get_child_nodes(),
-            TObject::Named(ttype) => ttype.get_child_nodes(),
-            TObject::WithProperties(ttype) => ttype.get_child_nodes(),
+            TObject::Any => ControlFlow::Continue(()),
+            TObject::HasMethod(has_method) => has_method.visit_child_nodes(visit),
+            TObject::HasProperty(has_property) => has_property.visit_child_nodes(visit),
+            TObject::Enum(ttype) => ttype.visit_child_nodes(visit),
+            TObject::Named(ttype) => ttype.visit_child_nodes(visit),
+            TObject::WithProperties(ttype) => ttype.visit_child_nodes(visit),
         }
     }
 

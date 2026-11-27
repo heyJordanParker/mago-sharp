@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -82,8 +83,8 @@ impl TNew {
 }
 
 impl TType for TNew {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        vec![TypeRef::Union(&self.0)]
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        visit(TypeRef::Union(&self.0))
     }
 
     fn needs_population(&self) -> bool {

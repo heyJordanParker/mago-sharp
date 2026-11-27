@@ -10,6 +10,8 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
+use mago_names::EXPORT;
+use mago_names::IMPORT;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
@@ -31,6 +33,7 @@ use crate::graph::strongly_connected_parts;
 use crate::identifier::method::MethodIdentifier;
 use crate::issue::ScanningIssueKind;
 use crate::metadata::attribute::AttributeMetadata;
+use crate::metadata::attribute::ConstantExpression;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::class_like::ParsedField;
 
@@ -124,6 +127,11 @@ pub struct CodebaseMetadata {
     /// name in lowercase. Made again on each population.
     #[cfg_attr(feature = "serde", serde(skip))]
     short_names: WordMap<u32>,
+    /// The methods an interop attribute, spec section 23, gives a PHP function name with a string literal, by their
+    /// keys in `function_likes`, under the attribute's name and that PHP name in lowercase, as PHP's function names
+    /// ignore case. Made again on each population.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    interop_names: HashMap<(Word, Word), Vec<(Word, Word)>>,
     #[cfg_attr(feature = "serde", serde(default))]
     pub class_like_aliases: WordMap<Word>,
     #[cfg_attr(feature = "serde", serde(default))]
@@ -412,6 +420,31 @@ impl CodebaseMetadata {
         self.short_names = short_names;
     }
 
+    /// Groups the methods each interop attribute gives the same PHP function name, which [`Self::interop_namesakes`]
+    /// reads. A method's first attribute of a mark is the one that names its function.
+    pub(crate) fn populate_interop_names(&mut self) {
+        let mut interop_names: HashMap<(Word, Word), Vec<(Word, Word)>> = HashMap::default();
+        for (key, function_like) in &self.function_likes {
+            if function_like.method_metadata.is_none() {
+                continue;
+            }
+            for mark in [IMPORT, EXPORT] {
+                let Some(attribute) =
+                    function_like.attributes.iter().find(|attribute| attribute.name.as_bytes() == mark.as_bytes())
+                else {
+                    continue;
+                };
+                if let Some(ConstantExpression::String(name)) =
+                    attribute.arguments.first().and_then(|argument| argument.value.as_ref())
+                {
+                    interop_names.entry((attribute.name, name.to_ascii_lowercase())).or_default().push(*key);
+                }
+            }
+        }
+
+        self.interop_names = interop_names;
+    }
+
     /// Finds each import that closes a cycle of imports between namespaces, spec section 23. The namespaces of one
     /// strongly connected part of the import graph lead to each other, so an import closes a cycle when the namespace
     /// it imports is another one of its own namespace's part, and one walk breadth first from that namespace, over the
@@ -623,6 +656,13 @@ impl CodebaseMetadata {
     #[must_use]
     pub fn shares_short_name(&self, name: Word) -> bool {
         self.short_names.get(&short_name_key(name.as_bytes())).is_some_and(|count| *count > 1)
+    }
+
+    /// The keys in `function_likes` of every method the interop attribute named `mark` gives the PHP function name
+    /// `name`, in any case, the method that asks among them.
+    #[must_use]
+    pub fn interop_namesakes(&self, mark: Word, name: Word) -> &[(Word, Word)] {
+        self.interop_names.get(&(mark, name.to_ascii_lowercase())).map_or(&[], Vec::as_slice)
     }
 
     /// Checks if a class or trait exists in the codebase, by [`Self::class_key`].

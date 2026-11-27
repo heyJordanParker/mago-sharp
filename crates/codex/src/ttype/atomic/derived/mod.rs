@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use mago_word::Word;
 
 use crate::ttype::TType;
@@ -97,17 +99,17 @@ impl TDerived {
 }
 
 impl TType for TDerived {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
         match self {
-            TDerived::KeyOf(ttype) => ttype.get_child_nodes(),
-            TDerived::ValueOf(ttype) => ttype.get_child_nodes(),
-            TDerived::IntMask(ttype) => ttype.get_child_nodes(),
-            TDerived::IntMaskOf(ttype) => ttype.get_child_nodes(),
-            TDerived::PropertiesOf(ttype) => ttype.get_child_nodes(),
-            TDerived::IndexAccess(ttype) => ttype.get_child_nodes(),
-            TDerived::New(ttype) => ttype.get_child_nodes(),
-            TDerived::TemplateType(ttype) => ttype.get_child_nodes(),
-            TDerived::Intersection(ttype) => ttype.get_child_nodes(),
+            TDerived::KeyOf(ttype) => ttype.visit_child_nodes(visit),
+            TDerived::ValueOf(ttype) => ttype.visit_child_nodes(visit),
+            TDerived::IntMask(ttype) => ttype.visit_child_nodes(visit),
+            TDerived::IntMaskOf(ttype) => ttype.visit_child_nodes(visit),
+            TDerived::PropertiesOf(ttype) => ttype.visit_child_nodes(visit),
+            TDerived::IndexAccess(ttype) => ttype.visit_child_nodes(visit),
+            TDerived::New(ttype) => ttype.visit_child_nodes(visit),
+            TDerived::TemplateType(ttype) => ttype.visit_child_nodes(visit),
+            TDerived::Intersection(ttype) => ttype.visit_child_nodes(visit),
         }
     }
 

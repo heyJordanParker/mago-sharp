@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -122,9 +123,36 @@ pub enum TypeRef<'ty> {
 
 /// A trait to be implemented by all types in the type system.
 pub trait TType {
+    /// Calls `visit` on each child type node that this type contains, in order, and stops at the first call that
+    /// breaks, as rustc's `TypeVisitor` stops. It is the one list of a type's children, which every walk of a type
+    /// reads.
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        let _ = visit;
+        ControlFlow::Continue(())
+    }
+
     /// Returns a vector of child type nodes that this type contains.
     fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        vec![]
+        let mut children = Vec::new();
+        let _ = self.visit_child_nodes(&mut |child| {
+            children.push(child);
+            ControlFlow::Continue(())
+        });
+
+        children
+    }
+
+    /// Whether `predicate` holds for a child type node of this type, at any depth. The walk stops at the first node it
+    /// holds for, and builds no list of nodes.
+    fn any_child_node(&self, predicate: &mut dyn FnMut(TypeRef<'_>) -> bool) -> bool {
+        self.visit_child_nodes(&mut |child| {
+            if predicate(child) || child.any_child_node(predicate) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .is_break()
     }
 
     /// Returns a vector of all child type nodes, including nested ones.
@@ -227,6 +255,16 @@ impl TypeRef<'_> {
 
 /// Implements the `TType` trait for `TypeRef`.
 impl<'ty> TType for TypeRef<'ty> {
+    fn visit_child_nodes<'node>(
+        &'node self,
+        visit: &mut dyn FnMut(TypeRef<'node>) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        match self {
+            TypeRef::Union(ttype) => ttype.visit_child_nodes(visit),
+            TypeRef::Atomic(ttype) => ttype.visit_child_nodes(visit),
+        }
+    }
+
     fn get_child_nodes(&self) -> Vec<TypeRef<'ty>> {
         match self {
             TypeRef::Union(ttype) => ttype.get_child_nodes(),

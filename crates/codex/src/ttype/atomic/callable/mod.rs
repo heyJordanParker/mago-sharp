@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -269,27 +270,25 @@ impl TCallable {
 }
 
 impl TType for TCallable {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        let mut children = Vec::new();
-
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
         if let TCallable::Signature(signature) = self {
             if let Some(return_type) = &signature.return_type {
-                children.push(TypeRef::Union(return_type));
+                visit(TypeRef::Union(return_type))?;
             }
 
             for parameter in &signature.parameters {
                 if let Some(parameter_type) = parameter.get_type_signature() {
-                    children.push(TypeRef::Union(parameter_type));
+                    visit(TypeRef::Union(parameter_type))?;
                 }
             }
 
             for constraint in &signature.constraints {
-                children.push(TypeRef::Union(&constraint.input_type));
-                children.push(TypeRef::Union(&constraint.parameter_type));
+                visit(TypeRef::Union(&constraint.input_type))?;
+                visit(TypeRef::Union(&constraint.parameter_type))?;
             }
         }
 
-        children
+        ControlFlow::Continue(())
     }
 
     fn needs_population(&self) -> bool {

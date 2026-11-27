@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -37,11 +38,9 @@ impl TDerivedIntersection {
 }
 
 impl TType for TDerivedIntersection {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        let mut children = Vec::with_capacity(1 + self.intersection_types.len());
-        children.push(TypeRef::Union(&self.base_type));
-        children.extend(self.intersection_types.iter().map(TypeRef::Atomic));
-        children
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        visit(TypeRef::Union(&self.base_type))?;
+        self.intersection_types.iter().try_for_each(|atomic| visit(TypeRef::Atomic(atomic)))
     }
 
     fn can_be_intersected(&self) -> bool {

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -157,20 +158,19 @@ impl TKeyedArray {
 }
 
 impl TType for TKeyedArray {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        let mut children = vec![];
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
         if let Some(known_items) = self.known_items.as_ref() {
             for (_, item_type) in known_items.values() {
-                children.push(TypeRef::Union(item_type));
+                visit(TypeRef::Union(item_type))?;
             }
         }
 
         if let Some(parameters) = self.get_generic_parameters() {
-            children.push(TypeRef::Union(parameters.0));
-            children.push(TypeRef::Union(parameters.1));
+            visit(TypeRef::Union(parameters.0))?;
+            visit(TypeRef::Union(parameters.1))?;
         }
 
-        children
+        ControlFlow::Continue(())
     }
 
     fn needs_population(&self) -> bool {
