@@ -632,7 +632,7 @@ impl<'machine, 'ast, 'arena> Machine<'machine, 'ast, 'arena> {
 
 /// A value of one case of a machine, as a law that takes it states it, spec sections 20.2 and 28: built by the case's
 /// constructor from its fields, each its own binder, and keeping each invariant of the case, since a move gives only a
-/// value that keeps them and `Json.decode` checks them of each value it builds. So the law holds for each value a
+/// value that keeps them and `Json.parse<T>` checks them of each value it builds. So the law holds for each value a
 /// program holds, and its proof reads the case's fields, never another case.
 pub(super) struct HeldCase {
     /// The Lean constructor of the case: `App.Store.OrderStatus.Refunded`.

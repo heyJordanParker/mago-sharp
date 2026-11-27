@@ -11,6 +11,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::union::TUnion;
 
 use mago_codex::metadata::attribute::AttributeMetadata;
@@ -807,6 +808,64 @@ pub(super) fn check_test_method_parameters<A>(
         }
     }
 }
+
+/// Spec sections 10 and 31: the engine reads a field of a type through the type's own `parse` and takes its failure as
+/// a value, so a static `parse` a PHP# type declares is `static Result<Self, ParseError> parse(Any? value)`, and any
+/// other is refused at its declaration. The standard library declares its own, as `Int.parse(string text, int radix)`.
+pub(super) fn check_own_parse<A>(
+    context: &mut Context<'_, '_, A>,
+    class: &ClassLikeMetadata,
+    members: &[ClassLikeMember<'_>],
+) where
+    A: Arena,
+{
+    if class.name.as_bytes().to_ascii_lowercase().starts_with(b"sharp\\") {
+        return;
+    }
+    for member in members {
+        let ClassLikeMember::Method(method) = member else {
+            continue;
+        };
+        if method.name.value != b"parse" || !method.modifiers.contains_static() {
+            continue;
+        }
+        let Some(metadata) = context.codebase.get_method(class.name, word("parse")) else {
+            continue;
+        };
+        let takes_any = matches!(metadata.parameters.as_slice(), [parameter]
+            if parameter.type_metadata.as_ref().is_some_and(|hint| hint.type_union.is_mixed()));
+        let gives_result = takes_any
+            && metadata.return_type_metadata.as_ref().is_some_and(|returned| {
+                crate::expression::result_type_arguments(context.codebase, &returned.type_union).is_some_and(
+                    |[value, error]| {
+                        value.is_single()
+                            && matches!(value.get_single(), TAtomic::Object(TObject::Named(object))
+                            if context.codebase.class_key(object.name) == context.codebase.class_key(class.name))
+                            && error.is_single()
+                            && matches!(error.get_single(), TAtomic::Object(TObject::Named(object))
+                            if context.codebase.class_key(object.name) == context.codebase.class_key(word(PARSE_ERROR)))
+                    },
+                )
+            });
+        if gives_result {
+            continue;
+        }
+        let name = display_class_like_name(context, class.original_name);
+        context.collector.report_with_code(
+            IssueCode::InvalidParse,
+            Issue::error(format!(
+                "`{name}.parse` is `static Result<{name}, ParseError> parse(Any? value)`: the engine reads each `{name}` through it."
+            ))
+                .with_annotation(Annotation::primary(method.name.span).with_message("Declared here."))
+                .with_help(format!(
+                    "Declare `public static Result<{name}, ParseError> parse(Any? value)`, and return `Result.Err(new ParseError([\"\": problem]))` where the value can't be read, or give a method of another job another name."
+                )),
+        );
+    }
+}
+
+/// The failure of a `parse`, spec section 10.
+const PARSE_ERROR: &str = "Sharp\\ParseError";
 
 /// The class every PHPUnit test extends.
 const TEST_CASE: &str = "PHPUnit\\Framework\\TestCase";

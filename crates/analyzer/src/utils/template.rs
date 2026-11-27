@@ -274,10 +274,10 @@ pub(crate) struct TemplateUse {
 /// parameter. A method's parameters take their types in and its return type hands its type out, a property hands its
 /// type out and takes it in when another class can write it, and the header hands its type arguments out, as C# and
 /// Kotlin check a base type's. Private members and the constructors, main and named, are exempt, as Kotlin exempts its
-/// primary and secondary constructors, and so are the generated `parse` and `tryParse`, and a private member that
-/// breaks a marker is reachable only through `this`, which `check_private_method_reach` and
-/// `check_private_property_reach` check where it is reached. A header entry stands at its span in `header_spans`, by
-/// its parent's key, or at the class's name without one.
+/// primary and secondary constructors, and so is the generated `parse`, and a private member that breaks a marker is
+/// reachable only through `this`, which `check_private_method_reach` and `check_private_property_reach` check where it
+/// is reached. A header entry stands at its span in `header_spans`, by its parent's key, or at the class's name without
+/// one.
 pub(crate) fn find_template_uses<A>(
     context: &Context<'_, '_, A>,
     class: &ClassLikeMetadata,
@@ -317,7 +317,7 @@ where
         let Some(method) = codebase.get_method(class.name, *method_name) else {
             unreachable!("a class lists only the methods it declares");
         };
-        // The `parse` and `tryParse` the codex writes span the whole type and create it, as a constructor does.
+        // The `parse` the codex writes spans the whole type and creates it, as a constructor does.
         if method.method_metadata.as_ref().is_some_and(|metadata| metadata.is_constructor)
             || method.flags.is_named_constructor()
             || method.span == class.span

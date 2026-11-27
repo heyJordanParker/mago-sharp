@@ -166,10 +166,10 @@ where
                 return (false, None);
             };
 
-            // Spec section 10: the `parse` and `tryParse` an interface family gets hold no body, and a PHP# call of
-            // either runs in the engine.
+            // Spec section 10: the `parse` an interface family gets holds no body, and a PHP# call of it runs in the
+            // engine.
             let family_parse = context.dialect.is_sharp()
-                && matches!(method_name.as_bytes(), b"parse" | b"tryParse")
+                && method_name.as_bytes() == b"parse"
                 && context.codebase.parses(fq_class_id);
             // A PHP# call through a type parameter bound by an interface that lacks the method is refused as a missing
             // method alone, as `TItem.make()` on a `TItem : Labeled` whose `Labeled` declares no `make`.
