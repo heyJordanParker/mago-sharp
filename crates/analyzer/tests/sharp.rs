@@ -36785,6 +36785,71 @@ fn a_test_module_outside_a_test_file_is_refused() {
     }
 }
 
+/// Spec section 32: PHPUnit creates a test object for each test with the test's name, and the container fills the test
+/// class's main constructor from its file's test module over the base modules. So the constructor calls no super, each
+/// of its parameters needs a binding, and a test method takes only its data provider's values, as a `Before` method
+/// takes none.
+#[test]
+fn a_test_class_takes_its_services_in_its_constructor_and_its_test_methods_take_none() {
+    let test_case = (
+        "vendor/phpunit/phpunit/src/Framework/TestCase.php",
+        "<?php\n\nnamespace PHPUnit\\Framework;\n\nabstract class TestCase\n{\n    public function __construct(string $name)\n    {\n    }\n}\n",
+    );
+    let attribute = |name: &'static str| {
+        (
+            leak(format!("vendor/phpunit/phpunit/src/Framework/Attributes/{name}.php")),
+            leak(format!(
+                "<?php\n\nnamespace PHPUnit\\Framework\\Attributes;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD)]\nfinal class {name}\n{{\n}}\n"
+            )),
+        )
+    };
+    let shop = ("app/Shop/Module.sharp", "namespace App.Shop;\n\nmodule\n{\n}\n");
+    let mailer = ("app/Shop/Mailer.sharp", "namespace App.Shop;\n\npublic class Mailer\n{\n}\n");
+    let clock = ("app/Shop/Clock.sharp", "namespace App.Shop;\n\npublic class Clock\n{\n}\n");
+    let test = |body: &str| {
+        (
+            "tests/Shop/CheckoutTest.sharp",
+            leak(format!(
+                "namespace App.Shop;\n\nimport PHPUnit.Framework.Attributes.Before;\nimport PHPUnit.Framework.Attributes.Test;\nimport PHPUnit.Framework.TestCase;\n\nmodule : App.Shop\n{{\n    singleton Mailer = Mailer;\n}}\n\npublic class CheckoutTest : TestCase\n{{\n{body}\n}}\n"
+            )),
+        )
+    };
+    let others = [test_case, attribute("Test"), attribute("Before"), shop, mailer, clock];
+
+    let takes = test(
+        "    public CheckoutTest(private Mailer mailer) { }\n\n    [Test]\n    public Mailer sends() => this.mailer;",
+    );
+    assert_eq!(refusals(takes, &others), Vec::<String>::new());
+
+    let calls_super = test(
+        "    public CheckoutTest(private Mailer mailer) : super(\"sends\") { }\n\n    [Test]\n    public Mailer sends() => this.mailer;",
+    );
+    assert_eq!(
+        refusals(calls_super, &others),
+        [
+            "14:48 test-class-super-call PHPUnit names each test, so a test class's constructor calls no super. | Remove `: super(…)`, and take the class's services as the constructor's parameters."
+        ]
+    );
+
+    let unbound =
+        test("    public CheckoutTest(private Clock clock) { }\n\n    [Test]\n    public Clock sends() => this.clock;");
+    assert_eq!(
+        refusals(unbound, &others),
+        [
+            "14:25 missing-service `CheckoutTest` needs an `App.Shop.Clock`, and no module binds one: the container can't build `CheckoutTest`. | Bind `App.Shop.Clock` in a module of `CheckoutTest`'s namespace or one above it, as in `transient App.Shop.Clock = App.Shop.Clock;`."
+        ]
+    );
+
+    let with_parameters = test(
+        "    [Before]\n    public void prepare(Mailer mailer) { }\n\n    [Test]\n    public Mailer sends(Mailer mailer) => mailer;",
+    );
+    let refused = "A test method takes only its data provider's values: take services in the test class's constructor. | Move the parameter to the test class's constructor, and read it from `this`.";
+    assert_eq!(
+        refusals(with_parameters, &others),
+        [format!("15:25 test-method-parameter {refused}"), format!("18:25 test-method-parameter {refused}")]
+    );
+}
+
 /// Spec section 32, as .NET's scope validation and Dagger's graph check refuse them: a service that needs itself, at
 /// each binding on the cycle, and a `scoped` service a `singleton` holds, directly or through `transient` services. A
 /// `singleton` that holds another `singleton` leaves that one's services to its own binding, which is refused once.

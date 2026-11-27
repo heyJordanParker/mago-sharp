@@ -1300,8 +1300,9 @@ fn a_test_module_hands_its_bindings_to_the_container_for_the_class_its_file_decl
 }
 
 /// Spec section 32: PHPUnit runs the methods `Before` and `After` mark in its own process and in a child one, so
-/// each class of a test file starts its tests with the file's module before every other `Before` method and `setUp`,
-/// and ends them after every other `After` method and `tearDown`, by priority. A test module with no bindings still
+/// each class of a test file starts its tests with the file's module before every other `Before` method and `setUp`, then
+/// fills the test object's services from it, and ends them after every other `After` method and `tearDown`, by
+/// priority. A test module with no bindings still
 /// applies, so its tests run without the environment modules. A class of any other file gets neither method.
 #[test]
 fn a_test_files_class_starts_each_test_with_the_test_module_and_ends_it_after() {
@@ -1318,19 +1319,21 @@ fn a_test_files_class_starts_each_test_with_the_test_module_and_ends_it_after() 
             "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport App.Mail.FakeMailer;\nimport PHPUnit.Framework.TestCase;\n\nmodule : App.Shop\n{{\n{members}}}\n\npublic class CheckoutTest : TestCase\n{{\n}}\n"
         )
     };
-    let hook = |name: &str, function: &str, argument: &str, attribute: &str, priority: i64| {
+    let hook = |name: &str, function: &str, argument: &str, then: &str, attribute: &str, priority: i64| {
         format!(
-            "METHOD [1] {name:?} @{{line}}-{{end}}\n  PARAM_LIST\n  null\n  STMT_LIST\n    CALL\n      ZVAL {function:?}\n      ARG_LIST\n{argument}  ZVAL [1] \"void\"\n  ATTRIBUTE_LIST\n    ATTRIBUTE_GROUP\n      ATTRIBUTE\n        ZVAL {attribute:?}\n        ARG_LIST\n          ZVAL {priority}\n"
+            "METHOD [1] {name:?} @{{line}}-{{end}}\n  PARAM_LIST\n  null\n  STMT_LIST\n    CALL\n      ZVAL {function:?}\n      ARG_LIST\n{argument}{then}  ZVAL [1] \"void\"\n  ATTRIBUTE_LIST\n    ATTRIBUTE_GROUP\n      ATTRIBUTE\n        ZVAL {attribute:?}\n        ARG_LIST\n          ZVAL {priority}\n"
         )
     };
     let start = hook(
         "__sharpStartTest",
         "Sharp\\Internal\\startTest",
         "        CLASS_NAME\n          ZVAL [1] \"static\"\n",
+        "    CALL\n      ZVAL \"Sharp\\\\Internal\\\\fillTest\"\n      ARG_LIST\n        VAR\n          ZVAL \"this\"\n",
         "PHPUnit\\Framework\\Attributes\\Before",
         i64::MAX,
     );
-    let end = hook("__sharpEndTest", "Sharp\\Internal\\endTest", "", "PHPUnit\\Framework\\Attributes\\After", i64::MIN);
+    let end =
+        hook("__sharpEndTest", "Sharp\\Internal\\endTest", "", "", "PHPUnit\\Framework\\Attributes\\After", i64::MIN);
 
     for (members, line, table) in
         [("    singleton Mailer = FakeMailer;\n", 12, "ARRAY [3]\n  ARRAY_ELEM\n"), ("", 11, "ARRAY [3]\n")]
@@ -1358,6 +1361,52 @@ fn a_test_files_class_starts_each_test_with_the_test_module_and_ends_it_after() 
         .map(|node| base.text(node.text))
         .collect();
     assert!(!methods.iter().any(|method| method == "__sharpStartTest" || method == "__sharpEndTest"), "{methods:?}");
+}
+
+/// Spec section 32: PHPUnit creates a test class with each test's name, and an extension with no argument, so the main
+/// constructor of each runs as `__sharpServices`, which the container calls with its services, and its PHP constructor
+/// is PHPUnit's: a test class's takes the name and passes it to `TestCase`, and an extension's fills its services.
+#[test]
+fn a_test_class_and_a_phpunit_extension_run_their_constructor_as_their_services() {
+    let library = [
+        ("app/Mail/Mailer.sharp", "namespace App.Mail;\n\npublic class Mailer\n{\n}\n"),
+        (
+            "app/Module.sharp",
+            "namespace App;\n\nimport App.Mail.Mailer;\n\nmodule\n{\n    transient Mailer = Mailer;\n}\n",
+        ),
+        (
+            "vendor/phpunit/phpunit/src/Framework/TestCase.php",
+            "<?php namespace PHPUnit\\Framework; abstract class TestCase { public function __construct(string $name) {} }",
+        ),
+        (
+            "vendor/phpunit/phpunit/src/Runner/Extension/Extension.php",
+            "<?php namespace PHPUnit\\Runner\\Extension; interface Extension { public function bootstrap(): void; }",
+        ),
+    ];
+    let test = Lowered(common::checked(
+        "tests/Shop/CheckoutTest.sharp",
+        "namespace App.Shop;\n\nimport App.Mail.Mailer;\nimport PHPUnit.Framework.TestCase;\n\npublic class CheckoutTest : TestCase\n{\n    public CheckoutTest(private Mailer mailer) { }\n}\n",
+        &library,
+        lower,
+    ));
+    let extension = Lowered(common::checked(
+        "tests/Support/Reporter.sharp",
+        "namespace App.Support;\n\nimport App.Mail.Mailer;\nimport PHPUnit.Runner.Extension.Extension;\n\npublic class Reporter : Extension\n{\n    public Reporter(private Mailer mailer) { }\n\n    public void bootstrap() { }\n}\n",
+        &library,
+        lower,
+    ));
+
+    let services = "METHOD [1] \"__sharpServices\" @8-8\n  PARAM_LIST\n    PARAM\n      ZVAL \"App\\\\Mail\\\\Mailer\"\n      ZVAL \"mailer\"\n      null\n      null\n      null\n      null\n  null\n  STMT_LIST\n    ASSIGN\n      PROP\n        VAR\n          ZVAL \"this\"\n        ZVAL \"mailer\"\n      VAR\n        ZVAL \"mailer\"\n  null\n  null\n";
+    assert_eq!(
+        test.declared("__construct"),
+        "METHOD [1] \"__construct\" @8-8\n  PARAM_LIST\n    PARAM\n      ZVAL [1] \"string\"\n      ZVAL \"name\"\n      null\n      null\n      null\n      null\n  null\n  STMT_LIST\n    STATIC_CALL\n      ZVAL [1] \"parent\"\n      ZVAL \"__construct\"\n      ARG_LIST\n        VAR\n          ZVAL \"name\"\n  null\n  null\n"
+    );
+    assert_eq!(test.declared("__sharpServices"), services);
+    assert_eq!(
+        extension.declared("__construct"),
+        "METHOD [1] \"__construct\" @8-8\n  PARAM_LIST\n  null\n  STMT_LIST\n    CALL\n      ZVAL \"Sharp\\\\Internal\\\\fillExtension\"\n      ARG_LIST\n        VAR\n          ZVAL \"this\"\n  null\n  null\n"
+    );
+    assert_eq!(extension.declared("__sharpServices"), services);
 }
 
 /// Spec section 32: the container fills a class's main constructor, and reads each parameter's service from its PHP
