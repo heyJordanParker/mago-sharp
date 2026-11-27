@@ -40,14 +40,9 @@ fn parse_issues_json(stdout: &str) -> Option<(usize, Vec<String>)> {
     Some((issues.len(), names))
 }
 
+/// The `mago` this test's own build produced, so another build's binary, or one on the PATH, never stands in for it.
 fn mago_bin() -> PathBuf {
-    // Prefer runtime env (set when cargo runs the test), then compile-time (set when cargo builds the test).
-    let path = std::env::var("CARGO_BIN_EXE_mago")
-        .ok()
-        .or_else(|| option_env!("CARGO_BIN_EXE_mago").map(String::from))
-        .unwrap_or_else(|| "mago".to_string());
-
-    PathBuf::from(path)
+    PathBuf::from(env!("CARGO_BIN_EXE_mago"))
 }
 
 /// Returns true if the mago binary can actually execute on this host.
