@@ -34562,6 +34562,19 @@ fn a_law_s_claim_and_body_read_what_its_when_condition_shows() {
     assert_eq!(issues(order, &[]), Vec::<String>::new());
 }
 
+/// Spec section 28: a law's claim holds where its `when` condition is true, so a variable a pattern of the condition
+/// assigns when it is true, alone or under `&&`, is in scope in the claim, as in an `if` block. One assigned under `||`
+/// is not.
+#[test]
+fn a_law_when_pattern_variable_is_in_scope_in_its_body() {
+    let order = (
+        "app/Shared/Order.sharp",
+        "namespace App.Shared;\n\npublic class Order\n{\n    public Order(public int total { get; }) { }\n\n    law aFamilyIsItself(Any? value) when value is Class<Object> family => family == family;\n    law positive(Any? value) when value is Order order && order.total > 0 => order.total >= 1;\n    law either(Any? value) when value is Order order || value is null => order.total > 0;\n}\n",
+    );
+
+    assert_eq!(messages(order, &[]), ["`order` exists only where `value is Order order` is true."]);
+}
+
 /// A PHP caller of a law gets the same refusal, with the law named as PHP writes a static method.
 #[test]
 fn a_php_call_of_a_law_is_a_non_existent_method_that_names_the_law_as_php_writes_it() {
