@@ -33,6 +33,8 @@ use crate::Database;
 use crate::DatabaseConfiguration;
 use crate::DatabaseReader;
 use crate::ReadDatabase;
+use crate::clock::Clock;
+use crate::clock::SystemClock;
 use crate::error::DatabaseError;
 use crate::exclusion::Exclusion;
 use crate::file::FileId;
@@ -586,7 +588,7 @@ impl<'config> DatabaseWatcher<'config> {
             return Ok(None);
         };
 
-        std::thread::sleep(Duration::from_millis(STABILITY_CHECK_MS));
+        SystemClock.sleep(Duration::from_millis(STABILITY_CHECK_MS));
 
         let reread = read_listed(path)?;
         if reread.as_ref() != Some(&contents) {
@@ -1195,6 +1197,7 @@ mod tests {
     use notify::event::Flag;
 
     use super::*;
+    use crate::clock::poll_until;
     use crate::error::IOAction;
     use crate::file::File;
 
@@ -1240,17 +1243,15 @@ mod tests {
         let mut watcher = RecommendedWatcher::new(events, Config::default()).expect("the watcher should start");
         watcher.watch(folder, RecursiveMode::Recursive).expect("the folder should be watched");
         let ready = folder.join("ready");
-        let deadline = Instant::now() + Duration::from_mins(1);
-        loop {
+        let reported = poll_until(Duration::from_mins(1), || {
             std::fs::write(&ready, "").expect("the file should be written");
-            let reported = received
+            received
                 .recv_timeout(Duration::from_millis(100))
-                .is_ok_and(|event| event.is_ok_and(|event| event.paths.contains(&ready)));
-            if reported {
-                return (watcher, received);
-            }
-            assert!(Instant::now() < deadline, "the watcher reported no write of {} within a minute", ready.display());
-        }
+                .is_ok_and(|event| event.is_ok_and(|event| event.paths.contains(&ready)))
+        });
+        assert!(reported, "the watcher reported no write of {} within a minute", ready.display());
+
+        (watcher, received)
     }
 
     /// The cookies whose delete `received` reports, once `count` of them, or each within a minute.
@@ -1403,15 +1404,7 @@ mod tests {
 
     /// Whether `log` holds `line` within a minute.
     fn logs(log: &Log, line: &str) -> bool {
-        let deadline = Instant::now() + Duration::from_mins(1);
-        while !log.text().contains(line) {
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        true
+        poll_until(Duration::from_mins(1), || log.text().contains(line))
     }
 
     /// A watcher that reports, in each folder it watches, a `composer.lock` written before it started and then the
@@ -1682,13 +1675,13 @@ mod tests {
 
     /// The first round of `watcher` that holds a change, within a minute.
     fn changes_within_a_minute(watcher: &mut DatabaseWatcher<'static>) -> Vec<FileId> {
-        let deadline = Instant::now() + Duration::from_mins(1);
-        loop {
-            let changed = watcher.wait().expect("the watcher should report its changes");
-            if !changed.is_empty() || Instant::now() >= deadline {
-                return changed;
-            }
-        }
+        let mut changed = Vec::new();
+        poll_until(Duration::from_mins(1), || {
+            changed = watcher.wait().expect("the watcher should report its changes");
+            !changed.is_empty()
+        });
+
+        changed
     }
 
     /// A poll reads each file's status alone, never its contents: a poll of 1,000 unchanged files that a read would
@@ -1773,13 +1766,13 @@ mod tests {
             watcher
                 .watch_of::<DropsEvents>(WatchOptions::default(), TEST_COOKIE, |_| None)
                 .expect("the watcher should start");
-            let deadline = Instant::now() + Duration::from_mins(1);
-            loop {
-                let changed = watcher.wait().expect("the watcher should report its changes");
-                if log.text().contains("dropped events") || Instant::now() >= deadline {
-                    break changed;
-                }
-            }
+            let mut changed = Vec::new();
+            poll_until(Duration::from_mins(1), || {
+                changed = watcher.wait().expect("the watcher should report its changes");
+                log.text().contains("dropped events")
+            });
+
+            changed
         });
 
         (watcher, changed, log.text())
@@ -1886,13 +1879,11 @@ mod tests {
         watcher
             .watch_of::<EditsChangedPhp>(WatchOptions::default(), TEST_COOKIE, |_| None)
             .expect("the watcher should start");
-        let deadline = Instant::now() + Duration::from_mins(1);
-        let waited = loop {
-            match watcher.wait() {
-                Ok(changed) if changed.is_empty() && Instant::now() < deadline => {}
-                waited => break waited,
-            }
-        };
+        let mut waited = Ok(Vec::new());
+        poll_until(Duration::from_mins(1), || {
+            waited = watcher.wait();
+            waited.as_ref().map_or(true, |changed| !changed.is_empty())
+        });
 
         (watcher, waited)
     }
@@ -2076,22 +2067,17 @@ mod tests {
     /// Has the [`ReportsOnRequest`] watcher of `folder` report that the file at `path` was edited, once it watches the
     /// folder.
     fn report(folder: &Path, path: PathBuf) {
-        let deadline = Instant::now() + Duration::from_mins(1);
-        let handler = loop {
-            let watching = ON_REQUEST
+        let mut watching = None;
+        let watched = poll_until(Duration::from_mins(1), || {
+            watching = ON_REQUEST
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .iter()
                 .find(|(watched, _)| watched == folder)
                 .map(|(_, handler)| Arc::clone(handler));
-            match watching {
-                Some(handler) => break handler,
-                None => {
-                    assert!(Instant::now() < deadline, "no watcher watches {}", folder.display());
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        };
+            watching.is_some()
+        });
+        let handler = watching.filter(|_| watched).unwrap_or_else(|| panic!("no watcher watches {}", folder.display()));
         let edit = EventKind::Modify(ModifyKind::Data(DataChange::Content));
         handler.lock().unwrap_or_else(PoisonError::into_inner).handle_event(Ok(Event::new(edit).add_path(path)));
     }
@@ -2139,11 +2125,8 @@ mod tests {
         let (_directory, root) = project();
         let app = root.join("app");
         let modified = || std::fs::metadata(&app).and_then(|metadata| metadata.modified()).expect("app should be read");
-        let deadline = Instant::now() + Duration::from_mins(1);
         let changed_from = |earlier| {
-            while modified() == earlier && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            poll_until(Duration::from_mins(1), || modified() != earlier);
             modified()
         };
         let before = modified();

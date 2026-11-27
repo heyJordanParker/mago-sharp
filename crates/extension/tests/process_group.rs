@@ -9,8 +9,8 @@ use std::io::BufReader;
 use std::process::Command;
 use std::process::Stdio;
 use std::time::Duration;
-use std::time::Instant;
 
+use mago_database::clock::poll_until;
 use mago_extension::ProcessGroup;
 
 /// A group whose leader keeps starting a process and ending it, so a process is starting whenever the group ends.
@@ -35,20 +35,12 @@ fn dropping_a_group_ends_the_process_its_leader_was_starting() {
 /// Whether every process of `group` ends within 10 s. One that still runs then is ended, so a failing test leaves
 /// nothing running.
 fn ends_within_ten_seconds(group: libc::pid_t) -> bool {
-    const TIMEOUT: Duration = Duration::from_secs(10);
-
-    let deadline = Instant::now() + TIMEOUT;
     // SAFETY: `killpg` with signal 0 only checks whether a process of `group` runs.
-    while unsafe { libc::killpg(group, 0) } == 0 {
-        if Instant::now() >= deadline {
-            // SAFETY: `killpg` only sends a signal, to the group the test started.
-            while unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    if poll_until(Duration::from_secs(10), || unsafe { libc::killpg(group, 0) } != 0) {
+        return true;
     }
+    // SAFETY: `killpg` only sends a signal, to the group the test started.
+    poll_until(Duration::from_mins(1), || unsafe { libc::killpg(group, libc::SIGKILL) } != 0);
 
-    true
+    false
 }
