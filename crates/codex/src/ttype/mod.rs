@@ -2125,9 +2125,10 @@ pub fn get_sharp_received_type(r#type: &TUnion) -> TUnion {
     r#type.clone_with_types(types)
 }
 
-/// The `List<V>` that `array`, a plain PHP array keyed by `int|string` as `array<V>` reads it, may be, spec section 12.
-/// Plain PHP gives a list under that type as often as a map, so PHP# reads it as a `List<V>` or a `Map<int|string, V>`
-/// and keeps the PHP array plain PHP gave, whose keys decide which it is. None for any other array.
+/// The `List<V>` plain PHP's `array<V>`, keyed by `int|string`, may be, spec section 12.
+///
+/// Plain PHP gives a list under that type as often as a map, so PHP# reads `array` as a `List<V>` or a
+/// `Map<int|string, V>` and keeps the PHP array plain PHP gave, whose keys decide which it is. None for any other array.
 #[must_use]
 pub fn get_sharp_received_list(array: &TArray) -> Option<TList> {
     let TArray::Keyed(keyed) = array else {
@@ -2140,15 +2141,16 @@ pub fn get_sharp_received_list(array: &TArray) -> Option<TList> {
     if keyed.known_items.is_some() || keyed.known_non_list || !keys_either {
         return None;
     }
-    let mut list = TList::new(value.clone());
+    let mut list = TList::new(Arc::clone(value));
     list.non_empty = keyed.non_empty;
 
     Some(list)
 }
 
-/// Whether `list`, one of the union parts `parts`, is the `List<V>` of plain PHP's `array<V>`, which the union holds
-/// beside its `Map<int|string, V>`, as [`get_sharp_received_list`] reads it. The value keeps the PHP array plain PHP
-/// gave, which PHP's own loop and index write read as one array, a list or a map.
+/// Whether `list`, one of the union parts `parts`, is the `List<V>` of plain PHP's `array<V>`.
+///
+/// The union then holds `list` beside its `Map<int|string, V>`, as [`get_sharp_received_list`] reads it. The value
+/// keeps the PHP array plain PHP gave, which PHP's own loop and index write read as one array, a list or a map.
 #[must_use]
 pub fn is_sharp_received_either_list<'part>(list: &TList, mut parts: impl Iterator<Item = &'part TAtomic>) -> bool {
     list.known_elements.is_none()

@@ -15572,11 +15572,11 @@ fn a_value_from_plain_php_is_checked_where_it_enters_php_sharp() {
 }
 
 /// A collection the project's plain PHP returns is checked element by element where it enters PHP#, since its type is
-/// a docblock nothing checks. A `Map` crosses in through `Sharp\Internal\returned`, which makes the PHP array the
-/// object. Plain PHP's `array-key` arrives as `int|string`, spec section 12, so an `array<array-key, int>` is checked
-/// as a `Map<int|string, int>` and a bare `array` as a `Map<int|string, Any?>`. A collection PHP's internal functions
-/// return, which the standard library alone calls, is not: the engine guarantees their types. Neither is a `List`
-/// whose elements take any value.
+/// a docblock nothing checks. Plain PHP's `array-key` arrives as `int|string`, and an array keyed by it is a `List` or
+/// a `Map`, spec section 12, so an `array<array-key, int>` is checked as a `List<int>|Map<int|string, int>` and a bare
+/// `array` as a `List<Any?>|Map<int|string, Any?>`, each keeping the PHP array plain PHP gave. A collection PHP's
+/// internal functions return, which the standard library alone calls, is not: the engine guarantees their types.
+/// Neither is a `List` whose elements take any value.
 #[test]
 fn a_collection_the_project_returns_from_plain_php_is_checked_element_by_element() {
     let body = Lowered(common::checked(
@@ -15590,11 +15590,14 @@ fn a_collection_the_project_returns_from_plain_php_is_checked_element_by_element
     ))
     .body();
 
-    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 1, "{body}");
-    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 2, "{body}");
+    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 3, "{body}");
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\returned\"").count(), 0, "{body}");
     assert!(body.contains("ZVAL \"List<int>\"\n      ZVAL \"Lib\\\\Calc::ints()\""), "{body}");
-    assert!(body.contains("ZVAL \"Map<int|string, int>\"\n        ZVAL \"Lib\\\\Calc::keyed()\""), "{body}");
-    assert!(body.contains("ZVAL \"Map<int|string, Any?>\"\n        ZVAL \"Lib\\\\Calc::untyped()\""), "{body}");
+    assert!(body.contains("ZVAL \"List<int>|Map<int|string, int>\"\n      ZVAL \"Lib\\\\Calc::keyed()\""), "{body}");
+    assert!(
+        body.contains("ZVAL \"List<Any?>|Map<int|string, Any?>\"\n      ZVAL \"Lib\\\\Calc::untyped()\""),
+        "{body}"
+    );
 }
 
 /// Every function a call from plain PHP reaches checks a parameter that names a PHP# class with type arguments, as a
@@ -18187,7 +18190,7 @@ fn an_override_of_a_plain_php_method_keeps_its_result() {
 }
 
 /// ```php
-/// $payload = new \Sharp\Map(…, ...\Sharp\Internal\returned($feed->payload(), null, '', 'Map<int|string, Any?>', …)…);
+/// $payload = new \Sharp\Map(…, ...\Sharp\verify($feed->payload(), 'List<Any?>|Map<int|string, Any?>', …)…);
 /// ```
 ///
 /// Spec section 12: a call of plain PHP crosses where it is written, so a spread of its result into a collection
@@ -18209,7 +18212,8 @@ fn a_spread_of_a_plain_php_result_reads_the_collection_it_declares() {
         &[feed],
     );
 
-    assert!(payload.contains("ZVAL \"Sharp\\\\Internal\\\\returned\""), "{payload}");
+    assert!(payload.contains("VERIFY_TYPE_ARGS"), "{payload}");
+    assert!(payload.contains("ZVAL \"List<Any?>|Map<int|string, Any?>\""), "{payload}");
     assert!(names.contains("UNPACK"), "{names}");
 }
 
@@ -23749,13 +23753,13 @@ fn a_class_whose_header_names_iterable_is_an_iterator_aggregate_of_its_elements(
 }
 
 /// ```php
-/// return (($as#1 = \is_array($crossing#2 = $folder->records) ? \Sharp\Map::from($crossing#2) : $crossing#2) instanceof Map<…> ? … : null) != null;
+/// return (($as#1 = $folder->records) instanceof Map<string, Any?> ? $as#1 : null) != null;
 /// ```
 ///
-/// Spec section 12: plain PHP's `?array` arrives as a `Map<int|string, Any?>?`, whatever keys it holds, and one it
-/// declares `list<…>` as a `List`. A pattern's variable holds the value it tests as it arrives, so `as`, `is` and
-/// `match` test the `Map` or the `List` a local holding the value holds, never plain PHP's array. A `List` test of the
-/// `Map` is a compile error, which the analyzer's tests hold.
+/// Spec section 12: plain PHP's `?array` arrives as a `List<Any?>` or a `Map<int|string, Any?>`, or null, and keeps the
+/// PHP array plain PHP gave, whose keys decide what `as` and `is` see, and one it declares `list<…>` arrives as a
+/// `List`. A pattern's variable holds the value it tests as it arrives, so `as`, `is` and `match` test the value a
+/// local holding it holds: plain PHP's own array, or the `List` it crosses into.
 #[test]
 fn a_pattern_tests_plain_php_s_array_as_it_arrives() {
     let folder = (
@@ -23776,15 +23780,13 @@ fn a_pattern_tests_plain_php_s_array_as_it_arrives() {
     );
 
     assert!(
-        records
-            .contains("ZVAL \"as#1\"\n            CONDITIONAL\n              CALL\n                ZVAL \"is_array\""),
+        records.contains(
+            "ZVAL \"as#1\"\n            PROP\n              VAR\n                ZVAL \"folder\"\n              ZVAL \"records\""
+        ),
         "{records}"
     );
-    assert!(records.contains("ZVAL \"Sharp\\\\Map\"\n                ZVAL \"from\""), "{records}");
-    assert!(
-        held.contains("ZVAL \"records\"\n          CONDITIONAL\n            CALL\n              ZVAL \"is_array\""),
-        "{held}"
-    );
+    assert!(!records.contains("ZVAL \"from\""), "{records}");
+    assert!(!held.contains("ZVAL \"from\""), "{held}");
     assert!(
         listed
             .contains("ZVAL \"as#1\"\n            CONDITIONAL\n              CALL\n                ZVAL \"is_array\""),
@@ -25358,16 +25360,16 @@ fn a_typed_for_counter_is_the_assignment_of_its_value() {
 }
 
 /// ```php
-/// foreach (\Sharp\Internal\returned(\Lib\Calc::make(2), null, '', 'Map<int|string, int>', …) as $key#1 => $value#2) {
+/// foreach (\Sharp\verify(\Lib\Calc::make(2), 'List<int>|Map<int|string, int>', …) as $key#1 => $value#2) {
 ///     $entry = [$key#1, $value#2];
 ///     $extra += $entry[1];
 /// }
-/// foreach (\Sharp\Internal\returned(\Lib\Calc::make(3), …) as $key => $value) {
+/// foreach (\Sharp\verify(\Lib\Calc::make(3), …) as $key => $value) {
 /// }
 /// ```
 ///
-/// `FOREACH` takes the collection, the value variable, the key variable or null, and the body. The map a plain PHP
-/// docblock claims crosses in and is checked entry by entry first, and one loop variable over it is each entry.
+/// `FOREACH` takes the collection, the value variable, the key variable or null, and the body. The `List` or `Map` a
+/// plain PHP docblock claims is checked entry by entry first, and one loop variable over it is each entry.
 #[test]
 fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
     assert_eq!(
@@ -25382,18 +25384,14 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
         indoc! {r#"
             STMT_LIST
               FOREACH
-                CALL
-                  ZVAL "Sharp\\Internal\\returned"
-                  ARG_LIST
-                    STATIC_CALL
-                      ZVAL "Lib\\Calc"
-                      ZVAL "make"
-                      ARG_LIST
-                        ZVAL 2
-                    ZVAL null
-                    ZVAL ""
-                    ZVAL "Map<int|string, int>"
-                    ZVAL "Lib\\Calc::make()"
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "Lib\\Calc"
+                    ZVAL "make"
+                    ARG_LIST
+                      ZVAL 2
+                  ZVAL "List<int>|Map<int|string, int>"
+                  ZVAL "Lib\\Calc::make()"
                 VAR
                   ZVAL "value#2"
                 VAR
@@ -25420,18 +25418,14 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
                           ZVAL "entry"
                         ZVAL 1
               FOREACH
-                CALL
-                  ZVAL "Sharp\\Internal\\returned"
-                  ARG_LIST
-                    STATIC_CALL
-                      ZVAL "Lib\\Calc"
-                      ZVAL "make"
-                      ARG_LIST
-                        ZVAL 3
-                    ZVAL null
-                    ZVAL ""
-                    ZVAL "Map<int|string, int>"
-                    ZVAL "Lib\\Calc::make()"
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "Lib\\Calc"
+                    ZVAL "make"
+                    ARG_LIST
+                      ZVAL 3
+                  ZVAL "List<int>|Map<int|string, int>"
+                  ZVAL "Lib\\Calc::make()"
                 VAR
                   ZVAL "value"
                 VAR
@@ -25516,13 +25510,55 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
                                     ZVAL "crossing#2"
                                   VAR
                                     ZVAL "nullsafe#1"
-                            STATIC_CALL
-                              ZVAL "Sharp\\Map"
-                              ZVAL "from"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "crossing#2"
-                                ZVAL "string, int"
+                            SHARP_TYPE_ARGS
+                              NEW
+                                ZVAL "Sharp\\Map"
+                                ARG_LIST
+                                  CALL
+                                    ZVAL "array_merge"
+                                    ARG_LIST
+                                      ARRAY [3]
+                                      UNPACK
+                                        CALL
+                                          ZVAL "array_map"
+                                          ARG_LIST
+                                            ARROW_FUNC "" @9-9
+                                              PARAM_LIST
+                                                PARAM
+                                                  null
+                                                  ZVAL "key#3"
+                                                  null
+                                                  null
+                                                  null
+                                                  null
+                                                PARAM
+                                                  null
+                                                  ZVAL "value#4"
+                                                  null
+                                                  null
+                                                  null
+                                                  null
+                                              null
+                                              ARRAY [3]
+                                                ARRAY_ELEM
+                                                  CAST [6]
+                                                    VAR
+                                                      ZVAL "key#3"
+                                                  null
+                                                ARRAY_ELEM
+                                                  VAR
+                                                    ZVAL "value#4"
+                                                  null
+                                              null
+                                              null
+                                            CALL
+                                              ZVAL "array_keys"
+                                              ARG_LIST
+                                                VAR
+                                                  ZVAL "crossing#2"
+                                            VAR
+                                              ZVAL "crossing#2"
+                              ZVAL "string, int"
                             VAR
                               ZVAL "crossing#2"
                           VAR
@@ -25535,12 +25571,13 @@ fn a_plain_php_array_becomes_the_map_a_map_method_reads() {
 /// ```php
 /// foreach (\Sharp\Internal\returned(\Lib\Calc::prices(), null, '', 'Map<string, int>', 'Lib\Calc::prices()')
 ///     as $sku => $count) {}
-/// foreach (\Sharp\Internal\returned(\Lib\Calc::counts(), null, '', 'Map<int|string, int>', …) as $id => $count) {}
+/// foreach (\Sharp\verify(\Lib\Calc::counts(), 'List<int>|Map<int|string, int>', …) as $id => $count) {}
 /// ```
 ///
 /// Spec section 12: PHP holds an all-digit `string` key as an `int`, so a loop over a plain PHP array keyed by `string`
 /// runs over the `\Sharp\Map` that takes each key back as its `string`. One keyed by `array-key`, which arrives as
-/// `int|string`, is the `Map<int|string, …>` that keeps its keys, and is checked as the project's collection is.
+/// `int|string`, is a `List` or a `Map<int|string, …>` that keeps the PHP array and its keys, and is checked as the
+/// project's collection is.
 #[test]
 fn a_loop_over_a_plain_php_array_keyed_by_string_takes_its_keys_back() {
     assert_eq!(
@@ -25572,17 +25609,13 @@ fn a_loop_over_a_plain_php_array_keyed_by_string_takes_its_keys_back() {
                   ZVAL "sku"
                 STMT_LIST
               FOREACH
-                CALL
-                  ZVAL "Sharp\\Internal\\returned"
-                  ARG_LIST
-                    STATIC_CALL
-                      ZVAL "Lib\\Calc"
-                      ZVAL "counts"
-                      ARG_LIST
-                    ZVAL null
-                    ZVAL ""
-                    ZVAL "Map<int|string, int>"
-                    ZVAL "Lib\\Calc::counts()"
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "Lib\\Calc"
+                    ZVAL "counts"
+                    ARG_LIST
+                  ZVAL "List<int>|Map<int|string, int>"
+                  ZVAL "Lib\\Calc::counts()"
                 VAR
                   ZVAL "count"
                 VAR

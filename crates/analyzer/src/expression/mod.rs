@@ -747,6 +747,11 @@ where
         // A value whose expression is refused has no type to be already of, and a refused type names no type to be of.
         !is_refused
             && artifacts.get_expression_type(*value).is_some_and(|value| !is_refused_type(value))
+            // Under PHP#'s rules a `List` is never a `Map`, spec section 12, so a value that may be either, as plain
+            // PHP's `array<V>`, is never already the one kind its test names, which narrows it.
+            && !artifacts.get_tested_type(hint).is_some_and(|tested| {
+                artifacts.get_expression_type(*value).is_some_and(|value| narrows_list_or_map(value, tested))
+            })
             && tests.iter().any(|(pattern, test)| {
                 pattern.contains(&hint.start)
                     && artifacts.get_rc_expression_type(*test).is_some_and(|test| test.is_true())
@@ -2085,6 +2090,17 @@ where
         .iter()
         .filter(|negated| negated.reconcilable && !negated.wedge)
         .any(|negated| known_clauses.iter().any(|known| known.hash == negated.hash))
+}
+
+/// Whether `value` holds both a `List` and a `Map`, and `tested` only one of the two kinds, so a test of `tested` keeps
+/// only that kind of `value`, spec section 12.
+fn narrows_list_or_map(value: &TUnion, tested: &TUnion) -> bool {
+    let is_map =
+        |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::Keyed(keyed)) if keyed.parameters.is_some());
+    let is_list = |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(_)));
+    let holds_both = |union: &TUnion| union.types.iter().any(is_map) && union.types.iter().any(is_list);
+
+    holds_both(value) && !holds_both(tested)
 }
 
 /// The type of `tested`, the value a pattern at `pattern` tests, when it holds only `Map`s, maybe null, and the pattern
