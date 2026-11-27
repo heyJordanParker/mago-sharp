@@ -32231,6 +32231,67 @@ fn a_zip_archive_is_disposed_by_its_using_local_and_has_no_close() {
     assert_eq!(messages(export, &[ZIP_ARCHIVE_LIBRARY]), ["Method `ZipArchive.close` does not exist."]);
 }
 
+const OWNED_ARCHIVE: (&str, &str) = (
+    "app/Shop/Archive.sharp",
+    "namespace App.Shop;\n\npublic class Archive : Disposable\n{\n    public void dispose() { }\n\n    public static Archive open() => new Archive();\n}\n",
+);
+
+/// Spec section 2, as .NET's CA2000 decides: a `Disposable` a `new` or a call makes has one owner, a `using` local, a
+/// `return`, a field of a `Disposable` class, or a module binding. `Holder` keeps one in a field, so it is
+/// `Disposable`, and `Export` returns one and holds one in a `using` local. A `const` local, a dropped call and a field
+/// of `Export`, which isn't `Disposable`, are refused, and a local that borrows the `using` local's value is not.
+#[test]
+fn a_disposable_made_outside_its_owners_is_refused() {
+    let holder = (
+        "app/Shop/Holder.sharp",
+        "namespace App.Shop;\n\npublic class Holder : Disposable\n{\n    private Archive? archive = null;\n\n    public Holder()\n    {\n        this.archive = Archive.open();\n    }\n\n    public void dispose() { this.archive?.dispose(); }\n}\n",
+    );
+    let export = (
+        "app/Shop/Export.sharp",
+        "namespace App.Shop;\n\npublic class Export\n{\n    private Archive? kept = null;\n\n    public Archive? held() => this.kept;\n\n    public Archive made(bool fresh) => fresh ? Archive.open() : new Archive();\n\n    public int count()\n    {\n        using archive = Archive.open();\n        const lost = Archive.open();\n        Archive.open();\n        this.kept = Archive.open();\n        const borrowed = archive;\n        return 1;\n    }\n}\n",
+    );
+    let refused = "`Archive.open()` makes a `Disposable`, and only its owner may hold it: a `using` local, a `return`, a field of a `Disposable` class, or a module binding.";
+
+    assert_eq!(messages(holder, &[OWNED_ARCHIVE]), Vec::<String>::new());
+    assert_eq!(messages(export, &[OWNED_ARCHIVE]), [refused, refused, refused]);
+}
+
+/// Spec sections 2 and 32: a `transient` service is the class's that takes it, so a `transient` `Disposable` is owned
+/// by that class, which must be `Disposable` to dispose it. A `scoped` one stays the container's, and a `Disposable`
+/// class may take a `transient` one.
+#[test]
+fn a_transient_disposable_taken_by_a_class_that_isnt_disposable_is_refused() {
+    let others = [
+        (
+            "app/Ledger/Transaction.sharp",
+            "namespace App.Ledger;\n\npublic class Transaction : Disposable\n{\n    public void dispose() { }\n}\n",
+        ),
+        (
+            "app/Ledger/Repository.sharp",
+            "namespace App.Ledger;\n\npublic class Repository\n{\n    public Repository(private Transaction transaction) { }\n}\n",
+        ),
+        (
+            "app/Ledger/Unit.sharp",
+            "namespace App.Ledger;\n\npublic class Unit : Disposable\n{\n    public Unit(private Transaction transaction) { }\n\n    public void dispose() { this.transaction.dispose(); }\n}\n",
+        ),
+    ];
+    let refused = "10:5 unowned-disposable The transient `Transaction` is `Disposable`, so `Repository`, which takes it, owns it, and only a `Disposable` class can dispose it. | Make `Repository` `Disposable` and dispose it there, or make `Transaction` scoped.";
+
+    for (members, expected) in [
+        ("    transient Transaction = Transaction;\n    transient Repository = Repository;", vec![refused]),
+        ("    scoped Transaction = Transaction;\n    transient Repository = Repository;", vec![]),
+        ("    transient Transaction = Transaction;\n    transient Unit = Unit;", vec![]),
+    ] {
+        let module = (
+            "app/Module.sharp",
+            leak(format!(
+                "namespace App;\n\nimport App.Ledger.Transaction;\nimport App.Ledger.Repository;\nimport App.Ledger.Unit;\n\nmodule\n{{\n{members}\n}}\n"
+            )),
+        );
+        assert_eq!(refusals(module, &others), expected, "{members}");
+    }
+}
+
 const BEHAVIOR_LIBRARY: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
     include_str!("../../../../composer/library/Sharp/Behavior.sharp"),
@@ -36104,7 +36165,7 @@ fn scope_run_returns_what_its_body_returns_and_has_its_effects() {
 /// A class whose `watch` starts a listener with `Events.on<TEvent>` for the type `listened`, and holds its handle.
 fn watching(listened: &str) -> (&'static str, &'static str) {
     let code = format!(
-        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Screen\n{{\n    public static List<int> seen {{ get; set; }} = [];\n\n    public Listening watch()\n    {{\n        const listening = Events.on<{listened}>(e => Screen.seen.add(1));\n        return listening;\n    }}\n}}\n"
+        "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Screen\n{{\n    public static List<int> seen {{ get; set; }} = [];\n\n    public Listening watch()\n    {{\n        return Events.on<{listened}>(e => Screen.seen.add(1));\n    }}\n}}\n"
     );
 
     ("app/Shop/Screen.sharp", Box::leak(code.into_boxed_str()) as &'static str)
@@ -36126,20 +36187,20 @@ fn events_on_takes_an_event_or_an_interface_an_event_implements() {
         "`Events.on` takes an event, which `event` or `extern event` declares, or an interface an event implements.";
     assert_eq!(
         worded(watching("Money"), &others),
-        [format!("11:37 invalid-event `Money` is not an event. | Given here. | {note}")]
+        [format!("11:26 invalid-event `Money` is not an event. | Given here. | {note}")]
     );
     assert_eq!(
         worded(watching("int"), &others),
-        [format!("11:37 invalid-event `int` is not an event. | Given here. | {note}")]
+        [format!("11:26 invalid-event `int` is not an event. | Given here. | {note}")]
     );
     assert_eq!(
         worded(watching("Unheard"), &others),
         [format!(
-            "11:37 invalid-event No event implements `Unheard`, so the listener never runs. | Given here. | {note}"
+            "11:26 invalid-event No event implements `Unheard`, so the listener never runs. | Given here. | {note}"
         )]
     );
     // A class that doesn't exist is reported once, where the type is written, and a type parameter is the caller's.
-    assert_eq!(issues(watching("Missing"), &others), ["11:37 non-existent-class-like"]);
+    assert_eq!(issues(watching("Missing"), &others), ["11:26 non-existent-class-like"]);
     let forwarding = (
         "app/Shop/Relay.sharp",
         "namespace App.Shop;\n\nimport Sharp.Listening;\n\npublic class Relay\n{\n    public static Listening forward<TEvent>(Function<void(TEvent)> listener) => Events.on<TEvent>(listener);\n}\n",
@@ -36147,8 +36208,8 @@ fn events_on_takes_an_event_or_an_interface_an_event_implements() {
     assert_eq!(worded(forwarding, &others), Vec::<String>::new());
 }
 
-/// Spec section 15: a listener stops when its handle goes, so `Events.on` as a statement, which drops the handle at
-/// once, listens to nothing and is reported in PHP# words.
+/// Spec sections 2 and 15: a listener's handle is a `Disposable` its owner disposes, so `Events.on` as a statement,
+/// which leaves the handle with no owner, is refused as any unowned `Disposable` is.
 #[test]
 fn a_dropped_events_on_handle_is_reported() {
     let [order_event, order_paid] = ORDER_EVENTS;
@@ -36160,7 +36221,7 @@ fn a_dropped_events_on_handle_is_reported() {
     assert_eq!(
         worded(dropping, &[EVENTS, order_event, order_paid]),
         [
-            "7:9 unused-method-call The value `Events.on` returns must be used. | Its value is dropped here. | `[NoDiscard]` on `Events.on` says the value it returns matters. | Keep the value in a local, pass it on, or return it."
+            "7:9 unowned-disposable `Events.on<OrderPaid>(e => { })` makes a `Disposable`, and only its owner may hold it: a `using` local, a `return`, a field of a `Disposable` class, or a module binding. | Made here, with no owner. | Hold it in a `using` local, which disposes it when its block ends."
         ]
     );
 }
