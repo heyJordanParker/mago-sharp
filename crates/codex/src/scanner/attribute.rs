@@ -177,6 +177,8 @@ where
         {
             ConstantExpression::ClassName(word(context.resolved_names.get(class)))
         }
+        // `nameof(OrderTest.rows)` is the member's name, `"rows"`, fixed at compile time, spec section 25.
+        Expression::NameOf(name_of) => ConstantExpression::String(word(name_of.named())),
         Expression::Instantiation(Instantiation { class, argument_list, .. }) => {
             let Some(class) = class_name(class) else {
                 return unsupported();
