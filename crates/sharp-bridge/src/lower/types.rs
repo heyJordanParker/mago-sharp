@@ -1639,6 +1639,20 @@ impl<'analysis> Types<'analysis> {
         self.codebase.get_parent_constructor(class)
     }
 
+    /// How PHPUnit creates an object of the fully qualified class name `class` whose services the container fills, spec
+    /// section 32: a test class extends PHPUnit's `TestCase`, which PHPUnit creates with the test's name for each test,
+    /// and a PHPUnit extension implements its `Extension`, which PHPUnit creates with no argument. None for any other.
+    #[must_use]
+    pub fn filled_class(&self, class: Word) -> Option<FilledClass> {
+        if self.codebase.class_extends(class, word("PHPUnit\\Framework\\TestCase")) {
+            Some(FilledClass::Test)
+        } else if self.codebase.class_implements(class, word("PHPUnit\\Runner\\Extension\\Extension")) {
+            Some(FilledClass::Extension)
+        } else {
+            None
+        }
+    }
+
     /// The parameters of the main constructor the fully qualified class name `class` declares, which the container
     /// fills, spec section 32.
     #[must_use]
@@ -2821,6 +2835,17 @@ impl<'analysis> Types<'analysis> {
 
 /// The fully qualified names of the classes a value of `r#type` can be, leaving out `null`, or none when part of the
 /// type is no class, such as a collection. A value of a type parameter can be the classes of its bound.
+/// A class PHPUnit creates with `new`, whose services the container fills instead of its main constructor's caller,
+/// spec section 32, as [`Types::filled_class`] reads it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FilledClass {
+    /// A test class: PHPUnit creates one for each test, with the test's name, and the class's `__sharpStartTest` fills
+    /// it.
+    Test,
+    /// A PHPUnit extension: PHPUnit creates it once with no argument, and its constructor fills it.
+    Extension,
+}
+
 pub(crate) fn receiver_classes(r#type: &TUnion) -> Option<Vec<&[u8]>> {
     Some(receiver_intersections(r#type)?.into_iter().map(|classes| classes[0]).collect())
 }

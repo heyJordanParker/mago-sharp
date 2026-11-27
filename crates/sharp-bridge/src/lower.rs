@@ -284,6 +284,7 @@ use inline::InlineReceiver;
 use types::Declaration;
 use types::DeclarationKind;
 use types::Equality;
+use types::FilledClass;
 use types::FunctionType;
 use types::MembersByKind;
 use types::PlainParameter;
@@ -585,6 +586,8 @@ struct Lowering<'lowering, 'arena> {
     method_type_parameters: HashMap<u32, usize>,
     /// Whether the file declares a test module, so each of its classes starts and ends its tests.
     tested: bool,
+    /// Whether PHPUnit creates the class being lowered, whose services the container fills, spec section 32.
+    filled: Option<FilledClass>,
     /// Whether the expression being lowered is one PHP evaluates as a constant expression, where a `Map` or a `Set`
     /// constant's read is the PHP array the constant holds, as [`Self::constant_expression`] lowers it.
     in_constant_expression: bool,
@@ -634,6 +637,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             type_parameters: HashMap::default(),
             method_type_parameters: HashMap::default(),
             tested: false,
+            filled: None,
             in_constant_expression: false,
             in_default: false,
             forming: false,
@@ -842,46 +846,35 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// Spec section 32: each test of a class a test file declares runs with the file's module, in PHPUnit's own
     /// process or a child one, because PHPUnit runs the methods `Before` and `After` mark wherever it runs the test.
     /// The class gets `__sharpStartTest`, which calls `\Sharp\Internal\startTest(static::class)` before every other
-    /// `Before` method and `setUp`, and `__sharpEndTest`, which calls `\Sharp\Internal\endTest()` after every other
+    /// `Before` method and `setUp`, then `\Sharp\Internal\fillTest($this)`, which fills the test object's services
+    /// from that module, and `__sharpEndTest`, which calls `\Sharp\Internal\endTest()` after every other
     /// `After` method and `tearDown`, by their priorities. PHP# refuses a member name that starts with `__`, so no
     /// member of the class can take them.
     fn test_hooks(&mut self, class: &Class) -> [u32; 2] {
         let line = self.line(class.class.span);
         let test_class = self.string(ZEND_NAME_NOT_FQ, line, b"static");
         let test_class = self.node(SHARP_AST_CLASS_NAME, 0, line, &[test_class]);
+        let started = self.global_call(line, b"Sharp\\Internal\\startTest", &[test_class]);
+        let this = self.variable(class.class.span, b"this");
+        let filled = self.global_call(line, b"Sharp\\Internal\\fillTest", &[this]);
         let start = self.test_hook(
             class,
             b"__sharpStartTest",
             (b"PHPUnit\\Framework\\Attributes\\Before", i64::MAX),
-            b"Sharp\\Internal\\startTest",
-            &[test_class],
+            &[started, filled],
         );
-        let end = self.test_hook(
-            class,
-            b"__sharpEndTest",
-            (b"PHPUnit\\Framework\\Attributes\\After", i64::MIN),
-            b"Sharp\\Internal\\endTest",
-            &[],
-        );
+        let ended = self.global_call(line, b"Sharp\\Internal\\endTest", &[]);
+        let end =
+            self.test_hook(class, b"__sharpEndTest", (b"PHPUnit\\Framework\\Attributes\\After", i64::MIN), &[ended]);
 
         [start, end]
     }
 
     /// A public `void` method of `class` named `name`, which PHPUnit's attribute runs at the priority `marked` gives,
-    /// and which calls the function `function` with `arguments`.
-    fn test_hook(
-        &mut self,
-        class: &Class,
-        name: &[u8],
-        marked: (&[u8], i64),
-        function: &[u8],
-        arguments: &[u32],
-    ) -> u32 {
+    /// and whose body is `statements`.
+    fn test_hook(&mut self, class: &Class, name: &[u8], marked: (&[u8], i64), statements: &[u32]) -> u32 {
         let line = self.line(class.class.span);
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, arguments);
-        let function = self.string(ZEND_NAME_FQ, line, function);
-        let call = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[call]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, statements);
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
         let return_type = self.string(ZEND_NAME_NOT_FQ, line, b"void");
         let (attribute, priority) = marked;
@@ -975,6 +968,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn class(&mut self, class: &Class) -> u32 {
         self.class = self.names.get(&class.name);
         self.enter(class.name.value);
+        self.filled = self.types.filled_class(word(self.class));
         let (parent, interfaces, parent_name) = match &class.inheritance {
             Some(inheritance) => self.class_header(inheritance),
             None => (NULL, NULL, None),
@@ -987,9 +981,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.extend(self.string_conversion(class.members.as_slice(), class.left_brace, class.right_brace));
         members
             .extend(class.inheritance.as_ref().and_then(|inheritance| self.iteration(inheritance, class.right_brace)));
-        if self.tested {
+        // A test class's services are filled at the start of each test, so one that declares a main constructor starts
+        // its tests outside a test file too.
+        let fills_test = self.filled == Some(FilledClass::Test)
+            && class.members.iter().any(
+                |member| matches!(member, ClassLikeMember::Method(method) if php_method_name(method) == b"__construct"),
+            );
+        if self.tested || fills_test {
             members.extend(self.test_hooks(class));
         }
+        self.filled = None;
         members.extend(self.generic_statics(&class.name, &class.members));
         members.extend(self.class_metadata(word(self.class), self.line(class.name), class.members.as_slice()));
         members.splice(0..0, self.trait_members(class.inheritance.as_ref(), class.left_brace));
@@ -1808,6 +1809,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                             || SUPERGLOBALS.contains(&parameter.variable.name)
                             || parameter.attribute_lists.iter().any(|list| list.target.is_some())
                     });
+                    // Spec section 32: PHPUnit creates a test class and an extension with `new`, so their main
+                    // constructor runs as `__sharpServices`, which the container calls with their services, and each
+                    // property it promotes is declared beside it.
+                    self.promoted_beside |= self.filled.is_some();
                     if self.promoted_beside {
                         for parameter in promoted() {
                             members.push(self.promoted_property(parameter));
@@ -1819,6 +1824,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let constructor =
                         self.method(method, modifier_flags_or_private(&method.modifiers), &initial_values);
                     self.promoted_beside = false;
+                    if let Some(filled) = self.filled {
+                        self.nodes[constructor as usize].text = store_text(&mut self.texts, b"__sharpServices");
+                        self.nodes[constructor as usize].attr = (self.nodes[constructor as usize].attr
+                            & !(ZEND_ACC_PRIVATE | ZEND_ACC_PROTECTED))
+                            | ZEND_ACC_PUBLIC;
+                        members.push(self.filled_constructor(filled, method));
+                    }
 
                     constructor
                 }
@@ -3152,6 +3164,40 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let checks = checks.map_or(NULL, |checks| self.type_text(line, &checks));
 
         Some(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[bounds, checks]))
+    }
+
+    /// The PHP constructor of a class PHPUnit creates, whose main constructor `method` runs as `__sharpServices`, spec
+    /// section 32: a test class's takes the test's name, as PHPUnit's `TestCase` does, and passes it on, and an
+    /// extension's takes nothing and has the container fill its services.
+    fn filled_constructor(&mut self, filled: FilledClass, method: &Method) -> u32 {
+        let line = self.line(method.name.span);
+        let (parameters, statement) = match filled {
+            FilledClass::Test => {
+                let hint = self.string(ZEND_NAME_NOT_FQ, line, b"string");
+                let name = self.string(0, line, b"name");
+                let parameter = self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL]);
+                let passed = self.variable(method.name.span, b"name");
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[passed]);
+
+                (vec![parameter], self.parent_construct(line, arguments))
+            }
+            FilledClass::Extension => {
+                let this = self.variable(method.name.span, b"this");
+
+                (Vec::new(), self.global_call(line, b"Sharp\\Internal\\fillExtension", &[this]))
+            }
+        };
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[statement]);
+
+        self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            method.name.span,
+            method.body.span(),
+            b"__construct",
+            &[parameters, NULL, body, NULL, NULL],
+        )
     }
 
     /// `parent::__construct(…)` with `arguments`, the call `: super(…)` runs as, a static call of `parent` as

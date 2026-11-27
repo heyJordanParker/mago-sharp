@@ -116,6 +116,7 @@ use crate::statement::function_like::report_undefined_bound_types;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::statement::function_like::report_union_for_a_class_bound;
 use crate::statement::function_like::written_type;
+use crate::statement::module::check_filled_services;
 use crate::statement::module::check_program_services;
 use crate::statement::refuses_standard_library_namespace;
 use crate::utils::missing_type_hints;
@@ -749,6 +750,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
             })
         {
             check_program_services(context, class_like_metadata);
+        }
+        // Spec section 32: PHPUnit creates a test class and an extension, and the container fills their services.
+        if context.dialect.is_sharp() {
+            check_filled_services(context, class_like_metadata);
         }
 
         let should_check_unused = 'check_unused: {
@@ -1418,6 +1423,7 @@ where
     let has_complete_hierarchy = !class_like_metadata.has_incomplete_hierarchy();
     if context.dialect.is_sharp() && has_complete_hierarchy && class_like_metadata.kind.is_class() {
         method::check_super_call(context, class_like_metadata, members, name_span.unwrap_or(declaration_span));
+        method::check_test_method_parameters(context, class_like_metadata, members);
     }
 
     if context.dialect.is_sharp() {
