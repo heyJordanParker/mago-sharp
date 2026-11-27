@@ -160,6 +160,16 @@ impl Autoloader {
         self.autoload.files().iter().filter_map(|path| self.read(path, &held).transpose()).collect()
     }
 
+    /// The vendor file at `path`, read from disk as [`Self::read`] reads it, or `None` when the database would leave it
+    /// out or no file is there: a file an earlier run served, which a restored analysis serves again.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DatabaseError`] when the file can't be read.
+    pub(crate) fn file_at(&self, path: &Path) -> Result<Option<Arc<File>>, DatabaseError> {
+        self.read(path, |_| None)
+    }
+
     /// The file at `path` as the database would hold it among the vendor folder's, or `None` when the database would
     /// leave it out or no file is there. A file `held` gives for its ID is taken when it is this vendored file at this
     /// path, which another analysis of the run read, so the run reads each served file once.

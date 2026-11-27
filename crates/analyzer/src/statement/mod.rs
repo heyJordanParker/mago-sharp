@@ -78,6 +78,7 @@ use crate::expression::analyze_php_shape;
 use crate::expression::assignment::analyze_assignment;
 use crate::expression::is_refused_match;
 use crate::expression::match_arm_hints;
+use crate::expression::result_type_arguments;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::NamedCall;
@@ -365,6 +366,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
             };
 
             result?;
+
+            if let Statement::Expression(expression) = self {
+                report_discarded_result(expression.expression, context, artifacts);
+            }
 
             if let Statement::Expression(expression) = self
                 && context.settings.find_unused_expressions
@@ -1018,6 +1023,41 @@ where
         ))
         .with_annotation(Annotation::primary(name.span()).with_message("Declared here."))
         .with_help("Declare the file in a namespace of the app."),
+    );
+}
+
+/// Spec section 31, as Rust's `#[must_use]` on `Result`: a `Result` holds a failure the caller must handle, so a
+/// statement whose value is one and that drops it is refused. An assignment keeps its value, so it never is.
+fn report_discarded_result<'arena, A>(
+    expression: &Expression<'arena>,
+    context: &mut Context<'_, 'arena, A>,
+    artifacts: &AnalysisArtifacts,
+) where
+    A: Arena,
+{
+    if matches!(expression, Expression::Assignment(_)) {
+        return;
+    }
+    let Some(value_type) = artifacts.get_expression_type(expression) else {
+        return;
+    };
+    if value_type.is_never() || result_type_arguments(context.codebase, value_type).is_none() {
+        return;
+    }
+    let span = expression.span();
+    let end = match expression {
+        Expression::Call(call) => call.get_argument_list().span().start.offset,
+        _ => span.end.offset,
+    };
+    let written = String::from_utf8_lossy(&context.source_file.contents[span.start.offset as usize..end as usize]);
+    context.collector.report_with_code(
+        IssueCode::DiscardedResult,
+        Issue::error(format!(
+            "`{}` returns a Result: handle it with try, match, ok() or unwrap().",
+            written.trim_end()
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Its failure is dropped here."))
+        .with_help("A dropped Result loses its failure: pass it up with `try`, or keep the Result in a `const`."),
     );
 }
 
