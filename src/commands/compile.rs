@@ -1037,11 +1037,12 @@ impl HostsReach {
 
 /// What the extension hosts of `hosts` load as their workers start among the files of the project's `database` at
 /// `root`: the standard library's files, each enabled host's file and every PHP# file under the folder that holds it, as
-/// a package is its folder, every file of the project those files name, and every file those name in turn. A file's
-/// names are those its scan names, every name its code resolves and each class-like a `@var` tag of its bodies names,
-/// as an analysis's scan finds the class-likes a file reaches. A name reaches the file its namespace's folder holds
-/// under its last part, as a type of PHP# and a class Composer loads by PSR-4 each live in one, so the walk parses only
-/// the files it reaches, and the standard library, which names only itself, not at all.
+/// a package is its folder, every PHP# file that [`declares_extern`] lines, whose declarations apply to every file as an
+/// analysis of the whole project applies them, every file of the project those files name, and every file those name in
+/// turn. A file's names are those its scan names, every name its code resolves and each class-like a `@var` tag of its
+/// bodies names, as an analysis's scan finds the class-likes a file reaches. A name reaches the file its namespace's
+/// folder holds under its last part, as a type of PHP# and a class Composer loads by PSR-4 each live in one, so the walk
+/// parses only the files it reaches, and the standard library, which names only itself, not at all.
 fn hosts_reach(
     configuration: &Configuration,
     root: &Path,
@@ -1093,6 +1094,11 @@ fn hosts_reach(
     }
     let mut folders = BTreeMap::new();
     let mut wave: Vec<usize> = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        if is_lowered(file) && declares_extern(file) && !std::mem::replace(&mut taken[index], true) {
+            wave.push(index);
+        }
+    }
     let mut names: Vec<Word> = Vec::new();
     for (name, host) in hosts.extension_hosts.iter().filter(|(_, host)| host.enabled) {
         let path = host.host_file(name).file;
@@ -1134,6 +1140,12 @@ fn hosts_reach(
     }
 
     HostsReach { root: root.to_path_buf(), files: reach, folders }
+}
+
+/// Whether `file`'s text holds the word `extern`, as each file with an `extern` line's does, so [`hosts_reach`] takes
+/// the files that declare plain PHP without parsing the others.
+fn declares_extern(file: &File) -> bool {
+    file.contents.split(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_')).any(|word| word == b"extern")
 }
 
 /// Whether the hosts' `folder` of the project at `root`, whose source files are `sources`, holds for each PHP# file of
