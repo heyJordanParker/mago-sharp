@@ -36645,12 +36645,20 @@ fn a_test_class_takes_its_services_in_its_constructor_and_its_test_methods_take_
 
     let unbound =
         test("    public CheckoutTest(private Clock clock) { }\n\n    [Test]\n    public Clock sends() => this.clock;");
-    let parameters = test(
+    assert_eq!(
+        refusals(unbound, &others),
+        [
+            "14:25 missing-service `CheckoutTest` needs an `App.Shop.Clock`, and no module binds one: the container can't build `CheckoutTest`. | Bind `App.Shop.Clock` in a module of `CheckoutTest`'s namespace or one above it, as in `transient App.Shop.Clock = App.Shop.Clock;`."
+        ]
+    );
+
+    let with_parameters = test(
         "    [Before]\n    public void prepare(Mailer mailer) { }\n\n    [Test]\n    public Mailer sends(Mailer mailer) => mailer;",
     );
+    let refused = "A test method takes only its data provider's values: take services in the test class's constructor. | Move the parameter to the test class's constructor, and read it from `this`.";
     assert_eq!(
-        (refusals(unbound, &others), refusals(parameters, &others)),
-        (Vec::<String>::new(), Vec::<String>::new())
+        refusals(with_parameters, &others),
+        [format!("15:25 test-method-parameter {refused}"), format!("18:25 test-method-parameter {refused}")]
     );
 }
 
