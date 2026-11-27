@@ -1437,7 +1437,13 @@ where
         local_declaration: &'ast LocalDeclaration<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        let kind = if local_declaration.is_const() { LocalKind::Const } else { LocalKind::Let };
+        let kind = if local_declaration.is_const() {
+            LocalKind::Const
+        } else if local_declaration.is_using() {
+            LocalKind::Using
+        } else {
+            LocalKind::Let
+        };
 
         for name in local_declaration.target.names() {
             self.declare(name.value, name.span, kind);

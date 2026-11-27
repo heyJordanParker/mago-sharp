@@ -1035,7 +1035,7 @@ pub(crate) fn check_local_collection_change<A>(
         LocalKind::Let => {
             context.local_changes.insert(name.span());
         }
-        LocalKind::Parameter | LocalKind::Pattern { .. } => {}
+        LocalKind::Parameter | LocalKind::Pattern { .. } | LocalKind::Using => {}
     }
 }
 

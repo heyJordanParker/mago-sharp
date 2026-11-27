@@ -1577,6 +1577,41 @@ where
         }
     }
 
+    /// Records the `dispose()` a `using` local's block runs on its value when it ends, spec section 2, as a call of
+    /// each class the value may be, which gives the body that `dispose`'s effects as a written call would. A `dispose`
+    /// without a body has the effects its `uses` lists.
+    fn dispose(&mut self, declaration: &'ast LocalDeclaration<'arena>) {
+        let codebase = self.codebase();
+        let dispose = word(b"dispose");
+        let span = declaration.span();
+        let receiver = self.roots(declaration.value);
+        for class in self.object_classes(declaration.value) {
+            let Some(declaring_class) = codebase.get_declaring_method_class(class, dispose) else {
+                continue;
+            };
+            let Some(metadata) = codebase.get_method(declaring_class, dispose) else {
+                continue;
+            };
+            if metadata.method_metadata.as_ref().is_some_and(|method| method.is_abstract) {
+                let cause = self.member_cause(declaring_class, dispose, Some(class));
+                for effect in &metadata.uses {
+                    self.summary.effects.push((Effect::Class(*effect), span, cause));
+                }
+
+                continue;
+            }
+
+            let declaring_class = codebase.class_key(declaring_class);
+            self.summary.calls.push(Call {
+                callee: Body::Method(declaring_class, codebase.method_key(declaring_class, dispose)),
+                span,
+                receiver: receiver.clone(),
+                arguments: Vec::new(),
+                type_arguments: Vec::new(),
+            });
+        }
+    }
+
     /// Records an `emit`, which has the effect `Sharp\Events` for each class its event may be.
     fn emit(&mut self, emit: &'ast Emit<'arena>) {
         let span = emit.span();
@@ -1740,6 +1775,9 @@ where
         declaration: &'ast LocalDeclaration<'arena>,
         recorder: &mut Recorder<'_, '_, 'ast, 'arena, A>,
     ) {
+        if declaration.is_using() {
+            recorder.dispose(declaration);
+        }
         match &declaration.target {
             LocalTarget::Name(name) => recorder.store(name.span, declaration.value),
             // Each local an unpack declares holds a part of the value, as a loop variable holds a part of its source.

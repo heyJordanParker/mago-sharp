@@ -280,6 +280,7 @@ final class AnalyzerCodeModuleGenerator
         'write-only-local',
         'parameter-change',
         'const-local-change',
+        'using-not-disposable',
         'extend-final-class',
         'non-existent-class-constant',
         'possibly-false-argument',
