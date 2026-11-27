@@ -254,11 +254,25 @@ final class Container
 final class ContainerError extends \Error {}
 
 /**
- * The handle of a listener `Events.on` starts: the engine stops the listener when the handle is destroyed.
+ * A value that holds a resource, such as an open archive, a transaction or a listener. Its one owner releases it with
+ * `dispose()`: a `using` local when its block ends, newest first, or the container when the value's scope ends. An
+ * implementation may have any effect, and a `using` local carries its value's.
  */
-final class Listening
+interface Disposable
+{
+    #[\Sharp\Internal\AcceptsAnyEffect]
+    public function dispose(): void;
+}
+
+/**
+ * The handle of a listener `Events.on` starts. It is `Disposable`: `dispose()` stops the listener, and the engine stops
+ * it too when the handle is destroyed.
+ */
+final class Listening implements Disposable
 {
     private function __construct() {}
+
+    public function dispose(): void {}
 }
 
 /**
