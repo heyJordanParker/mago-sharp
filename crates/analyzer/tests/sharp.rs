@@ -33325,6 +33325,55 @@ fn decode_of_a_list_takes_its_elements_readers_effects() {
     );
 }
 
+/// The standard library's `Json`, `JsonValue`, `Query` and `Url`, which `Json.decode<T>` and `Query.decode<T>` run.
+const TEXT_READERS: [(&str, &str); 4] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Json.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/Json.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/JsonValue.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/JsonValue.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Query.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/Query.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Net/Url.sharp",
+        include_str!("../../../../composer/library/Sharp/Net/Url.sharp"),
+    ),
+];
+
+/// Spec sections 23, 24 and 29, the program on #1090: `Json.decode<T>` and `Query.decode<T>` read their text, then
+/// build `T` as `typeof(T).decode` does, so each has the effects of its text read and of the readers `T` holds. A
+/// struct, which has no effects, calls them for a `Map<string, string>`. A pure method that decodes a `Saved`, whose
+/// constructor writes to the database, is refused as `typeof(Saved).decode` is.
+#[test]
+fn json_and_query_decode_have_the_effects_of_the_readers_their_type_argument_holds() {
+    let probe = (
+        "app/Shop/DecodeProbe.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\nimport Sharp.Encoding.Query;\n\ninternal struct DecodeProbe\n{\n    internal int count() => this.byJson().count() + this.byType().count() + this.byQuery().count();\n\n    private Map<string, string> byJson() => Json.decode<Map<string, string>>(\"{\\\"name\\\":\\\"ada\\\"}\");\n\n    private Map<string, string> byType() => typeof(Map<string, string>).decode([\"name\": \"ada\"]) as Map<string, string> ?? throw new LogicException(\"decode built no map.\");\n\n    private Map<string, string> byQuery() => Query.decode<Map<string, string>>(\"name=ada\");\n}\n",
+    );
+    let saved_json = (
+        "app/Shop/SavedJsonReader.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class SavedJsonReader : Reading\n{\n    public Any? read(Any? row) => Json.decode<Saved>(\"{}\");\n}\n",
+    );
+    let [disk, stub, saved, note] = BUILT;
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+    let [json, json_value, query, url] = TEXT_READERS;
+
+    assert_eq!(
+        effect_issues(&[
+            probe, saved_json, reading, disk, stub, saved, note, json, json_value, query, url, a, b, c, d, e, f, g
+        ]),
+        [
+            "app/Shop/SavedJsonReader.sharp:7:35 incompatible-effects: `SavedJsonReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
 /// Spec sections 25 and 29: `attributeData<T>()` reads attributes as written and builds none, so the pure `Counting.count`
 /// accepts a method that reads them, and rebuilding one from its data goes through `createInstance`, which may have
 /// every effect, so the pure `Rebuilding.rebuild` refuses a method that does it and a method no `uses` limits does it.
