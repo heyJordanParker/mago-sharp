@@ -1246,8 +1246,9 @@ fn a_marked_base_class_reaches_public_and_protected_methods_of_its_subclasses() 
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
         include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
     );
-    let marked = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Model;\n\n[DynamicallyAccessed]\nextern Model uses none;\n";
-    let unmarked = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Model;\n\nextern Model uses none;\n";
+    let with_mark = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Model;\n\n[DynamicallyAccessed]\nextern Model uses none;\n";
+    let without_mark =
+        "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Model;\n\nextern Model uses none;\n";
     let offer = "namespace App.Store;\n\nimport Illuminate.Database.Eloquent.Casts.Attribute;\nimport Illuminate.Database.Eloquent.Model;\n\npublic final class CartOffer : Model\n{\n    public string offer() => \"offer\";\n\n    protected Attribute label() => Attribute.make(get: (string value) => value.trim());\n}\n";
     let files = |stubs: &'static str| {
         let mut files = ELOQUENT_MODEL.to_vec();
@@ -1255,9 +1256,9 @@ fn a_marked_base_class_reaches_public_and_protected_methods_of_its_subclasses() 
         files
     };
 
-    assert_eq!(too_wide(&files(marked)), Vec::<String>::new());
+    assert_eq!(too_wide(&files(with_mark)), Vec::<String>::new());
     assert_eq!(
-        too_wide(&files(unmarked)),
+        too_wide(&files(without_mark)),
         [
             "src/App/Store/CartOffer.sharp 6:20 `CartOffer` is public, and nothing outside `App.Store` uses it. | Declare it `internal`, or, when a framework reaches it by name or by reflection, put an attribute whose class is marked `[DynamicallyAccessed]` on it.",
             "src/App/Store/CartOffer.sharp 8:19 `CartOffer.offer` is public, and nothing outside `CartOffer` uses it. | Declare it `private`, or, when a framework reaches it by name or by reflection, put an attribute whose class is marked `[DynamicallyAccessed]` on its class."
