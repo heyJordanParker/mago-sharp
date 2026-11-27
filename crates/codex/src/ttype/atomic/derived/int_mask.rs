@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use mago_word::Word;
 use mago_word::word;
 
@@ -68,8 +70,8 @@ impl TIntMask {
 }
 
 impl TType for TIntMask {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        self.values.iter().map(TypeRef::Union).collect()
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.values.iter().try_for_each(|value| visit(TypeRef::Union(value)))
     }
 
     fn needs_population(&self) -> bool {
