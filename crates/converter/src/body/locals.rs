@@ -142,8 +142,8 @@ struct StaticLocal {
 pub(crate) struct Names<'ast, 'arena> {
     variables: Vec<Vec<u8>>,
     parameters: Vec<Vec<u8>>,
-    /// Each variable a write, `++`, `--` or `unset` changes, through any index.
-    changed: Vec<&'ast DirectVariable<'arena>>,
+    /// Each place a write, `++`, `--` or `unset` changes, as `$rows[0]` of `$rows[0] = 1`.
+    changed: Vec<&'ast Expression<'arena>>,
 }
 
 impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Names<'ast, 'arena> {
@@ -158,23 +158,23 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Names<'ast, 'arena> {
     }
 
     fn walk_in_assignment(&mut self, assignment: &'ast Assignment<'arena>, _: &mut ()) {
-        self.changed.extend(indexed_variable(assignment.lhs));
+        self.changed.push(assignment.lhs);
     }
 
     fn walk_in_unary_prefix(&mut self, unary: &'ast UnaryPrefix<'arena>, _: &mut ()) {
         if unary.operator.is_increment_or_decrement() {
-            self.changed.extend(indexed_variable(unary.operand));
+            self.changed.push(unary.operand);
         }
     }
 
     fn walk_in_unary_postfix(&mut self, unary: &'ast UnaryPostfix<'arena>, _: &mut ()) {
-        self.changed.extend(indexed_variable(unary.operand));
+        self.changed.push(unary.operand);
     }
 
     fn walk_in_unset(&mut self, unset: &'ast Unset<'arena>, _: &mut ()) {
         for value in unset.values.iter() {
             if let Expression::ArrayAccess(_) = value {
-                self.changed.extend(indexed_variable(value));
+                self.changed.push(value);
             }
         }
     }
@@ -709,11 +709,14 @@ impl Converter<'_, '_> {
     /// new name keeps PHP's meaning where no other variable or parameter of the method, its lambdas' included, has it.
     /// Keeps every such variable and parameter, which a name the conversion adds must be none of. Gives the copy of
     /// each of `parameters` the body changes, whose local the body names in its place.
-    pub(crate) fn rename_locals<'ast, 'arena: 'ast>(
+    pub(crate) fn rename_locals<'ast, 'arena>(
         &mut self,
         parameters: &[Vec<u8>],
         walk: impl FnOnce(&mut Names<'ast, 'arena>),
-    ) -> Vec<ParameterCopy> {
+    ) -> Vec<ParameterCopy>
+    where
+        'arena: 'ast,
+    {
         let mut names = Names::default();
         walk(&mut names);
         let own = parameters;
@@ -745,11 +748,14 @@ impl Converter<'_, '_> {
 
     /// The copy of each of `parameters`, a lambda's, its body `walk` visits changes. Its local names the parameter in
     /// the body ahead of any name the method around gives it, until [`Self::forget_copies`].
-    pub(super) fn lambda_copies<'ast, 'arena: 'ast>(
+    pub(super) fn lambda_copies<'ast, 'arena>(
         &mut self,
         parameters: &[Vec<u8>],
         walk: impl FnOnce(&mut Names<'ast, 'arena>),
-    ) -> Vec<ParameterCopy> {
+    ) -> Vec<ParameterCopy>
+    where
+        'arena: 'ast,
+    {
         let mut names = Names::default();
         walk(&mut names);
         let copies = self.parameter_copies(parameters, &names);
@@ -788,15 +794,15 @@ impl Converter<'_, '_> {
     /// parameter is a statement of its own, after which the block returns the copy, as `(x) => { let changedX = x;
     /// changedX += 1; return changedX; }`. A lambda that `returns` nothing returns nothing.
     pub(super) fn copying_arrow(&mut self, copies: &[ParameterCopy], value: &Expression<'_>, returns: bool) -> String {
-        let copied = |variable: &DirectVariable<'_>| copies.iter().find(|copy| copy.name == variable.name);
+        let copy_of = |variable: &DirectVariable<'_>| copies.iter().find(|copy| copy.name == variable.name);
         let written = match value.unparenthesized() {
             Expression::Assignment(Assignment { lhs: Expression::Variable(Variable::Direct(variable)), .. }) => {
-                copied(variable)
+                copy_of(variable)
             }
             Expression::UnaryPrefix(UnaryPrefix {
                 operator,
                 operand: Expression::Variable(Variable::Direct(variable)),
-            }) if operator.is_increment_or_decrement() => copied(variable),
+            }) if operator.is_increment_or_decrement() => copy_of(variable),
             _ => None,
         };
         let declarations: Vec<String> = copies.iter().map(ParameterCopy::declaration).collect();
@@ -812,11 +818,19 @@ impl Converter<'_, '_> {
     /// The copy of each of `parameters` the body `names` walked changes, by a write, `++`, `--` or `unset` through any
     /// index. PHP changes the function's own copy of the argument, and a PHP# parameter never changes, so the body
     /// copies it into a `let` local named `changed` and the parameter's name, as `let changedInput = input;`, and names
-    /// that local in its place (spec section 2).
-    fn parameter_copies(&mut self, parameters: &[Vec<u8>], names: &Names<'_, '_>) -> Vec<ParameterCopy> {
+    /// that local in its place (spec section 2). A write at an index of an `ArrayAccess` object calls its `offsetSet`,
+    /// which changes the object and leaves the parameter as it was.
+    fn parameter_copies(&self, parameters: &[Vec<u8>], names: &Names<'_, '_>) -> Vec<ParameterCopy> {
         let mut copies: Vec<ParameterCopy> = Vec::new();
         for parameter in parameters {
-            if !names.changed.iter().any(|variable| variable.name == parameter.as_slice()) {
+            let changes = names.changed.iter().any(|place| {
+                let root = indexed_root(place);
+                let through_index = matches!(place.unparenthesized(), Expression::ArrayAccess(_) | Expression::ArrayAppend(_));
+
+                matches!(root, Expression::Variable(Variable::Direct(variable)) if variable.name == parameter.as_slice())
+                    && !(through_index && self.is_array_access(root))
+            });
+            if !changes {
                 continue;
             }
             let name = self.variable_name(parameter);
@@ -1151,15 +1165,15 @@ impl Converter<'_, '_> {
         let body = method.locals.body.take();
         let copied = std::mem::take(&mut method.locals.copied);
         let written_parameters = std::mem::take(&mut method.locals.written_parameters);
-        let copies = std::mem::take(&mut method.locals.copies);
+        let parameter_copies = std::mem::take(&mut method.locals.copies);
         let statics = std::mem::take(&mut method.locals.statics);
         // Each changed parameter's copy is the body's first statement.
         if let Some(body) = body
-            && !copies.is_empty()
+            && !parameter_copies.is_empty()
         {
             let first = self.skip_whitespace(body.start.offset + 1);
             let indentation = self.indentation(first);
-            for copy in &copies {
+            for copy in &parameter_copies {
                 self.edits.insert(first, format!("{}\n{indentation}", copy.declaration()));
             }
         }
@@ -1685,11 +1699,18 @@ pub(super) fn destructured<'ast, 'arena>(place: &'ast Expression<'arena>) -> Opt
 
 /// The variable `place` names, through any index or append, as `$rows` in `$rows[0][] = 1`.
 pub(super) fn indexed_variable<'ast, 'arena>(place: &'ast Expression<'arena>) -> Option<&'ast DirectVariable<'arena>> {
-    match place.unparenthesized() {
+    match indexed_root(place) {
         Expression::Variable(Variable::Direct(variable)) => Some(variable),
-        Expression::ArrayAccess(access) => indexed_variable(access.array),
-        Expression::ArrayAppend(append) => indexed_variable(append.array),
         _ => None,
+    }
+}
+
+/// The value `place` reaches through any index or append, as `$rows` of `$rows[0][] = 1`, or `place` itself.
+fn indexed_root<'ast, 'arena>(place: &'ast Expression<'arena>) -> &'ast Expression<'arena> {
+    match place.unparenthesized() {
+        Expression::ArrayAccess(access) => indexed_root(access.array),
+        Expression::ArrayAppend(append) => indexed_root(append.array),
+        place => place,
     }
 }
 

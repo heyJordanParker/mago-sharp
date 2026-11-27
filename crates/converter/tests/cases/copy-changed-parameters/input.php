@@ -12,11 +12,11 @@ final class Signup
      * @param array<string, string> $input
      * @param list<string> $form
      */
-    public function fields(array $input, array $form, string $key): int
+    public function fields(array $input, array $form, string $key, string $field): int
     {
         $input[$key] = 'signup';
         $form[] = 'email';
 
-        return count($input) + count($form);
+        return isset($input[$field]) ? count($form) : 0;
     }
 }

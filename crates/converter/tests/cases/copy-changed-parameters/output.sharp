@@ -4,13 +4,13 @@ namespace App;
 // changes its parameters copies each one into a `let` local first, which the rest of the body uses (spec section 2).
 internal final class Signup
 {
-    internal int fields(Map<string, string> input, List<string> form, string key)
+    internal int fields(Map<string, string> input, List<string> form, string key, string field)
     {
         let changedInput = input;
         let changedForm = form;
         changedInput[key] = 'signup';
         changedForm.add('email');
 
-        return changedInput.count() + changedForm.count();
+        return changedInput.get(field) != null ? changedForm.count() : 0;
     }
 }
