@@ -1762,7 +1762,7 @@ fn nullable_values_flow_in_and_out_with_no_issues() {
 
 #[test]
 fn null_coalescing_assignment_makes_a_local_non_null_as_in_php() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int total(int? extra)\n    {\n        let total = extra;\n        total ??= 0;\n        extra ??= 1;\n        return total + extra;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int total(int? extra)\n    {\n        let total = extra;\n        total ??= 0;\n        let other = extra ?? 1;\n        return total + other;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function total(?int $extra): int\n    {\n        $total = $extra;\n        $total ??= 0;\n        $extra ??= 1;\n        return $total + $extra;\n    }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
@@ -1846,7 +1846,7 @@ fn null_safe_access_skips_the_rest_of_its_chain_through_an_index() {
 /// null again, whatever the skipped part tested or wrote. Plain PHP keeps mago's own reading.
 #[test]
 fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
-    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\nimport Lib.Magic;\n\nclass Flow\n{\n    private Step? current = null;\n\n    public void start(Step step) { this.current = step; }\n    public string reset() { this.current = null; return \"\"; }\n\n    public string? call(Step? step) => step?.route(step.label());\n    public string? chain(Step? step) => step?.child.route(step.label());\n    public string? index(Step? step) => step?.items[step.index()];\n    public string? field() => this.current?.route(this.current.label());\n    public string? fieldIndex() => this.current?.items[this.current.index()];\n    public string? reread() => this.current?.join(this.reset(), this.current.label());\n    public string? spareChild(Step? step) => step?.spare?.route(step.spare.label());\n    public string? extension(string? title) => title?.slug(title);\n    public void magic(Magic? magic) { magic?.anything(magic.name()); }\n\n    public int? classValue(bool flag)\n    {\n        const type = flag ? typeof(Step) : null;\n        return type?.twice(type.MAX);\n    }\n\n    public void writes(Step? step)\n    {\n        step?.title = step.label();\n        step?.items[step.index()] = \"x\";\n        step?.note ??= step.label();\n    }\n\n    public string? redundant(Step? step) => step?.route(step?.label() ?? \"\");\n\n    public void known(Step known)\n    {\n        known?.note ??= known.label();\n        known?.title += known.label();\n        known?.items[known.index()] = \"x\";\n        known?.count++;\n        --known?.count;\n    }\n\n    public string after(Step? step)\n    {\n        step?.route(\"x\");\n        return step.label();\n    }\n\n    public string afterTypeTest(Shape? shape)\n    {\n        shape?.draw(shape is Square ? \"square\" : \"other\");\n        return shape.name();\n    }\n\n    public string afterMatch(Shape? shape, bool flag)\n    {\n        shape?.draw(match (flag) { true => (shape = new Square()).name(), default => \"other\" });\n        return shape.name();\n    }\n\n    public string afterOr(Shape? shape, bool a, bool b, bool c, bool d)\n    {\n        shape?.check(a || b || c || d || shape is Square);\n        return shape.name();\n    }\n\n    public string afterLambda(Step? step)\n    {\n        step?.run(() => { step = new Step(); });\n        return step.label();\n    }\n\n    public string afterReference(Step? step)\n    {\n        step?.route(Magic.clear(step));\n        return step.label();\n    }\n\n    public string afterProperty(Step? step)\n    {\n        step?.route(step.title);\n        return step.title;\n    }\n\n    public string afterField()\n    {\n        this.current?.route(this.current.title);\n        return this.current.title;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\nimport Lib.Magic;\n\nclass Flow\n{\n    private Step? current = null;\n\n    public void start(Step step) { this.current = step; }\n    public string reset() { this.current = null; return \"\"; }\n\n    public string? call(Step? step) => step?.route(step.label());\n    public string? chain(Step? step) => step?.child.route(step.label());\n    public string? index(Step? step) => step?.items[step.index()];\n    public string? field() => this.current?.route(this.current.label());\n    public string? fieldIndex() => this.current?.items[this.current.index()];\n    public string? reread() => this.current?.join(this.reset(), this.current.label());\n    public string? spareChild(Step? step) => step?.spare?.route(step.spare.label());\n    public string? extension(string? title) => title?.slug(title);\n    public void magic(Magic? magic) { magic?.anything(magic.name()); }\n\n    public int? classValue(bool flag)\n    {\n        const type = flag ? typeof(Step) : null;\n        return type?.twice(type.MAX);\n    }\n\n    public void writes(Step? step)\n    {\n        step?.title = step.label();\n        step?.items[step.index()] = \"x\";\n        step?.note ??= step.label();\n    }\n\n    public string? redundant(Step? step) => step?.route(step?.label() ?? \"\");\n\n    public void known(Step known)\n    {\n        known?.note ??= known.label();\n        known?.title += known.label();\n        known?.items[known.index()] = \"x\";\n        known?.count++;\n        --known?.count;\n    }\n\n    public string after(Step? step)\n    {\n        step?.route(\"x\");\n        return step.label();\n    }\n\n    public string afterTypeTest(Shape? shape)\n    {\n        shape?.draw(shape is Square ? \"square\" : \"other\");\n        return shape.name();\n    }\n\n    public string afterMatch(Shape? given, bool flag)\n    {\n        let shape = given;\n        shape?.draw(match (flag) { true => (shape = new Square()).name(), default => \"other\" });\n        return shape.name();\n    }\n\n    public string afterOr(Shape? shape, bool a, bool b, bool c, bool d)\n    {\n        shape?.check(a || b || c || d || shape is Square);\n        return shape.name();\n    }\n\n    public string afterLambda(Step? given)\n    {\n        let step = given;\n        step?.run(() => { step = new Step(); });\n        return step.label();\n    }\n\n    public string afterReference(Step? step)\n    {\n        step?.route(Magic.clear(step));\n        return step.label();\n    }\n\n    public string afterProperty(Step? step)\n    {\n        step?.route(step.title);\n        return step.title;\n    }\n\n    public string afterField()\n    {\n        this.current?.route(this.current.title);\n        return this.current.title;\n    }\n}\n";
     let router = "namespace Demo;\n\nclass Router\n{\n    public string route(string label) => label;\n    public string label() => \"router\";\n}\n";
     let shape = "namespace Demo;\n\npublic abstract class Shape\n{\n    public string draw(string kind) => kind;\n    public string name() => \"shape\";\n    public string check(bool flag) => \"\";\n}\n";
     let square = "namespace Demo;\n\npublic class Square : Shape\n{\n}\n";
@@ -1882,19 +1882,19 @@ fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
             "44:16 redundant-nullsafe-operator",
             "50:16 possible-method-access-on-null",
             "56:16 possible-method-access-on-null",
-            "62:16 possible-method-access-on-null",
-            "68:16 possible-method-access-on-null",
-            "74:16 possible-method-access-on-null",
-            "80:16 possible-method-access-on-null",
-            "80:21 ambiguous-object-method-access",
-            "86:16 possibly-null-property-access",
-            "86:16 nullable-return-statement",
-            "86:16 invalid-return-statement",
-            "91:29 possibly-null-property-access",
-            "91:29 possibly-null-argument",
-            "92:16 possibly-null-property-access",
-            "92:16 nullable-return-statement",
-            "92:16 invalid-return-statement",
+            "63:16 possible-method-access-on-null",
+            "69:16 possible-method-access-on-null",
+            "76:16 possible-method-access-on-null",
+            "82:16 possible-method-access-on-null",
+            "82:21 ambiguous-object-method-access",
+            "88:16 possibly-null-property-access",
+            "88:16 nullable-return-statement",
+            "88:16 invalid-return-statement",
+            "93:29 possibly-null-property-access",
+            "93:29 possibly-null-argument",
+            "94:16 possibly-null-property-access",
+            "94:16 nullable-return-statement",
+            "94:16 invalid-return-statement",
         ]
     );
 
@@ -1990,7 +1990,7 @@ fn a_typed_local_takes_values_of_its_written_type_with_no_issues() {
 
 #[test]
 fn locals_of_sibling_blocks_keep_their_own_written_types() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void total(bool flag)\n    {\n        if (flag) {\n            int value = 1;\n            value = 2;\n        } else {\n            string value = \"one\";\n            value = \"two\";\n        }\n        {\n            float value = 1.5;\n            value = 2.5;\n        }\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string total(bool flag)\n    {\n        let text = \"\";\n        if (flag) {\n            int value = 1;\n            value = 2;\n            text = `${value}`;\n        } else {\n            string value = \"one\";\n            value = \"two\";\n            text = value;\n        }\n        {\n            float value = 1.5;\n            value = 2.5;\n            text = `${text} ${value}`;\n        }\n        return text;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -4743,7 +4743,7 @@ fn an_arrow_read_of_a_class_string_stays_an_error_in_php() {
 
 #[test]
 fn a_catch_variable_has_the_caught_classes_as_its_type_as_in_php() {
-    let sharp = "namespace Demo;\n\nimport RuntimeException;\nimport LogicException;\n\nclass Report\n{\n    public static int total(int extra)\n    {\n        try {\n            if (extra < 0) {\n                throw new RuntimeException(\"negative\");\n            }\n        } catch (RuntimeException | LogicException failure) {\n            return failure.getLine();\n        } finally {\n            extra += 1;\n        }\n        return extra;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\nimport LogicException;\n\nclass Report\n{\n    public static int total(int given)\n    {\n        let extra = given;\n        try {\n            if (extra < 0) {\n                throw new RuntimeException(\"negative\");\n            }\n        } catch (RuntimeException | LogicException failure) {\n            return failure.getLine();\n        } finally {\n            extra += 1;\n        }\n        return extra;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse RuntimeException;\nuse LogicException;\n\nclass Report\n{\n    public static function total(int $extra): int\n    {\n        try {\n            if ($extra < 0) {\n                throw new RuntimeException(\"negative\");\n            }\n        } catch (RuntimeException | LogicException $failure) {\n            return $failure->getLine();\n        } finally {\n            $extra += 1;\n        }\n        return $extra;\n    }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
@@ -5274,7 +5274,7 @@ fn check_throws_skips_sharp_files_and_keeps_reporting_in_php() {
 /// the statement after it in the named loop never runs.
 #[test]
 fn a_named_break_or_continue_leaves_or_continues_the_loop_it_names() {
-    let sharp = "namespace Demo;\n\nclass Flow\n{\n    public static int breaksOuter(List<int> items)\n    {\n        let found = 0;\n        orders: while (true) {\n            for (const item of items) {\n                found = item;\n                break orders;\n            }\n        }\n        return found;\n    }\n\n    public static void continuesOuter(bool again)\n    {\n        orders: do {\n            while (true) {\n                continue orders;\n            }\n            Halt.note(\"never\");\n        } while (again);\n    }\n\n    public static int leavesInner(bool again, bool more)\n    {\n        let rounds = 0;\n        while (again) {\n            do {\n                break;\n            } while (more);\n            rounds = rounds + 1;\n            again = rounds < 3;\n        }\n        return rounds;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Flow\n{\n    public static int breaksOuter(List<int> items)\n    {\n        let found = 0;\n        orders: while (true) {\n            for (const item of items) {\n                found = item;\n                break orders;\n            }\n        }\n        return found;\n    }\n\n    public static void continuesOuter(bool again)\n    {\n        orders: do {\n            while (true) {\n                continue orders;\n            }\n            Halt.note(\"never\");\n        } while (again);\n    }\n\n    public static int leavesInner(bool start, bool more)\n    {\n        let again = start;\n        let rounds = 0;\n        while (again) {\n            do {\n                break;\n            } while (more);\n            rounds = rounds + 1;\n            again = rounds < 3;\n        }\n        return rounds;\n    }\n}\n";
     let halt = "<?php\n\nnamespace Demo;\n\nfinal class Halt\n{\n    public static function note(int|string $value): void\n    {\n    }\n}\n";
 
     assert_eq!(
@@ -5658,27 +5658,27 @@ fn a_ternary_whose_condition_is_not_bool_is_an_invalid_operand() {
 
 #[test]
 fn every_condition_that_is_bool_has_no_issue() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int pick(int count, string name, bool on)\n    {\n        if (count > 0) {\n            count++;\n        } else if (name != \"\") {\n            count--;\n        }\n        while (count > 10 && on) {\n            count--;\n        }\n        do {\n            count++;\n        } while (count < 3 || !on);\n        for (let i = 3; i > 0; i--) {\n            count++;\n        }\n        while (true) {\n            break;\n        }\n        return on ? count : 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int pick(int start, string name, bool on)\n    {\n        let count = start;\n        if (count > 0) {\n            count++;\n        } else if (name != \"\") {\n            count--;\n        }\n        while (count > 10 && on) {\n            count--;\n        }\n        do {\n            count++;\n        } while (count < 3 || !on);\n        for (let i = 3; i > 0; i--) {\n            count++;\n        }\n        while (true) {\n            break;\n        }\n        return on ? count : 0;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
 
 #[test]
 fn a_condition_that_is_not_bool_is_an_invalid_operand_everywhere() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int pick(int count, string name, bool on, int n, string s)\n    {\n        if (count) {\n            count++;\n        } else if (name) {\n            count--;\n        }\n        while (count) {\n            count--;\n        }\n        do {\n            count++;\n        } while (count % 3);\n        for (let i = 3; i; i--) {\n            count += s ? 1 : 2;\n        }\n        const a = n && on;\n        const b = on || s;\n        const c = !n;\n        return a && b && c ? 1 : 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int pick(int start, string name, bool on, int n, string s)\n    {\n        let count = start;\n        if (count) {\n            count++;\n        } else if (name) {\n            count--;\n        }\n        while (count) {\n            count--;\n        }\n        do {\n            count++;\n        } while (count % 3);\n        for (let i = 3; i; i--) {\n            count += s ? 1 : 2;\n        }\n        const a = n && on;\n        const b = on || s;\n        const c = !n;\n        return a && b && c ? 1 : 0;\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "7:13 invalid-operand",
-            "9:20 invalid-operand",
-            "12:16 invalid-operand",
-            "17:18 invalid-operand",
-            "19:22 invalid-operand",
-            "18:25 invalid-operand",
-            "21:19 invalid-operand",
-            "22:25 invalid-operand",
-            "23:20 invalid-operand",
+            "8:13 invalid-operand",
+            "10:20 invalid-operand",
+            "13:16 invalid-operand",
+            "18:18 invalid-operand",
+            "20:22 invalid-operand",
+            "19:25 invalid-operand",
+            "22:19 invalid-operand",
+            "23:25 invalid-operand",
+            "24:20 invalid-operand",
         ]
     );
 }
@@ -5721,7 +5721,7 @@ fn not_before_is_adds_no_issue_and_not_of_a_value_that_is_not_bool_keeps_its_rep
 /// twin writes the parentheses PHP needs for the same meaning.
 #[test]
 fn the_bitwise_operators_and_their_compound_forms_take_ints_as_in_php() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int flags(int granted, int count, int n)\n    {\n        const canRead = 1;\n        const canWrite = 2;\n        const canDelete = 4;\n        let permissions = granted | canWrite;\n        permissions |= canDelete;\n        if (permissions & canWrite != 0) {\n            permissions = permissions ^ canRead;\n        }\n        if ((permissions & canWrite) != 0) {\n            permissions >>= 1;\n        }\n        const mask = 1 << count;\n        n %= 3;\n        n &= ~mask;\n        n ^= permissions >> 1;\n        n <<= 2;\n        return ~mask & permissions | n;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int flags(int granted, int count, int start)\n    {\n        let n = start;\n        const canRead = 1;\n        const canWrite = 2;\n        const canDelete = 4;\n        let permissions = granted | canWrite;\n        permissions |= canDelete;\n        if (permissions & canWrite != 0) {\n            permissions = permissions ^ canRead;\n        }\n        if ((permissions & canWrite) != 0) {\n            permissions >>= 1;\n        }\n        const mask = 1 << count;\n        n %= 3;\n        n &= ~mask;\n        n ^= permissions >> 1;\n        n <<= 2;\n        return ~mask & permissions | n;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function flags(int $granted, int $count, int $n): int\n    {\n        $READ = 1;\n        $WRITE = 2;\n        $DELETE = 4;\n        $permissions = $granted | $WRITE;\n        $permissions |= $DELETE;\n        if (($permissions & $WRITE) != 0) {\n            $permissions = $permissions ^ $READ;\n        }\n        if (($permissions & $WRITE) != 0) {\n            $permissions >>= 1;\n        }\n        $mask = 1 << $count;\n        $n %= 3;\n        $n &= ~$mask;\n        $n ^= $permissions >> 1;\n        $n <<= 2;\n        return ~$mask & $permissions | $n;\n    }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
@@ -6241,7 +6241,7 @@ fn a_paradoxical_or_repeated_condition_names_its_php_sharp_types() {
 /// meant. A compound form is named as written. PHP turns both `bool`s into ints.
 #[test]
 fn a_bitwise_operator_on_two_bools_names_the_bool_operator_to_write() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool show(bool isAdmin, bool isOwner)\n    {\n        const either = isAdmin | isOwner;\n        const both = isAdmin & isOwner;\n        const one = isAdmin ^ isOwner;\n        isAdmin |= isOwner;\n        return either && both && one && isAdmin;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool show(bool isAdmin, bool isOwner)\n    {\n        const either = isAdmin | isOwner;\n        const both = isAdmin & isOwner;\n        const one = isAdmin ^ isOwner;\n        let admin = isAdmin;\n        admin |= isOwner;\n        return either && both && one && admin;\n    }\n}\n";
     let help = "`||`, `&&` and `!=` join two `bool` values.";
 
     assert_eq!(
@@ -6257,7 +6257,7 @@ fn a_bitwise_operator_on_two_bools_names_the_bool_operator_to_write() {
                 "9:21 invalid-operand `^` takes `int`, but both sides are `bool`: write `!=` for two `bool` values. | {help}"
             ),
             format!(
-                "10:9 invalid-operand `|=` takes `int`, but both sides are `bool`: write `||` for two `bool` values. | {help}"
+                "11:9 invalid-operand `|=` takes `int`, but both sides are `bool`: write `||` for two `bool` values. | {help}"
             ),
         ]
     );
@@ -8194,7 +8194,7 @@ fn a_lambda_parameter_nothing_types_is_refused() {
 /// a method value alike.
 #[test]
 fn a_lambda_fits_a_function_type_only_with_its_parameters_and_its_void() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int total = 0;\n    private Function<int(int, int)> held = (int a) => a;\n    private Function<void(int)> sink = (int n) => n * 2;\n    private Function<int(int, int)> pair = Report.one;\n\n    public static int apply(Function<int(int, int)> step) => step(1, 2);\n\n    public static void each(Function<void(int)> step) { step(1); }\n\n    public static int one(int a) => a;\n\n    public void run()\n    {\n        Report.apply((int a) => a);\n        Report.apply(() => 1);\n        Report.apply((int a, int b) => a + b);\n        Report.each(n => n + 1);\n        Report.each(n => this.add(n));\n        Report.each(n => { this.total += n; });\n        Report.each(n => this.total = n);\n        Function<int(int, int)> local = (int a) => a;\n        Function<void(int)> quiet = n => n;\n        local(1, 2);\n        quiet(1);\n        this.held(1, 2);\n        this.sink(1);\n        Runner.attempt(1, () => { this.total += 1; });\n        Report.each(n => { return n; });\n        Report.each(n => { if (n > 0) { return n; } });\n        Report.each(n => { const f = () => n; f(); });\n        Report.each(n => n > 1 ? this.add(n) : this.add(0));\n        Function<int(int, int)> method = Report.one;\n        List<Any?> seen = [];\n        seen.add(this.add(1));\n        Any? kept = quiet(2);\n        const picked = this.total > 0 ? this.add(1) : this.add(2);\n        this.pair(1, 2);\n        Report.each(n => { if (n > 0) { return; } this.add(n); });\n        Report.each(n => -n);\n    }\n\n    private void add(int n) { this.total += n; }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int total = 0;\n    private Function<int(int, int)> held = (int a) => a;\n    private Function<void(int)> sink = (int n) => n * 2;\n    private Function<int(int, int)> pair = Report.one;\n\n    public static int apply(Function<int(int, int)> step) => step(1, 2);\n\n    public static void each(Function<void(int)> step) { step(1); }\n\n    public static int one(int a) => a;\n\n    public void run()\n    {\n        Report.apply((int a) => a);\n        Report.apply(() => 1);\n        Report.apply((int a, int b) => a + b);\n        Report.each(n => n + 1);\n        Report.each(n => this.add(n));\n        Report.each(n => { this.total += n; });\n        Report.each(n => this.total = n);\n        Function<int(int, int)> local = (int a) => a;\n        Function<void(int)> quiet = n => n;\n        local(1, 2);\n        quiet(1);\n        this.held(1, 2);\n        this.sink(1);\n        Runner.attempt(1, () => { this.total += 1; });\n        Report.each(n => { return n; });\n        Report.each(n => { if (n > 0) { return n; } });\n        Report.each(n => { const f = () => n; f(); });\n        Report.each(n => n > 1 ? this.add(n) : this.add(0));\n        Function<int(int, int)> method = Report.one;\n        List<Any?> seen = [];\n        seen.add(this.add(1));\n        this.sink(seen.count());\n        Any? kept = quiet(2);\n        const picked = this.total > 0 ? this.add(1) : this.add(2);\n        this.pair(1, 2);\n        Report.each(n => { if (n > 0) { return; } this.add(n); });\n        Report.each(n => -n);\n    }\n\n    private void add(int n) { this.total += n; }\n}\n";
     // A plain PHP `callable` takes any function, so a call through it passes no parameter a lambda must take.
     let runner = "<?php\n\nnamespace Demo;\n\nfinal class Runner\n{\n    public static function attempt(int $line, callable $statement): void\n    {\n        $statement();\n    }\n}\n";
     assert_messages(
@@ -8214,10 +8214,10 @@ fn a_lambda_fits_a_function_type_only_with_its_parameters_and_its_void() {
             "35:26 invalid-return-statement: A conditional gives a value, and `Function<void(int)>` returns nothing: choose with `if` in a block body, as in `{ if (…) { … } else { … } }`.",
             "36:42 invalid-local-assignment-value: `Function<int(int, int)>` takes 2 parameters, and `Report.one` takes 1.",
             "38:18 no-value: `this.add(1)` returns nothing, so it has no value to use: call it as a statement of its own.",
-            "39:21 no-value: `quiet(2)` returns nothing, so it has no value to use: call it as a statement of its own.",
-            "40:41 no-value: `this.add(1)` returns nothing, so it has no value to use: call it as a statement of its own.",
-            "40:55 no-value: `this.add(2)` returns nothing, so it has no value to use: call it as a statement of its own.",
-            "43:26 invalid-return-statement: This lambda gives a value, and `Function<void(int)>` returns nothing: remove the value, or give the function type a return type.",
+            "40:21 no-value: `quiet(2)` returns nothing, so it has no value to use: call it as a statement of its own.",
+            "41:41 no-value: `this.add(1)` returns nothing, so it has no value to use: call it as a statement of its own.",
+            "41:55 no-value: `this.add(2)` returns nothing, so it has no value to use: call it as a statement of its own.",
+            "44:26 invalid-return-statement: This lambda gives a value, and `Function<void(int)>` returns nothing: remove the value, or give the function type a return type.",
         ],
     );
 }
@@ -8255,7 +8255,7 @@ fn a_void_call_through_null_safe_access_gives_no_value() {
         ("src/Demo/Counter.sharp", "namespace Demo;\n\nclass Counter\n{\n    public void count() { }\n}\n"),
         ("src/Demo/Holder.sharp", "namespace Demo;\n\nclass Holder\n{\n    public Box box { get; } = new Box();\n}\n"),
     ];
-    let sharp = "namespace Demo;\n\nimport Sharp.Scope;\n\nclass Report\n{\n    private Box box = new Box();\n\n    public Any? saved => this.box.save();\n\n    public Any? held { get { return this.box.save(); } }\n\n    public static void log(Any? value) { }\n\n    public Any? sure(Box box)\n    {\n        return box.save();\n    }\n\n    public Any? maybe(Box? maybe)\n    {\n        return maybe?.save();\n    }\n\n    public Any? sureArrow(Box box) => box.save();\n\n    public Any? maybeArrow(Box? maybe) => maybe?.save();\n\n    public Any? stops(Box box) => box.fail();\n\n    public Any? maybeStops(Box? maybe) => maybe?.fail();\n\n    public void lambdas(Box box, Box? maybe)\n    {\n        Function<void()> a = () => box.save();\n        Function<void()> b = () => maybe?.save();\n        Function<Any?()> c = () => box.save();\n        Function<Any?()> d = () => maybe?.save();\n        const e = () => box.save();\n        const f = () => maybe?.save();\n        Function<int()> g = () => box.save();\n        Function<int?()> h = () => maybe?.save();\n        Scope.run(() => box.save());\n        Scope.run(() => maybe?.save());\n        int i = Scope.run(() => box.save());\n    }\n\n    public void run(Box box, Box? maybe, Holder held, Holder? holder, Function<void()> done, Function<void()>? hook, List<int> kept, List<int>? seen, bool flag, (List<int>|Counter)? counted)\n    {\n        const a = box.save();\n        const b = maybe?.save();\n        Report.log(box.save());\n        Report.log(maybe?.save());\n        const c = box.save() ?? 1;\n        const d = maybe?.save() ?? 1;\n        const e = `${box.save()}`;\n        const f = `${maybe?.save()}`;\n        const g = held.box.save();\n        const h = holder?.box.save();\n        const i = done();\n        const j = hook?.();\n        const k = kept.clear();\n        const l = seen?.clear();\n        const m = Box.make();\n        const type = flag ? typeof(Box) : null;\n        const n = type?.make();\n        const o = counted?.count();\n        maybe?.save();\n        holder?.box.save();\n        hook?.();\n        seen?.clear();\n        type?.make();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Sharp.Scope;\n\nclass Report\n{\n    private Box box = new Box();\n\n    public Any? saved => this.box.save();\n\n    public Any? held { get { return this.box.save(); } }\n\n    public static void log(Any? value) { }\n\n    public Any? sure(Box box)\n    {\n        return box.save();\n    }\n\n    public Any? maybe(Box? maybe)\n    {\n        return maybe?.save();\n    }\n\n    public Any? sureArrow(Box box) => box.save();\n\n    public Any? maybeArrow(Box? maybe) => maybe?.save();\n\n    public Any? stops(Box box) => box.fail();\n\n    public Any? maybeStops(Box? maybe) => maybe?.fail();\n\n    public void lambdas(Box box, Box? maybe)\n    {\n        Function<void()> a = () => box.save();\n        Function<void()> b = () => maybe?.save();\n        Function<Any?()> c = () => box.save();\n        Function<Any?()> d = () => maybe?.save();\n        const e = () => box.save();\n        const f = () => maybe?.save();\n        Function<int()> g = () => box.save();\n        Function<int?()> h = () => maybe?.save();\n        Scope.run(() => box.save());\n        Scope.run(() => maybe?.save());\n        int i = Scope.run(() => box.save());\n    }\n\n    public void run(Box box, Box? maybe, Holder held, Holder? holder, Function<void()> done, Function<void()>? hook, bool flag, (List<int>|Counter)? counted)\n    {\n        List<int> kept = [1];\n        List<int>? seen = flag ? [2] : null;\n        const a = box.save();\n        const b = maybe?.save();\n        Report.log(box.save());\n        Report.log(maybe?.save());\n        const c = box.save() ?? 1;\n        const d = maybe?.save() ?? 1;\n        const e = `${box.save()}`;\n        const f = `${maybe?.save()}`;\n        const g = held.box.save();\n        const h = holder?.box.save();\n        const i = done();\n        const j = hook?.();\n        const k = kept.clear();\n        const l = seen?.clear();\n        const m = Box.make();\n        const type = flag ? typeof(Box) : null;\n        const n = type?.make();\n        const o = counted?.count();\n        maybe?.save();\n        holder?.box.save();\n        hook?.();\n        seen?.clear();\n        type?.make();\n    }\n}\n";
     let no_value = |at: &str, call: &str| {
         format!(
             "{at} no-value: `{call}` returns nothing, so it has no value to use: call it as a statement of its own."
@@ -8272,23 +8272,23 @@ fn a_void_call_through_null_safe_access_gives_no_value() {
         no_value("41:35", "box.save()"),
         no_value("42:36", "maybe?.save()"),
         no_value("45:33", "box.save()"),
-        no_value("50:19", "box.save()"),
-        no_value("51:19", "maybe?.save()"),
-        no_value("52:20", "box.save()"),
-        no_value("53:20", "maybe?.save()"),
-        no_value("54:19", "box.save()"),
-        no_value("55:19", "maybe?.save()"),
-        no_value("56:22", "box.save()"),
-        no_value("57:22", "maybe?.save()"),
-        no_value("58:19", "held.box.save()"),
-        no_value("59:19", "holder?.box.save()"),
-        no_value("60:19", "done()"),
-        no_value("61:19", "hook?.()"),
-        no_value("62:19", "kept.clear()"),
-        no_value("63:19", "seen?.clear()"),
-        no_value("64:19", "Box.make()"),
-        "66:19 invalid-class-string-expression: A class value reflects, and calls no static. Call `Box.make` by its class's name, or through a type parameter.".to_owned(),
-        "72:9 invalid-class-string-expression: A class value reflects, and calls no static. Call `Box.make` by its class's name, or through a type parameter.".to_owned(),
+        no_value("52:19", "box.save()"),
+        no_value("53:19", "maybe?.save()"),
+        no_value("54:20", "box.save()"),
+        no_value("55:20", "maybe?.save()"),
+        no_value("56:19", "box.save()"),
+        no_value("57:19", "maybe?.save()"),
+        no_value("58:22", "box.save()"),
+        no_value("59:22", "maybe?.save()"),
+        no_value("60:19", "held.box.save()"),
+        no_value("61:19", "holder?.box.save()"),
+        no_value("62:19", "done()"),
+        no_value("63:19", "hook?.()"),
+        no_value("64:19", "kept.clear()"),
+        no_value("65:19", "seen?.clear()"),
+        no_value("66:19", "Box.make()"),
+        "68:19 invalid-class-string-expression: A class value reflects, and calls no static. Call `Box.make` by its class's name, or through a type parameter.".to_owned(),
+        "74:9 invalid-class-string-expression: A class value reflects, and calls no static. Call `Box.make` by its class's name, or through a type parameter.".to_owned(),
     ];
     assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 3]);
     assert_messages(
@@ -11387,8 +11387,8 @@ fn a_string_says_whether_it_is_empty() {
 fn an_application_selects_by_a_backed_enum_never_by_a_string_fixed_at_compile_time() {
     let status = "namespace Shop;\n\npublic enum OrderStatus : string\n{\n    case Paid = \"paid\";\n    case Open = \"open\";\n}\n";
     let order = "namespace Shop;\n\npublic class Order\n{\n    public Order(public string status { get; }, public OrderStatus state { get; }) { }\n}\n";
-    let checks = "namespace Shop;\n\npublic class Checks\n{\n    const PAID = \"paid\";\n\n    public int run(Order order, string name, string password, string confirmation, Map<string, string> row, Map<string, int> counts, string tag, string line)\n    {\n        int hits = 0;\n        if (order.status == \"paid\") { hits += 1; }\n        if (order.status != Checks.PAID) { hits += 1; }\n        if (order.status == OrderStatus.Paid.value) { hits += 1; }\n        if (\"open\" == order.status) { hits += 1; }\n        if (name == \"\") { hits += 1; }\n        if (name != \"\") { hits += 1; }\n        string label = match (order.status) { \"paid\" => \"done\", default => \"open\" };\n        string plan = row[\"plan\"] ?? \"free\";\n        row[\"plan\"] = \"pro\";\n        string held = row.get(\"plan\") ?? \"free\";\n        row.set(Checks.PAID, \"pro\");\n        if (order.state == OrderStatus.Paid) { hits += 1; }\n        if (password == confirmation) { hits += 1; }\n        if (name.isEmpty() || name.isNotEmpty()) { hits += 1; }\n        if (line.startsWith(\"#\")) { hits += 1; }\n        List<string> parts = line.split(\",\");\n        counts[tag] = (counts[tag] ?? 0) + 1;\n        if (label == plan || held == plan) { hits += 1; }\n        return hits;\n    }\n}\n";
-    let library = "namespace Kit;\n\npublic class Checks\n{\n    const PAID = \"paid\";\n\n    public bool run(string status, Map<string, string> row)\n    {\n        row[\"plan\"] = \"pro\";\n        return status == \"paid\" || status != Checks.PAID || (row[\"plan\"] ?? \"\") == \"\" || row.has(\"plan\");\n    }\n}\n";
+    let checks = "namespace Shop;\n\npublic class Checks\n{\n    const PAID = \"paid\";\n\n    public int run(Order order, string name, string password, string confirmation, Map<string, string> given, Map<string, int> tallies, string tag, string line)\n    {\n        let row = given;\n        let counts = tallies;\n        int hits = 0;\n        if (order.status == \"paid\") { hits += 1; }\n        if (order.status != Checks.PAID) { hits += 1; }\n        if (order.status == OrderStatus.Paid.value) { hits += 1; }\n        if (\"open\" == order.status) { hits += 1; }\n        if (name == \"\") { hits += 1; }\n        if (name != \"\") { hits += 1; }\n        string label = match (order.status) { \"paid\" => \"done\", default => \"open\" };\n        string plan = row[\"plan\"] ?? \"free\";\n        row[\"plan\"] = \"pro\";\n        string held = row.get(\"plan\") ?? \"free\";\n        row.set(Checks.PAID, \"pro\");\n        if (order.state == OrderStatus.Paid) { hits += 1; }\n        if (password == confirmation) { hits += 1; }\n        if (name.isEmpty() || name.isNotEmpty()) { hits += 1; }\n        if (line.startsWith(\"#\")) { hits += 1; }\n        List<string> parts = line.split(\",\");\n        counts[tag] = (counts[tag] ?? 0) + 1;\n        if (label == plan || held == plan) { hits += 1; }\n        return hits;\n    }\n}\n";
+    let library = "namespace Kit;\n\npublic class Checks\n{\n    const PAID = \"paid\";\n\n    public bool run(string status, Map<string, string> given)\n    {\n        let row = given;\n        row[\"plan\"] = \"pro\";\n        return status == \"paid\" || status != Checks.PAID || (row[\"plan\"] ?? \"\") == \"\" || row.has(\"plan\");\n    }\n}\n";
 
     assert_eq!(
         package_errors(&[
@@ -11445,7 +11445,7 @@ fn a_pattern_that_selects_names_the_value_its_match_tests_in_every_arm() {
 /// operation do, and a library is exempt.
 #[test]
 fn an_application_selects_by_no_string_fixed_at_compile_time_through_equals_or_a_search() {
-    let checks = "namespace Shop;\n\npublic class Checks\n{\n    const PAID = \"paid\";\n\n    public int run(string status, string name, List<string> statuses, Set<string> tags, string tag, string line)\n    {\n        int hits = 0;\n        if (status.equals(\"paid\")) { hits += 1; }\n        if (\"paid\".equals(status, true)) { hits += 1; }\n        if (name.equals(\"\")) { hits += 1; }\n        if (statuses.contains(Checks.PAID)) { hits += 1; }\n        if ([\"paid\", \"due\"].contains(status)) { hits += 1; }\n        int at = statuses.indexOf(\"paid\") ?? 0;\n        if (tags.contains(\"new\")) { hits += 1; }\n        List<string> kept = [tag];\n        kept.remove(\"old\");\n        Set<string> seen = [tag];\n        seen.add(\"new\");\n        if (tags.contains(tag) || statuses.contains(tag) || [tag, name].contains(status)) { hits += 1; }\n        if (status.equals(name) || line.contains(\"#\") || line.startsWith(\"#\")) { hits += 1; }\n        return hits + at;\n    }\n}\n";
+    let checks = "namespace Shop;\n\npublic class Checks\n{\n    const PAID = \"paid\";\n\n    public int run(string status, string name, List<string> statuses, Set<string> tags, string tag, string line)\n    {\n        int hits = 0;\n        if (status.equals(\"paid\")) { hits += 1; }\n        if (\"paid\".equals(status, true)) { hits += 1; }\n        if (name.equals(\"\")) { hits += 1; }\n        if (statuses.contains(Checks.PAID)) { hits += 1; }\n        if ([\"paid\", \"due\"].contains(status)) { hits += 1; }\n        int at = statuses.indexOf(\"paid\") ?? 0;\n        if (tags.contains(\"new\")) { hits += 1; }\n        List<string> kept = [tag];\n        kept.remove(\"old\");\n        Set<string> seen = [tag];\n        seen.add(\"new\");\n        if (tags.contains(tag) || statuses.contains(tag) || [tag, name].contains(status)) { hits += 1; }\n        if (status.equals(name) || line.contains(\"#\") || line.startsWith(\"#\")) { hits += 1; }\n        return hits + at + kept.count() + seen.count();\n    }\n}\n";
     let library = "namespace Kit;\n\npublic class Checks\n{\n    public bool run(string status, List<string> statuses) => status.equals(\"paid\") || statuses.contains(\"paid\") || [\"paid\"].contains(status);\n}\n";
 
     assert_eq!(
@@ -11507,7 +11507,7 @@ fn a_member_name_is_a_keyof_type_that_only_nameof_gives() {
     let labels =
         "namespace Shop;\n\npublic static class Labels\n{\n    public static string label(string name) => name;\n}\n";
     let raw = "<?php\n\nnamespace Lib;\n\nfinal class Raw\n{\n    /** @param literal-string $column */\n    public static function orderBy(string $column): string\n    {\n        return $column;\n    }\n}\n";
-    let report = "namespace Shop;\n\nimport Lib.Raw;\n\npublic class Report\n{\n    public int run(Query<Order> query, string column, Map<string, int> row)\n    {\n        query.orderBy(nameof(Order.total)).orderBy(\"total\");\n        bool sorted = query.sorts(nameof(Order.status)) && query.sorts(\"status\");\n        string label = Labels.label(nameof(Order.status)) + Raw.orderBy(nameof(Order.total));\n        List<string> columns = [nameof(Order.total), nameof(Order.status)];\n        string message = `${nameof(Order.total)} is invalid`;\n        string joined = nameof(Order.total) + nameof(Order.status);\n        int size = nameof(Order.total).length() + joined.length();\n        int hits = sorted ? 1 : 0;\n        if (column == nameof(Order.total)) { hits += 1; }\n        row[nameof(Order.status)] = 1;\n        return hits + (row[nameof(Order.total)] ?? 0) + label.length() + columns.count() + message.length() + size;\n    }\n}\n";
+    let report = "namespace Shop;\n\nimport Lib.Raw;\n\npublic class Report\n{\n    public int run(Query<Order> query, string column, Map<string, int> given)\n    {\n        let row = given;\n        query.orderBy(nameof(Order.total)).orderBy(\"total\");\n        bool sorted = query.sorts(nameof(Order.status)) && query.sorts(\"status\");\n        string label = Labels.label(nameof(Order.status)) + Raw.orderBy(nameof(Order.total));\n        List<string> columns = [nameof(Order.total), nameof(Order.status)];\n        string message = `${nameof(Order.total)} is invalid`;\n        string joined = nameof(Order.total) + nameof(Order.status);\n        int size = nameof(Order.total).length() + joined.length();\n        int hits = sorted ? 1 : 0;\n        if (column == nameof(Order.total)) { hits += 1; }\n        row[nameof(Order.status)] = 1;\n        return hits + (row[nameof(Order.total)] ?? 0) + label.length() + columns.count() + message.length() + size;\n    }\n}\n";
 
     assert_eq!(
         package_errors(&[
@@ -13662,6 +13662,94 @@ fn any_code_extends_class_and_takes_a_ref_receiver_and_an_extension_reaches_its_
     assert_eq!(compile_errors(calls, &[order, extensions]), Vec::<String>::new());
 }
 
+/// The help of each issue of `analyzed`, analyzed with `others`, in the order of its issues.
+fn helps_of(analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]) -> Vec<String> {
+    analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().filter_map(|issue| issue.help).collect()
+}
+
+/// Spec section 2: a parameter never changes, so a change to the list, map or set it holds, by a `ref` member call or
+/// an index write, is refused: its caller would never see it. The help names a `ref` extension or a changed copy.
+#[test]
+fn changing_a_collection_parameter_is_an_error() {
+    let indexes = (
+        "src/Demo/Indexes.sharp",
+        "namespace Demo;\n\npublic class Indexes\n{\n    public void add(Map<string, List<string>> index, string name)\n    {\n        index[name] = [name];\n    }\n\n    public void tag(List<string> tags)\n    {\n        tags.add(\"x\");\n    }\n\n    public void mark(Set<string> marks)\n    {\n        marks.add(\"x\");\n    }\n}\n",
+    );
+
+    assert_eq!(
+        reported(indexes, &[]),
+        [
+            "7:9 parameter-change `index` is a parameter, so it never changes, and its caller never sees this write.",
+            "12:9 parameter-change `tags` is a parameter, so it never changes, and its caller never sees this write.",
+            "17:9 parameter-change `marks` is a parameter, so it never changes, and its caller never sees this write.",
+        ]
+    );
+    assert_eq!(
+        helps_of(indexes, &[]),
+        [
+            "Change the caller's map with a `ref` extension, or return a changed copy.",
+            "Change the caller's list with a `ref` extension, or return a changed copy.",
+            "Change the caller's set with a `ref` extension, or return a changed copy.",
+        ]
+    );
+}
+
+/// Spec section 26: an extension that takes its receiver by `ref` changes its caller's collection, so a change to the
+/// receiver compiles, and the caller reads the change.
+#[test]
+fn a_ref_extension_receiver_changes_its_callers_collection() {
+    let extensions = (
+        "src/Demo/Extensions.sharp",
+        "namespace Demo;\n\npublic static class Extensions\n{\n    extension(ref Map<string, List<string>> index)\n    {\n        public void addName(string name)\n        {\n            index[name] = [name];\n        }\n    }\n}\n",
+    );
+    let names = (
+        "src/Demo/Names.sharp",
+        "namespace Demo;\n\npublic class Names\n{\n    public Map<string, List<string>> run(string name)\n    {\n        Map<string, List<string>> index = [:];\n        index.addName(name);\n        return index;\n    }\n}\n",
+    );
+
+    assert_eq!(compile_errors(extensions, &[names]), Vec::<String>::new());
+    assert_eq!(compile_errors(names, &[extensions]), Vec::<String>::new());
+}
+
+/// Spec section 2: a `const` local never changes, so a change to the list, map or set it holds is refused, as its
+/// reassignment is. The help declares it with `let`.
+#[test]
+fn changing_a_const_local_collection_is_an_error() {
+    let seen = (
+        "src/Demo/Seen.sharp",
+        "namespace Demo;\n\npublic class Seen\n{\n    public int count()\n    {\n        const seen = [1];\n        seen.add(2);\n        const index = [\"a\": 1];\n        index[\"b\"] = 2;\n        return seen.count() + index.count();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        reported(seen, &[]),
+        [
+            "8:9 const-local-change `seen` is `const`, so the list it holds never changes.",
+            "10:9 const-local-change `index` is `const`, so the map it holds never changes.",
+        ]
+    );
+    assert_eq!(helps_of(seen, &[]), ["Declare it with `let` to change it.", "Declare it with `let` to change it."]);
+}
+
+/// Spec section 2: a `let` or typed local changed after its declaration, by a reassignment, a `ref` member call or an
+/// index write, and read nowhere in its function is refused at its last change, since the change goes nowhere. A
+/// lambda that reads a changed local reads it, and a lambda that changes a local it captures counts as a read, since
+/// the local outlives the lambda.
+#[test]
+fn a_local_changed_and_never_read_is_an_error() {
+    let copies = (
+        "src/Demo/Copies.sharp",
+        "namespace Demo;\n\npublic class Copies\n{\n    public int run()\n    {\n        const seen = [1];\n        let copy = seen;\n        copy.add(3);\n        let count = 0;\n        count = 1;\n        let total = [1];\n        total.add(2);\n        const size = () => total.count();\n        let log = [1];\n        const append = () => log.add(2);\n        append();\n        return seen.count() + size();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        reported(copies, &[]),
+        [
+            "9:9 write-only-local `copy` is changed here and never read, so the change is lost.",
+            "11:9 write-only-local `count` is changed here and never read, so the change is lost.",
+        ]
+    );
+}
+
 /// Spec sections 27 and 29 refuse a superglobal, and a refused file never runs, so `mago compile` prints the refusal
 /// alone on its line, and none of the analyzer's errors about the superglobal read as a constant.
 #[test]
@@ -14156,16 +14244,16 @@ fn a_bare_index_read_on_a_map_is_an_error() {
 
 #[test]
 fn a_bare_index_read_on_a_map_keyed_by_a_backed_enum_is_an_error() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int standing(Map<Status, int> counts, Map<Status, Map<Size, int>> nested, Status status, Size size)\n    {\n        counts[status] += 1;\n        counts[status]++;\n        return counts[status] + nested[status][size];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int standing(Map<Status, int> given, Map<Status, Map<Size, int>> nested, Status status, Size size)\n    {\n        let counts = given;\n        counts[status] += 1;\n        counts[status]++;\n        return counts[status] + nested[status][size];\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
         [
-            "10:9 possibly-undefined-array-index",
             "11:9 possibly-undefined-array-index",
-            "12:16 possibly-undefined-array-index",
-            "12:33 possibly-undefined-array-index",
-            "12:33 possibly-undefined-array-index",
+            "12:9 possibly-undefined-array-index",
+            "13:16 possibly-undefined-array-index",
+            "13:33 possibly-undefined-array-index",
+            "13:33 possibly-undefined-array-index",
         ]
     );
 }
@@ -14222,14 +14310,14 @@ fn a_null_safe_read_through_a_list_index_reads_the_index_bare() {
 /// is refused too. A `Map` read and `getOrNull` take `??`.
 #[test]
 fn a_list_index_before_coalesce_is_an_error_that_names_get_or_null() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int run(List<int> sizes, List<int?> maybe, Map<string, int> counts, int i)\n    {\n        let a = sizes[i] ?? 0;\n        let b = maybe[i] ?? 0;\n        sizes[i] ??= 1;\n        let c = sizes.getOrNull(i) ?? 0;\n        let d = counts[\"a\"] ?? 0;\n        counts[\"b\"] ??= 2;\n        return a + b + c + d;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int run(List<int> given, List<int?> maybe, Map<string, int> tallies, int i)\n    {\n        let sizes = given;\n        let counts = tallies;\n        let a = sizes[i] ?? 0;\n        let b = maybe[i] ?? 0;\n        sizes[i] ??= 1;\n        let c = sizes.getOrNull(i) ?? 0;\n        let d = counts[\"a\"] ?? 0;\n        counts[\"b\"] ??= 2;\n        return a + b + c + d;\n    }\n}\n";
 
     assert_eq!(
         worded(("src/Demo/Tally.sharp", sharp), &[]),
         [
-            "7:17 invalid-array-access A `List` index never reads null: it throws past either end, so `??` never reads a missing index. | This index throws when it is missing. | Read it with `list.getOrNull(i)`, which gives null past either end.",
-            "8:17 invalid-array-access A `List` index never reads null: it throws past either end, so `??` never reads a missing index. | This index throws when it is missing. | Read it with `list.getOrNull(i)`, which gives null past either end.",
-            "9:9 invalid-array-access A `List` index never reads null: it throws past either end, so `??` never reads a missing index. | This index throws when it is missing. | Read it with `list.getOrNull(i)`, which gives null past either end.",
+            "9:17 invalid-array-access A `List` index never reads null: it throws past either end, so `??` never reads a missing index. | This index throws when it is missing. | Read it with `list.getOrNull(i)`, which gives null past either end.",
+            "10:17 invalid-array-access A `List` index never reads null: it throws past either end, so `??` never reads a missing index. | This index throws when it is missing. | Read it with `list.getOrNull(i)`, which gives null past either end.",
+            "11:9 invalid-array-access A `List` index never reads null: it throws past either end, so `??` never reads a missing index. | This index throws when it is missing. | Read it with `list.getOrNull(i)`, which gives null past either end.",
         ]
     );
 }
@@ -14603,15 +14691,15 @@ fn a_static_field_a_constant_and_a_computed_property_of_type_any_never_hold_null
 
 #[test]
 fn a_collection_of_any_never_holds_null_and_a_collection_of_any_question_mark_may() {
-    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    private Map<string, Any> sure = [:];\n    private Map<string, Any?> maybe = [:];\n\n    public void keep(string key, Any? value, Any held, List<Any> items)\n    {\n        this.sure[key] = value;\n        this.sure = [key: value];\n        items.add(value);\n        items[0] = value;\n        this.maybe[key] = value;\n        this.maybe = [key: value];\n        this.sure[key] = held;\n        items.add(held);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    private Map<string, Any> sure = [:];\n    private Map<string, Any?> maybe = [:];\n\n    public List<Any> keep(string key, Any? value, Any held, List<Any> given)\n    {\n        let items = given;\n        this.sure[key] = value;\n        this.sure = [key: value];\n        items.add(value);\n        items[0] = value;\n        this.maybe[key] = value;\n        this.maybe = [key: value];\n        this.sure[key] = held;\n        items.add(held);\n        return items;\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Inbox.sharp", sharp), &[]),
         [
-            "10:9 invalid-property-assignment-value",
-            "11:21 invalid-property-assignment-value",
-            "12:19 mixed-argument",
-            "13:9 invalid-local-assignment-value",
+            "11:9 invalid-property-assignment-value",
+            "12:21 invalid-property-assignment-value",
+            "13:19 mixed-argument",
+            "14:9 invalid-local-assignment-value",
         ]
     );
 }
@@ -14696,17 +14784,17 @@ fn a_null_safe_access_on_an_index_reads_a_missing_key_as_null() {
 /// so on a `Map`, a nullable `Map` and a `Set` it fails as a typo does too, once.
 #[test]
 fn an_index_write_replaces_a_list_element_and_an_append_fails_as_a_typo_does() {
-    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public List<int> held { get; private set; } = [];\n\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups, Set<int> tags, Map<int, string> names, Map<string, string>? maybe)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        sizes[1]++;\n        --sizes[1];\n        grid[0][1] = 1;\n        this.held[0] = 2;\n        groups[\"b\"] = [1];\n        sizes[] = 3;\n        this.held[] = 4;\n        grid[0][] = 5;\n        groups[] = [1];\n        tags[] = 1;\n        names[] = \"a\";\n        maybe[] = \"b\";\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public List<int> held { get; private set; } = [];\n\n    public int change(List<int> sized, List<List<int>> rows, Map<string, List<int>> grouped, Set<int> tags, Map<int, string> named, Map<string, string>? given)\n    {\n        let sizes = sized;\n        let grid = rows;\n        let groups = grouped;\n        let names = named;\n        let maybe = given;\n        sizes[0] = 1;\n        sizes[0] += 1;\n        sizes[1]++;\n        --sizes[1];\n        grid[0][1] = 1;\n        this.held[0] = 2;\n        groups[\"b\"] = [1];\n        sizes[] = 3;\n        this.held[] = 4;\n        grid[0][] = 5;\n        groups[] = [1];\n        tags[] = 1;\n        names[] = \"a\";\n        maybe[] = \"b\";\n        return grid.count() + groups.count() + names.count() + maybe.count();\n    }\n}\n";
     assert_eq!(
         reported(("src/Demo/Sizes.sharp", sharp), &[]),
         [
-            "16:14 parse Unexpected `[`",
-            "17:18 parse Unexpected `[`",
-            "18:16 parse Unexpected `[`",
-            "19:15 parse Unexpected `[`",
-            "20:13 parse Unexpected `[`",
             "21:14 parse Unexpected `[`",
-            "22:14 parse Unexpected `[`",
+            "22:18 parse Unexpected `[`",
+            "23:16 parse Unexpected `[`",
+            "24:15 parse Unexpected `[`",
+            "25:13 parse Unexpected `[`",
+            "26:14 parse Unexpected `[`",
+            "27:14 parse Unexpected `[`",
         ]
     );
 }
@@ -14715,16 +14803,16 @@ fn an_index_write_replaces_a_list_element_and_an_append_fails_as_a_typo_does() {
 /// of a `List` index, as it is refused every other member of a `List`.
 #[test]
 fn a_list_index_write_without_the_standard_library_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void reset(List<int> sizes)\n    {\n        sizes[0] = 1;\n        sizes[1] += 2;\n        ++sizes[2];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static List<int> reset(List<int> given)\n    {\n        let sizes = given;\n        sizes[0] = 1;\n        sizes[1] += 2;\n        ++sizes[2];\n        return sizes;\n    }\n}\n";
     let (issues, _, _) =
         analyze_with_references(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[], &[]);
 
     assert_eq!(
         written(sharp, &issues),
         [
-            "7:9 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
             "8:9 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
-            "9:11 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
+            "9:9 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
+            "10:11 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
         ]
     );
     assert_eq!(
@@ -14743,15 +14831,15 @@ fn a_list_index_write_without_the_standard_library_is_refused() {
 /// without the library is refused each write of a `Map` key.
 #[test]
 fn a_map_index_write_without_the_standard_library_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void reset(Map<string, int> sizes)\n    {\n        sizes[\"a\"] = 1;\n        sizes[\"b\"] ??= 2;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static Map<string, int> reset(Map<string, int> given)\n    {\n        let sizes = given;\n        sizes[\"a\"] = 1;\n        sizes[\"b\"] ??= 2;\n        return sizes;\n    }\n}\n";
     let (issues, _, _) =
         analyze_with_references(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[], &[]);
 
     assert_eq!(
         written(sharp, &issues),
         [
-            "7:9 non-existent-method Method `set`, which `map[key] = value` runs, does not exist on `Map<string, int>`.",
             "8:9 non-existent-method Method `set`, which `map[key] = value` runs, does not exist on `Map<string, int>`.",
+            "9:9 non-existent-method Method `set`, which `map[key] = value` runs, does not exist on `Map<string, int>`.",
         ]
     );
     assert_eq!(
@@ -15068,9 +15156,9 @@ fn an_emptied_list_stays_a_list_for_an_index_read_and_a_key_and_value_loop() {
 /// A parameter and a property emptied by `[]` stay the `List`s they are declared, before any method fills them.
 #[test]
 fn an_emptied_list_parameter_or_property_stays_a_list() {
-    let sharp = "namespace Demo;\n\nimport Lib.Words;\n\nclass Tags\n{\n    protected List<string> names = [\"a\"];\n\n    public int count(List<string> tags)\n    {\n        tags = [];\n        this.names = [];\n        let total = 0;\n        for (const [index, tag] of tags) {\n            total += index + Words.length(tag);\n        }\n        for (const [index, name] of this.names) {\n            total += index + Words.length(name);\n        }\n        return total + Words.length(tags[0]) + Words.length(this.names[0]);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Words;\n\nclass Tags\n{\n    protected List<string> names = [\"a\"];\n\n    public int count(List<string> given)\n    {\n        List<string> tags = given;\n        tags = [];\n        this.names = [];\n        let total = 0;\n        for (const [index, tag] of tags) {\n            total += index + Words.length(tag);\n        }\n        for (const [index, name] of this.names) {\n            total += index + Words.length(name);\n        }\n        return total + Words.length(tags[0]) + Words.length(this.names[0]);\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[WORDS]), ["14:36 invalid-iterator", "17:37 invalid-iterator"]);
+    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[WORDS]), ["15:36 invalid-iterator", "18:37 invalid-iterator"]);
 }
 
 /// A static property emptied by `[]` stays the `List` it is declared, as an instance property does.
@@ -15140,18 +15228,18 @@ fn an_emptied_map_keeps_the_map_rules() {
 /// keys are read by `[k, v]`, and a bare read is refused.
 #[test]
 fn a_list_literal_assigned_to_a_map_is_an_error_and_the_map_rules_stay() {
-    let sharp = "namespace Demo;\n\nimport Lib.Words;\n\nclass Names\n{\n    public int total(Map<int, string> names)\n    {\n        names = [\"a\"];\n        let total = 0;\n        for (const [id, name] of names) {\n            total += id + Words.length(name);\n        }\n        return total + Words.length(names[0]);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Words;\n\nclass Names\n{\n    public int total(Map<int, string> given)\n    {\n        Map<int, string> names = given;\n        names = [\"a\"];\n        let total = 0;\n        for (const [id, name] of names) {\n            total += id + Words.length(name);\n        }\n        return total + Words.length(names[0]);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Names.sharp", sharp), &[WORDS]),
-        ["9:17 invalid-array-element", "14:37 possibly-undefined-array-index"]
+        ["10:17 invalid-array-element", "15:37 possibly-undefined-array-index"]
     );
 }
 
 /// A method that changes a `List` leaves it the `List` it is declared, so an index past the literal it held reads it.
 #[test]
 fn a_changed_list_reads_past_the_literal_it_held() {
-    let sharp = "namespace Demo;\n\nimport Lib.Words;\n\nclass Tags\n{\n    public int count(List<string> tags, Map<string, int> counts)\n    {\n        tags = [\"a\"];\n        tags.add(\"b\");\n        counts = [\"a\": 1];\n        counts.remove(\"a\");\n        return Words.length(tags[1]) + (counts[\"a\"] ?? 0);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Words;\n\nclass Tags\n{\n    public int count(List<string> given, Map<string, int> tallies)\n    {\n        List<string> tags = given;\n        Map<string, int> counts = tallies;\n        tags = [\"a\"];\n        tags.add(\"b\");\n        counts = [\"a\": 1];\n        counts.remove(\"a\");\n        return Words.length(tags[1]) + (counts[\"a\"] ?? 0);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[WORDS]), Vec::<String>::new());
 }
@@ -15214,7 +15302,7 @@ fn an_empty_map_literal_where_a_list_is_declared_is_an_error() {
 /// one empty array, and its array of a `Set`'s elements takes `[]`.
 #[test]
 fn a_map_literal_where_a_set_is_declared_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    protected Set<string> all = [:];\n\n    public Set<string> run(Set<string> seed = [:])\n    {\n        Set<string> tags = [:];\n        tags = [\"a\": \"a\"];\n        this.keep([:]);\n        this.keep([]);\n        this.keep([\"a\"]);\n        return [:];\n    }\n\n    private void keep(Set<string> tags)\n    {\n        this.all = tags;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    protected Set<string> all = [:];\n\n    public Set<string> run(Set<string> seed = [:])\n    {\n        Set<string> tags = [:];\n        tags = [\"a\": \"a\"];\n        this.all = tags;\n        this.keep([:]);\n        this.keep([]);\n        this.keep([\"a\"]);\n        return [:];\n    }\n\n    private void keep(Set<string> tags)\n    {\n        this.all = tags;\n    }\n}\n";
 
     let empty = "invalid-array-element `[:]` is an empty Map. An empty Set is written `[]`.";
     assert_eq!(
@@ -15224,8 +15312,8 @@ fn a_map_literal_where_a_set_is_declared_is_an_error() {
             format!("7:47 {empty}"),
             format!("9:28 {empty}"),
             "10:16 invalid-array-element A Set literal is written `[a, b]`.".to_owned(),
-            format!("11:19 {empty}"),
-            format!("14:16 {empty}"),
+            format!("12:19 {empty}"),
+            format!("15:16 {empty}"),
         ]
     );
 }
@@ -15886,11 +15974,11 @@ fn a_list_literal_in_a_match_arm_where_a_map_is_returned_is_an_error() {
 /// `??=` stores its right side unchanged when the place is null, so its literal is checked as the place's.
 #[test]
 fn a_list_literal_assigned_with_null_coalescing_to_a_map_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Counts\n{\n    public Map<string, int> run(Map<string, int>? counts)\n    {\n        counts ??= [];\n        return counts;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Counts\n{\n    public Map<string, int> run(Map<string, int>? given)\n    {\n        Map<string, int>? counts = given;\n        counts ??= [];\n        return counts;\n    }\n}\n";
 
     assert_eq!(
         reported(("src/Demo/Counts.sharp", sharp), &[]),
-        ["7:20 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
+        ["8:20 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
     );
 }
 
@@ -15899,7 +15987,7 @@ fn a_list_literal_assigned_with_null_coalescing_to_a_map_is_an_error() {
 #[test]
 fn a_literal_of_the_declared_collection_in_a_coalesce_ternary_or_match_is_accepted() {
     let kind = "namespace Demo;\n\npublic enum Kind\n{\n    case None;\n    case Some;\n}\n";
-    let sharp = "namespace Demo;\n\nclass Clean\n{\n    public Map<string, int> run(Map<string, int>? given, Map<string, int>? later, bool ready, Kind kind)\n    {\n        later ??= [:];\n        Map<string, int> options = given ?? [:];\n        Map<string, int> counts = ready ? [:] : later;\n        return match (kind) { Kind.None => [:], Kind.Some => ready ? counts : options };\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Clean\n{\n    public Map<string, int> run(Map<string, int>? given, Map<string, int>? pending, bool ready, Kind kind)\n    {\n        Map<string, int>? later = pending;\n        later ??= [:];\n        Map<string, int> options = given ?? [:];\n        Map<string, int> counts = ready ? [:] : later;\n        return match (kind) { Kind.None => [:], Kind.Some => ready ? counts : options };\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Clean.sharp", sharp), &[("src/Demo/Kind.sharp", kind)]), Vec::<String>::new());
 }
@@ -16005,11 +16093,11 @@ fn a_sharp_parents_method_called_on_a_php_subclass_keeps_its_parameter_collectio
 /// plain PHP stub: a `List<List<int>>` takes `[]` and refuses `[:]`.
 #[test]
 fn a_map_literal_added_to_a_list_of_lists_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public void fill(List<List<int>> rows)\n    {\n        rows.add([]);\n        rows.add([:]);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public List<List<int>> fill(List<List<int>> given)\n    {\n        let rows = given;\n        rows.add([]);\n        rows.add([:]);\n        return rows;\n    }\n}\n";
 
     assert_eq!(
         reported(("src/Demo/Grid.sharp", sharp), &[]),
-        ["8:18 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
+        ["9:18 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
     );
 }
 
@@ -16017,11 +16105,11 @@ fn a_map_literal_added_to_a_list_of_lists_is_an_error() {
 /// refuses `[:]`, once.
 #[test]
 fn a_map_literal_written_into_a_list_of_lists_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public void fill(List<List<int>> rows)\n    {\n        rows[0] = [1];\n        rows[0] = [:];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Grid\n{\n    public List<List<int>> fill(List<List<int>> given)\n    {\n        let rows = given;\n        rows[0] = [1];\n        rows[0] = [:];\n        return rows;\n    }\n}\n";
 
     assert_eq!(
         reported(("src/Demo/Grid.sharp", sharp), &[]),
-        ["8:19 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
+        ["9:19 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
     );
 }
 
@@ -16217,7 +16305,7 @@ fn an_emptied_php_array_property_keeps_the_map_rules() {
 /// its index write runs, as Kotlin's is.
 #[test]
 fn collection_methods_take_and_give_the_types_of_their_elements() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> extra)\n    {\n        this.lines.add(line);\n        extra.add(line);\n        extra[0] = line;\n        this.counts.remove(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.getOrNull(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> extra, Map<string, int> counts)\n    {\n        extra.add(1);\n        extra.set(0, new Line(1));\n        counts.add(1);\n        extra.delete(0);\n        Line? got = extra.get(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        int? maybe = sizes.getOrNull(5);\n        bool notMaybe = sizes.getOrNull(5);\n        Set<int> unique = sizes.toSet();\n        List<int> notSet = sizes.toSet();\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other + (maybe ?? 0) + (notMaybe ? 1 : 0) + unique.count() + notSet.count();\n    }\n\n    public int change(List<int> sizes)\n    {\n        sizes.insert(0, 1);\n        bool gone = sizes.remove(2);\n        sizes.clear();\n        sizes.insert(\"a\", 1);\n        sizes.insert(0, \"a\");\n        int removed = sizes.remove(1);\n        return removed + (gone ? 1 : 0);\n    }\n\n    public int keyed(Map<string, int> counts, Map<Status, int> tally)\n    {\n        bool had = counts.has(\"a\");\n        List<string> names = counts.keys();\n        List<Status> statuses = tally.keys();\n        Map<string, int> kept = counts.filter(c => c > 0);\n        bool gone = counts.remove(\"a\");\n        int flag = counts.has(\"a\");\n        List<int> numbered = counts.keys();\n        List<string> backing = tally.keys();\n        List<int> renumbered = counts.filter(c => c > 0);\n        int removed = counts.remove(\"a\");\n        List<int> values = counts.values();\n        List<string> notValues = counts.values();\n        return (had || gone ? 1 : 0) + names.count() + statuses.count() + kept.count() + flag + numbered.count() + backing.count() + renumbered.count() + removed + values.count() + notValues.count();\n    }\n\n    public int flat(List<List<int>> rows, Set<string> tags, Map<string, int> counts)\n    {\n        List<int> cells = rows.flatMap(r => r);\n        List<string> listed = tags.toList();\n        List<int> values = counts.values().toList();\n        List<int> copy = cells.toList();\n        List<string> notCells = rows.flatMap(r => r);\n        List<int> notIterable = rows.flatMap(r => r.count());\n        Set<int> notList = cells.toList();\n        return cells.count() + listed.count() + values.count() + copy.count() + notCells.count() + notIterable.count() + notList.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> given)\n    {\n        let extra = given;\n        this.lines.add(line);\n        extra.add(line);\n        extra[0] = line;\n        this.counts.remove(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.getOrNull(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> given, Map<string, int> counts)\n    {\n        let extra = given;\n        extra.add(1);\n        extra.set(0, new Line(1));\n        counts.add(1);\n        extra.delete(0);\n        Line? got = extra.get(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        int? maybe = sizes.getOrNull(5);\n        bool notMaybe = sizes.getOrNull(5);\n        Set<int> unique = sizes.toSet();\n        List<int> notSet = sizes.toSet();\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other + (maybe ?? 0) + (notMaybe ? 1 : 0) + unique.count() + notSet.count();\n    }\n\n    public int change(List<int> given)\n    {\n        let sizes = given;\n        sizes.insert(0, 1);\n        bool gone = sizes.remove(2);\n        sizes.clear();\n        sizes.insert(\"a\", 1);\n        sizes.insert(0, \"a\");\n        int removed = sizes.remove(1);\n        return removed + (gone ? 1 : 0);\n    }\n\n    public int keyed(Map<string, int> given, Map<Status, int> tally)\n    {\n        let counts = given;\n        bool had = counts.has(\"a\");\n        List<string> names = counts.keys();\n        List<Status> statuses = tally.keys();\n        Map<string, int> kept = counts.filter(c => c > 0);\n        bool gone = counts.remove(\"a\");\n        int flag = counts.has(\"a\");\n        List<int> numbered = counts.keys();\n        List<string> backing = tally.keys();\n        List<int> renumbered = counts.filter(c => c > 0);\n        int removed = counts.remove(\"a\");\n        List<int> values = counts.values();\n        List<string> notValues = counts.values();\n        return (had || gone ? 1 : 0) + names.count() + statuses.count() + kept.count() + flag + numbered.count() + backing.count() + renumbered.count() + removed + values.count() + notValues.count();\n    }\n\n    public int flat(List<List<int>> rows, Set<string> tags, Map<string, int> counts)\n    {\n        List<int> cells = rows.flatMap(r => r);\n        List<string> listed = tags.toList();\n        List<int> values = counts.values().toList();\n        List<int> copy = cells.toList();\n        List<string> notCells = rows.flatMap(r => r);\n        List<int> notIterable = rows.flatMap(r => r.count());\n        Set<int> notList = cells.toList();\n        return cells.count() + listed.count() + values.count() + copy.count() + notCells.count() + notIterable.count() + notList.count();\n    }\n}\n";
     let declared = [
         ("src/Demo/Status.sharp", "namespace Demo;\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n"),
         (
@@ -16230,27 +16318,27 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
     assert_eq!(
         issues(("src/Demo/Order.sharp", sharp), &declared),
         [
-            "23:19 invalid-argument",
-            "25:16 non-existent-method",
-            "26:15 non-existent-method",
-            "27:27 non-existent-method",
-            "35:21 invalid-local-assignment-value",
-            "36:36 invalid-argument",
-            "37:32 too-many-arguments",
-            "39:25 invalid-local-assignment-value",
-            "41:28 invalid-local-assignment-value",
-            "50:22 invalid-argument",
-            "51:25 invalid-argument",
-            "52:23 invalid-local-assignment-value",
-            "63:20 invalid-local-assignment-value",
-            "64:30 invalid-local-assignment-value",
-            "65:32 invalid-local-assignment-value",
-            "66:32 invalid-local-assignment-value",
-            "67:23 invalid-local-assignment-value",
-            "69:34 invalid-local-assignment-value",
-            "79:33 invalid-local-assignment-value",
-            "80:46 invalid-argument",
-            "81:28 invalid-local-assignment-value"
+            "25:19 invalid-argument",
+            "27:16 non-existent-method",
+            "28:15 non-existent-method",
+            "29:27 non-existent-method",
+            "37:21 invalid-local-assignment-value",
+            "38:36 invalid-argument",
+            "39:32 too-many-arguments",
+            "41:25 invalid-local-assignment-value",
+            "43:28 invalid-local-assignment-value",
+            "53:22 invalid-argument",
+            "54:25 invalid-argument",
+            "55:23 invalid-local-assignment-value",
+            "67:20 invalid-local-assignment-value",
+            "68:30 invalid-local-assignment-value",
+            "69:32 invalid-local-assignment-value",
+            "70:32 invalid-local-assignment-value",
+            "71:23 invalid-local-assignment-value",
+            "73:34 invalid-local-assignment-value",
+            "83:33 invalid-local-assignment-value",
+            "84:46 invalid-argument",
+            "85:28 invalid-local-assignment-value"
         ]
     );
 }
@@ -16269,7 +16357,7 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
 /// `==` refuses it.
 #[test]
 fn a_search_needs_equality_on_the_element_type() {
-    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> lines, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held, List<Money|Line> goods, List<Money|int> tallies, List<Money|Ticket> tickets, List<Coin|Line> pocket, List<Money?> wallet, List<Order> orders, Order order, List<List<Line>> shelves, List<Spot|int> spots, List<Address|Spot> places, Spot spot)\n    {\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(each => each === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value) || loose.any(x => x == value);\n        bool maybe = held?.contains(line) ?? held?.contains(value: line) ?? false;\n        bool fixed = held?.any(each => each === line) ?? false;\n        bool dropped = lines.remove(line);\n        bool vip = loose.contains(\"vip\") && loose.any(x => x == \"vip\");\n        bool equal = lines.any(x => x == line);\n        bool either = goods.contains(price) || goods.any(x => x == price);\n        bool paid = loose.contains(price);\n        int? counted = tallies.indexOf(price);\n        bool spent = tickets.remove(price);\n        bool pocketed = pocket.contains(coin);\n        bool saved = wallet.contains(price) && wallet.any(x => x == price);\n        bool ordered = orders.contains(order);\n        bool shelved = shelves.contains(lines);\n        bool spotted = spots.contains(spot) || places.contains(spot);\n        return (kept || row || found || same || minted || named || any || maybe || fixed || dropped || vip || equal || either || paid || spent || pocketed || saved || ordered || shelved || spotted ? 1 : 0) + (at ?? 0) + (priced ?? 0) + (counted ?? 0);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> shelf, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held, List<Money|Line> goods, List<Money|int> tallies, List<Money|Ticket> stubs, List<Coin|Line> pocket, List<Money?> wallet, List<Order> orders, Order order, List<List<Line>> shelves, List<Spot|int> spots, List<Address|Spot> places, Spot spot)\n    {\n        let lines = shelf;\n        let tickets = stubs;\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(each => each === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value) || loose.any(x => x == value);\n        bool maybe = held?.contains(line) ?? held?.contains(value: line) ?? false;\n        bool fixed = held?.any(each => each === line) ?? false;\n        bool dropped = lines.remove(line);\n        bool vip = loose.contains(\"vip\") && loose.any(x => x == \"vip\");\n        bool equal = lines.any(x => x == line);\n        bool either = goods.contains(price) || goods.any(x => x == price);\n        bool paid = loose.contains(price);\n        int? counted = tallies.indexOf(price);\n        bool spent = tickets.remove(price);\n        bool pocketed = pocket.contains(coin);\n        bool saved = wallet.contains(price) && wallet.any(x => x == price);\n        bool ordered = orders.contains(order);\n        bool shelved = shelves.contains(lines);\n        bool spotted = spots.contains(spot) || places.contains(spot);\n        return (kept || row || found || same || minted || named || any || maybe || fixed || dropped || vip || equal || either || paid || spent || pocketed || saved || ordered || shelved || spotted ? 1 : 0) + (at ?? 0) + (priced ?? 0) + (counted ?? 0);\n    }\n}\n";
     let declared = [
         ("src/Demo/Line.sharp", "namespace Demo;\n\nclass Line\n{\n}\n"),
         (
@@ -16299,27 +16387,27 @@ fn a_search_needs_equality_on_the_element_type() {
     assert_eq!(
         refusals(("src/Demo/Shelf.sharp", sharp), &declared),
         [
-            "7:36 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
-            "8:33 invalid-argument `indexOf` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
-            "13:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Coin` and `Coin`.",
-            "14:34 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `ls.any(element => element === l)`.",
-            "15:35 mixed-operand Each element of `loose` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
-            "15:60 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
-            "15:65 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
-            "16:37 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(element => element === line)`.",
-            "16:68 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(element => element === line)`.",
-            "18:37 invalid-argument `remove` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
-            "20:37 invalid-operand `==` cannot compare `Line` with `Line`: `Line` declares no `operator ==`. | Use `===` to test whether both sides are the same object.",
-            "21:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Money` does not take `Line|Money` and `Money`. | Make the `operator ==` of `Money` take `Line|Money` and `Money`.",
-            "21:63 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Money.op_Equality`: expected `Money`, but possibly received `Line|Money`. | Ensure the argument always has the expected type using checks or assertions.",
-            "22:36 invalid-argument `contains` compares elements with `==`, and an unchecked `Any?` element can't tell the same object as `price` from an equal value. | Test for the same object with `loose.any(element => element === price)`.",
-            "23:40 invalid-argument `indexOf` compares elements with `==`, and the `operator ==` of `Money` does not take `int|Money` and `Money`. | Make the `operator ==` of `Money` take `int|Money` and `Money`.",
-            "24:37 invalid-argument `remove` compares elements with `==`, and the `operator ==` of `Money` does not take `Money|Ticket` and `Money`. | Make the `operator ==` of `Money` take `Money|Ticket` and `Money`.",
-            "25:41 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin|Line` and `Coin`. | Make the `operator ==` of `Coin` take `Coin|Line` and `Coin`.",
-            "27:40 invalid-argument `contains` compares elements with `==`, and `Order` can't compare by value: `line` is a `Line`, which declares no `operator ==`. | ",
-            "28:41 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | ",
-            "29:39 invalid-argument `contains` compares elements with `==`, which cannot compare `int|Spot` with `Spot`. | Search a list of one struct type.",
-            "29:64 invalid-argument `contains` compares elements with `==`, which cannot compare `Address|Spot` with `Spot`. | Search a list of one struct type.",
+            "9:36 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
+            "10:33 invalid-argument `indexOf` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
+            "15:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Coin` and `Coin`.",
+            "16:34 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `ls.any(element => element === l)`.",
+            "17:35 mixed-operand Each element of `loose` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "17:60 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "17:65 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
+            "18:37 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(element => element === line)`.",
+            "18:68 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(element => element === line)`.",
+            "20:37 invalid-argument `remove` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
+            "22:37 invalid-operand `==` cannot compare `Line` with `Line`: `Line` declares no `operator ==`. | Use `===` to test whether both sides are the same object.",
+            "23:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Money` does not take `Line|Money` and `Money`. | Make the `operator ==` of `Money` take `Line|Money` and `Money`.",
+            "23:63 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Money.op_Equality`: expected `Money`, but possibly received `Line|Money`. | Ensure the argument always has the expected type using checks or assertions.",
+            "24:36 invalid-argument `contains` compares elements with `==`, and an unchecked `Any?` element can't tell the same object as `price` from an equal value. | Test for the same object with `loose.any(element => element === price)`.",
+            "25:40 invalid-argument `indexOf` compares elements with `==`, and the `operator ==` of `Money` does not take `int|Money` and `Money`. | Make the `operator ==` of `Money` take `int|Money` and `Money`.",
+            "26:37 invalid-argument `remove` compares elements with `==`, and the `operator ==` of `Money` does not take `Money|Ticket` and `Money`. | Make the `operator ==` of `Money` take `Money|Ticket` and `Money`.",
+            "27:41 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin|Line` and `Coin`. | Make the `operator ==` of `Coin` take `Coin|Line` and `Coin`.",
+            "29:40 invalid-argument `contains` compares elements with `==`, and `Order` can't compare by value: `line` is a `Line`, which declares no `operator ==`. | ",
+            "30:41 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | ",
+            "31:39 invalid-argument `contains` compares elements with `==`, which cannot compare `int|Spot` with `Spot`. | Search a list of one struct type.",
+            "31:64 invalid-argument `contains` compares elements with `==`, which cannot compare `Address|Spot` with `Spot`. | Search a list of one struct type.",
         ]
     );
 }
@@ -16353,7 +16441,7 @@ fn a_search_help_names_its_lambda_parameter_with_no_name_in_scope() {
 /// them through `any`. The same named and spread calls on a class that declares `operator ==` compile.
 #[test]
 fn a_named_search_argument_needs_equality_as_a_positional_one_does() {
-    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public bool search(List<Cart> carts, Cart cart, List<Money> prices, Money price, Set<Cart> held, Map<Cart, int> counts, Set<Money> wallet, Map<Money, int> ledger, List<Any?> loose, Map<Cart, int>? maybeCounts, Map<Money, int>? maybeLedger)\n    {\n        bool named = carts.contains(value: cart);\n        bool positional = carts.contains(cart);\n        int? at = carts.indexOf(value: cart);\n        int? atPositional = carts.indexOf(cart);\n        bool dropped = carts.remove(value: cart);\n        bool droppedPositional = carts.remove(cart);\n        bool kept = held.contains(value: cart);\n        bool keptPositional = held.contains(cart);\n        bool keyed = counts.has(key: cart);\n        bool keyedPositional = counts.has(cart);\n        bool spread = carts.contains(...[cart]);\n        bool spreadPriced = prices.contains(...[price]);\n        bool spreadLoose = loose.contains(...[price]);\n        bool maybeKeyed = maybeCounts?.has(key: cart) ?? false;\n        bool viaKeys = ledger.keys().any(m => m === price) && (maybeLedger?.keys().any(m => m === price) ?? false) && wallet.any(m => m === price);\n        bool priced = prices.contains(value: price) && prices.indexOf(value: price) != null && prices.remove(value: price);\n        bool paid = wallet.contains(value: price) && ledger.has(key: price);\n        return named || positional || at != null || atPositional != null || dropped || droppedPositional || kept || keptPositional || keyed || keyedPositional || spread || spreadPriced || spreadLoose || maybeKeyed || viaKeys || priced || paid;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public bool search(List<Cart> given, Cart cart, List<Money> quotes, Money price, Set<Cart> held, Map<Cart, int> counts, Set<Money> wallet, Map<Money, int> ledger, List<Any?> loose, Map<Cart, int>? maybeCounts, Map<Money, int>? maybeLedger)\n    {\n        let carts = given;\n        let prices = quotes;\n        bool named = carts.contains(value: cart);\n        bool positional = carts.contains(cart);\n        int? at = carts.indexOf(value: cart);\n        int? atPositional = carts.indexOf(cart);\n        bool dropped = carts.remove(value: cart);\n        bool droppedPositional = carts.remove(cart);\n        bool kept = held.contains(value: cart);\n        bool keptPositional = held.contains(cart);\n        bool keyed = counts.has(key: cart);\n        bool keyedPositional = counts.has(cart);\n        bool spread = carts.contains(...[cart]);\n        bool spreadPriced = prices.contains(...[price]);\n        bool spreadLoose = loose.contains(...[price]);\n        bool maybeKeyed = maybeCounts?.has(key: cart) ?? false;\n        bool viaKeys = ledger.keys().any(m => m === price) && (maybeLedger?.keys().any(m => m === price) ?? false) && wallet.any(m => m === price);\n        bool priced = prices.contains(value: price) && prices.indexOf(value: price) != null && prices.remove(value: price);\n        bool paid = wallet.contains(value: price) && ledger.has(key: price);\n        return named || positional || at != null || atPositional != null || dropped || droppedPositional || kept || keptPositional || keyed || keyedPositional || spread || spreadPriced || spreadLoose || maybeKeyed || viaKeys || priced || paid;\n    }\n}\n";
     let types = [
         ("src/Demo/Cart.sharp", "namespace Demo;\n\nclass Cart\n{\n}\n"),
         (
@@ -16374,19 +16462,19 @@ fn a_named_search_argument_needs_equality_as_a_positional_one_does() {
             format!("5:86 template-constraint-violation A `Set`'s element {key} | Fill the `Set` with {declared}"),
             format!("5:102 template-constraint-violation A `Map`'s key {key} | Key the `Map` by {declared}"),
             format!("5:186 template-constraint-violation A `Map`'s key {key} | Key the `Map` by {declared}"),
-            format!("7:44 invalid-argument `contains` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
-            format!("8:42 invalid-argument `contains` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
-            format!("9:40 invalid-argument `indexOf` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
-            format!("10:43 invalid-argument `indexOf` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
-            format!("11:44 invalid-argument `remove` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
-            format!("12:47 invalid-argument `remove` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
-            format!("13:42 invalid-argument `contains` {refusal}, or test for the same object with `held.any(c => c === cart)`."),
-            format!("14:45 invalid-argument `contains` {refusal}, or test for the same object with `held.any(c => c === cart)`."),
-            format!("15:38 invalid-argument `has` {refusal}, or test for the same object with `counts.keys().any(c => c === cart)`."),
-            format!("16:43 invalid-argument `has` {refusal}, or test for the same object with `counts.keys().any(c => c === cart)`."),
-            format!("17:41 invalid-argument `contains` {refusal}."),
-            "19:46 invalid-argument `contains` compares elements with `==`, and an unchecked `Any?` element can't tell the same object as an element of `[price]` from an equal value. | ".to_owned(),
-            format!("20:49 invalid-argument `has` {refusal}, or test for the same object with `maybeCounts?.keys().any(c => c === cart)`."),
+            format!("9:44 invalid-argument `contains` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("10:42 invalid-argument `contains` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("11:40 invalid-argument `indexOf` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("12:43 invalid-argument `indexOf` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("13:44 invalid-argument `remove` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("14:47 invalid-argument `remove` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("15:42 invalid-argument `contains` {refusal}, or test for the same object with `held.any(c => c === cart)`."),
+            format!("16:45 invalid-argument `contains` {refusal}, or test for the same object with `held.any(c => c === cart)`."),
+            format!("17:38 invalid-argument `has` {refusal}, or test for the same object with `counts.keys().any(c => c === cart)`."),
+            format!("18:43 invalid-argument `has` {refusal}, or test for the same object with `counts.keys().any(c => c === cart)`."),
+            format!("19:41 invalid-argument `contains` {refusal}."),
+            "21:46 invalid-argument `contains` compares elements with `==`, and an unchecked `Any?` element can't tell the same object as an element of `[price]` from an equal value. | ".to_owned(),
+            format!("22:49 invalid-argument `has` {refusal}, or test for the same object with `maybeCounts?.keys().any(c => c === cart)`."),
         ]
     );
 }
@@ -16443,7 +16531,7 @@ fn a_collection_member_on_a_value_that_may_be_an_object_runs_the_objects_method_
 /// `Map<string, int>`".
 #[test]
 fn a_collection_method_message_names_the_sharp_type() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public void wrong(List<Line> lines, List<int> sizes, Map<string, int> counts)\n    {\n        lines.add(1);\n        sizes.getOrNull(\"a\");\n        counts.add(1);\n        sizes.delete(0);\n        counts.get(1.5);\n        sizes.getOrNull();\n        sizes.getOrNull(0, 1);\n        counts.has(1);\n        counts.remove(1);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public int wrong(List<Line> given, List<int> sizes, Map<string, int> tallies)\n    {\n        let lines = given;\n        let counts = tallies;\n        lines.add(1);\n        sizes.getOrNull(\"a\");\n        counts.add(1);\n        sizes.delete(0);\n        counts.get(1.5);\n        sizes.getOrNull();\n        sizes.getOrNull(0, 1);\n        counts.has(1);\n        counts.remove(1);\n        return lines.count();\n    }\n}\n";
     let issues = analyze(
         &PLUGIN_REGISTRY,
         settings(),
@@ -16477,19 +16565,19 @@ fn a_collection_method_message_names_the_sharp_type() {
 /// and a `List<int>` reset to `[]` takes an int.
 #[test]
 fn a_collection_method_takes_values_of_the_type_its_place_is_declared_with() {
-    let sharp = "namespace Demo;\n\nimport Lib.Circle;\nimport Lib.Shape;\nimport Lib.Square;\n\nclass Board\n{\n    public List<Shape> shapes { get; private set; } = [];\n    public List<int> sizes { get; private set; } = [];\n\n    public int fill(List<Shape> drawn)\n    {\n        this.shapes = [new Circle()];\n        this.shapes.add(new Square());\n        drawn = [new Circle()];\n        drawn.add(new Square());\n        List<Shape> local = [new Square()];\n        local = [new Circle()];\n        local.add(new Square());\n        List<int> reset = [1];\n        reset = [];\n        reset.add(2);\n        this.sizes = [];\n        this.sizes.add(3);\n        this.sizes.add(\"x\");\n        return drawn.count() + local.count() + reset.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Circle;\nimport Lib.Shape;\nimport Lib.Square;\n\nclass Board\n{\n    public List<Shape> shapes { get; private set; } = [];\n    public List<int> sizes { get; private set; } = [];\n\n    public int fill(List<Shape> given)\n    {\n        List<Shape> drawn = given;\n        this.shapes = [new Circle()];\n        this.shapes.add(new Square());\n        drawn = [new Circle()];\n        drawn.add(new Square());\n        List<Shape> local = [new Square()];\n        local = [new Circle()];\n        local.add(new Square());\n        List<int> reset = [1];\n        reset = [];\n        reset.add(2);\n        this.sizes = [];\n        this.sizes.add(3);\n        this.sizes.add(\"x\");\n        return drawn.count() + local.count() + reset.count();\n    }\n}\n";
     let shapes = "<?php\n\nnamespace Lib;\n\ninterface Shape\n{\n}\n\nfinal class Circle implements Shape\n{\n}\n\nfinal class Square implements Shape\n{\n}\n";
 
-    assert_eq!(issues(("src/Demo/Board.sharp", sharp), &[("src/Lib/Shape.php", shapes)]), ["26:24 invalid-argument"]);
+    assert_eq!(issues(("src/Demo/Board.sharp", sharp), &[("src/Lib/Shape.php", shapes)]), ["27:24 invalid-argument"]);
 }
 
 #[test]
 fn a_list_of_a_nullable_type_takes_null_and_refuses_another_type() {
-    let sharp = "namespace Demo;\n\nimport Lib.Calc;\n\nclass Tray\n{\n    public void fill(List<int?> sizes, List<Calc?> calcs)\n    {\n        sizes.add(null);\n        sizes.add(1);\n        sizes.add(\"x\");\n        calcs.add(null);\n        calcs.add(Calc.make());\n        calcs.add(\"x\");\n        List<int?> held = [null, 2];\n        held.add(\"y\");\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Calc;\n\nclass Tray\n{\n    public int fill(List<int?> given, List<Calc?> made)\n    {\n        let sizes = given;\n        let calcs = made;\n        sizes.add(null);\n        sizes.add(1);\n        sizes.add(\"x\");\n        calcs.add(null);\n        calcs.add(Calc.make());\n        calcs.add(\"x\");\n        List<int?> held = [null, 2];\n        held.add(\"y\");\n        return sizes.count() + calcs.count() + held.count();\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tray.sharp", sharp), &[("src/Lib/Calc.php", CALC)]),
-        ["11:19 invalid-argument", "14:19 invalid-argument", "16:18 invalid-argument"]
+        ["13:19 invalid-argument", "16:19 invalid-argument", "18:18 invalid-argument"]
     );
 }
 
@@ -16682,16 +16770,16 @@ fn a_search_of_several_kinds_with_any_elements_shows_the_refusal_of_its_type_alo
 /// more, and never names the `Map<never, never>` the literal alone would give.
 #[test]
 fn a_method_on_an_untyped_empty_literal_adds_no_issue() {
-    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public int run()\n    {\n        let messages = [];\n        messages.add(\"a\");\n        const totals = [:];\n        totals.set(\"a\", 1);\n        return messages.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Inbox\n{\n    public int run()\n    {\n        let messages = [];\n        messages.add(\"a\");\n        let totals = [:];\n        totals.set(\"a\", 1);\n        return messages.count() + totals.count();\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Inbox.sharp", sharp), &[]), ["7:24 semantics", "9:24 semantics"]);
+    assert_eq!(issues(("src/Demo/Inbox.sharp", sharp), &[]), ["7:24 semantics", "9:22 semantics"]);
 }
 
 /// A PHP# collection holds any value of its element type, as a `List<int>` holds any int, so a method takes one
 /// even where the analyzer knows the elements are literals, as TypeScript's `let a = [5]` is a `number[]`.
 #[test]
 fn collection_methods_take_any_value_of_a_type_the_elements_are_literals_of() {
-    let sharp = "namespace Demo;\n\nclass Tray\n{\n    public List<int> items { get; private set; } = [];\n\n    public void fill()\n    {\n        let sizes = [5];\n        sizes.add(6);\n        this.items = [5];\n        this.items.add(6);\n        this.items[0] = 7;\n        let names = [\"tea\": true];\n        names.remove(\"pie\");\n        let found = names.get(\"pie\") ?? false;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tray\n{\n    public List<int> items { get; private set; } = [];\n\n    public void fill()\n    {\n        let sizes = [5];\n        sizes.add(6);\n        this.items = [5];\n        this.items.add(6);\n        this.items[0] = 7;\n        let names = [\"tea\": true];\n        names.remove(\"pie\");\n        let found = names.get(\"pie\") ?? false;\n        this.items = sizes;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tray.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -16758,20 +16846,20 @@ fn a_changing_set_method_needs_a_place_and_a_reading_one_runs_on_a_value() {
 /// it back, as the help writes it, compiles.
 #[test]
 fn a_list_index_is_a_place_and_a_change_through_a_map_index_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Stock\n{\n    public List<List<int>> rows { get; set; } = [[1]];\n\n    public void places(List<List<int>> grid, List<Set<int>> sets, List<Map<string, int>> maps, List<List<List<int>>> cube)\n    {\n        grid[0].add(5);\n        grid[1].insert(0, 7);\n        grid[0].remove(1);\n        grid[0].clear();\n        sets[0].add(4);\n        maps[0].remove(\"a\");\n        maps[1][\"c\"] = 3;\n        maps[1][\"d\"] ??= 4;\n        cube[1][0].add(3);\n        this.rows[0].add(9);\n    }\n\n    public void copies(Map<string, List<int>> stock, Map<string, Map<string, int>> nested, Map<string, Set<int>> tags, List<Map<string, List<int>>> deep, Map<string, List<int>> groups)\n    {\n        stock[\"a\"]?.add(5);\n        stock[\"a\"]?.insert(0, 1);\n        nested[\"a\"]?.remove(\"b\");\n        nested[\"a\"][\"b\"] = 1;\n        tags[\"t\"]?.add(2);\n        deep[0][\"k\"]?.add(3);\n        groups[\"a\"][0] = 1;\n        stock[\"a\"].add(6);\n    }\n\n    public Map<string, List<int>> storedBack(Map<string, List<int>> map, string key)\n    {\n        List<int> counts = map[key] ?? [];\n        counts.add(5);\n        map[key] = counts;\n        return map;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Stock\n{\n    public List<List<int>> rows { get; set; } = [[1]];\n\n    public int places(List<List<int>> grids, List<Set<int>> groups, List<Map<string, int>> tables, List<List<List<int>>> cubes)\n    {\n        let grid = grids;\n        let sets = groups;\n        let maps = tables;\n        let cube = cubes;\n        grid[0].add(5);\n        grid[1].insert(0, 7);\n        grid[0].remove(1);\n        grid[0].clear();\n        sets[0].add(4);\n        maps[0].remove(\"a\");\n        maps[1][\"c\"] = 3;\n        maps[1][\"d\"] ??= 4;\n        cube[1][0].add(3);\n        this.rows[0].add(9);\n        return grid.count() + sets.count() + maps.count() + cube.count();\n    }\n\n    public void copies(Map<string, List<int>> stock, Map<string, Map<string, int>> nested, Map<string, Set<int>> tags, List<Map<string, List<int>>> deep, Map<string, List<int>> groups)\n    {\n        stock[\"a\"]?.add(5);\n        stock[\"a\"]?.insert(0, 1);\n        nested[\"a\"]?.remove(\"b\");\n        nested[\"a\"][\"b\"] = 1;\n        tags[\"t\"]?.add(2);\n        deep[0][\"k\"]?.add(3);\n        groups[\"a\"][0] = 1;\n        stock[\"a\"].add(6);\n    }\n\n    public Map<string, List<int>> storedBack(Map<string, List<int>> given, string key)\n    {\n        let map = given;\n        List<int> counts = map[key] ?? [];\n        counts.add(5);\n        map[key] = counts;\n        return map;\n    }\n}\n";
 
     let copy = "A `Map` read is a copy: read it, change it, and store it back. | Change a local and store it back, as in `List<int> counts = map[key] ?? []; counts.add(5); map[key] = counts;`.";
     assert_eq!(
         refusals(("src/Demo/Stock.sharp", sharp), &[]),
         [
-            format!("23:9 invalid-pass-by-reference {copy}"),
-            format!("24:9 invalid-pass-by-reference {copy}"),
-            format!("25:9 invalid-pass-by-reference {copy}"),
-            format!("26:9 invalid-pass-by-reference {copy}"),
-            format!("27:9 invalid-pass-by-reference {copy}"),
             format!("28:9 invalid-pass-by-reference {copy}"),
             format!("29:9 invalid-pass-by-reference {copy}"),
             format!("30:9 invalid-pass-by-reference {copy}"),
+            format!("31:9 invalid-pass-by-reference {copy}"),
+            format!("32:9 invalid-pass-by-reference {copy}"),
+            format!("33:9 invalid-pass-by-reference {copy}"),
+            format!("34:9 invalid-pass-by-reference {copy}"),
+            format!("35:9 invalid-pass-by-reference {copy}"),
         ]
     );
 }
@@ -16851,15 +16939,15 @@ fn a_changing_collection_method_writes_back_through_a_static_property() {
 /// `Set`'s `add` checks its element too.
 #[test]
 fn a_changing_method_on_a_null_coalescing_assignment_needs_a_place() {
-    let sharp = "namespace Demo;\n\nclass Maybe\n{\n    public void run(Set<int>? ids, Set<int>? tags, List<int>? lines)\n    {\n        (ids ??= []).add(1);\n        (tags ??= []).add(\"x\");\n        (lines ??= []).add(1);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Maybe\n{\n    public void run(Set<int>? first, Set<int>? second, List<int>? third)\n    {\n        Set<int>? ids = first;\n        Set<int>? tags = second;\n        List<int>? lines = third;\n        (ids ??= []).add(1);\n        (tags ??= []).add(\"x\");\n        (lines ??= []).add(1);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Maybe.sharp", sharp), &[]),
         [
-            "7:9 invalid-pass-by-reference",
-            "8:9 invalid-pass-by-reference",
-            "8:27 invalid-argument",
-            "9:9 invalid-pass-by-reference"
+            "10:9 invalid-pass-by-reference",
+            "11:9 invalid-pass-by-reference",
+            "11:27 invalid-argument",
+            "12:9 invalid-pass-by-reference"
         ]
     );
 }
@@ -16869,7 +16957,7 @@ fn a_changing_method_on_a_null_coalescing_assignment_needs_a_place() {
 /// missing index, as its write does, so they compile on a `List`.
 #[test]
 fn a_compound_assignment_or_increment_on_a_map_index_names_the_form_that_compiles() {
-    let sharp = "namespace Demo;\n\nclass Counts\n{\n    public void bump(Map<string, int> counts, List<int> sizes)\n    {\n        counts[\"a\"] += 1;\n        counts[\"b\"]++;\n        sizes[0] += 1;\n        sizes[1]--;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Counts\n{\n    public void bump(Map<string, int> tallies, List<int> given)\n    {\n        let counts = tallies;\n        let sizes = given;\n        counts[\"a\"] += 1;\n        counts[\"b\"]++;\n        sizes[0] += 1;\n        sizes[1]--;\n    }\n}\n";
 
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counts.sharp", sharp), &[]);
     let helps: Vec<_> = issues.iter().map(|issue| issue.help.as_deref().unwrap_or("")).collect();
@@ -16895,17 +16983,17 @@ fn a_map_keyed_by_a_backed_enum_takes_the_case_in_every_key_position() {
 /// meets a key the typed loop cannot read back as `Status`.
 #[test]
 fn a_map_keyed_by_a_backed_enum_takes_exactly_the_enum_as_a_key() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int wrong(Map<Status, int> counts, Map<string, int> named, Size size)\n    {\n        counts[\"active\"] = 1;\n        counts[size] = 2;\n        Map<Status, int> built = [\"active\": 1];\n        Map<Status, int> narrowed = named;\n        Map<string, int> widened = counts;\n        return (built.get(Status.Active) ?? 0) + (narrowed.get(Status.Active) ?? 0) + (counts.get(\"active\") ?? 0) + widened.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int wrong(Map<Status, int> tallies, Map<string, int> named, Size size)\n    {\n        let counts = tallies;\n        counts[\"active\"] = 1;\n        counts[size] = 2;\n        Map<Status, int> built = [\"active\": 1];\n        Map<Status, int> narrowed = named;\n        Map<string, int> widened = counts;\n        return (built.get(Status.Active) ?? 0) + (narrowed.get(Status.Active) ?? 0) + (counts.get(\"active\") ?? 0) + widened.count();\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
         [
-            "10:16 mismatched-array-index",
             "11:16 mismatched-array-index",
-            "12:34 invalid-local-assignment-value",
-            "13:37 invalid-local-assignment-value",
-            "14:36 invalid-local-assignment-value",
-            "15:99 invalid-argument"
+            "12:16 mismatched-array-index",
+            "13:34 invalid-local-assignment-value",
+            "14:37 invalid-local-assignment-value",
+            "15:36 invalid-local-assignment-value",
+            "16:99 invalid-argument"
         ]
     );
 }
@@ -16914,7 +17002,7 @@ fn a_map_keyed_by_a_backed_enum_takes_exactly_the_enum_as_a_key() {
 /// fills with `Status`, so each takes the case.
 #[test]
 fn map_get_has_and_remove_take_a_backed_enum_key() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int? lookup(Map<Status, int> counts, Status status)\n    {\n        counts.remove(status);\n        return counts.has(status) ? counts.get(status) : null;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int? lookup(Map<Status, int> tallies, Status status)\n    {\n        let counts = tallies;\n        counts.remove(status);\n        return counts.has(status) ? counts.get(status) : null;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
@@ -18435,7 +18523,7 @@ fn a_loop_over_a_map_keyed_by_a_backed_enum_reads_each_key_as_its_case() {
 /// `associateBy` function whose keys mix.
 #[test]
 fn a_map_key_type_that_mixes_a_backed_enum_or_a_struct_with_other_types_takes_every_key() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int named(Map<string|Status, int> tally)\n    {\n        tally[\"active\"] = 1;\n        tally[Status.Active] = 2;\n        return (tally[\"active\"] ?? 0) + (tally.get(Status.Active) ?? 0) + tally.keys().count();\n    }\n\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses, Map<Size, int> sizes, bool first, Status|int key, Map<Spot|string, int> spots, Map<Spot, int> placed, Spot spot)\n    {\n        for (const [k, n] of spots) {\n        }\n        for (const [k, n] of placed) {\n        }\n        const stops = placed.keys();\n        const here = placed.has(spot);\n        const mixed = spots.keys();\n        const found = spots.has(spot);\n        const at = spots[spot] ?? 0;\n        const listed = [spot: 1, \"a\": 2];\n        const grouped = [spot].groupBy(s => s.x > 0 ? s : \"none\");\n        for (const [k, n] of counts) {\n        }\n        for (const [k, n] of totals) {\n        }\n        for (const [k, n] of statuses) {\n        }\n        const both = (first ? statuses : sizes).keys();\n        const keys = totals.keys();\n        const held = totals.has(key);\n        const value = totals.get(key);\n        const removed = totals.remove(key);\n        const active = totals.has(Status.Active) && totals.remove(Status.Active);\n        const cases = statuses.keys();\n    }\n\n    public void write(Map<int|Size, int> ranks, Map<Size, int> sizes, Map<int, int> ids, List<int> amounts)\n    {\n        const literal = [1: 5, Size.Small: 6];\n        const read = ranks[Size.Small] ?? 0;\n        ranks[Size.Small] = 1;\n        ranks[Size.Small] ??= 1;\n        const spread = [...sizes, ...ids];\n        const grouped = amounts.groupBy(n => n > 5 ? Size.Small : n);\n        const associated = amounts.associateBy(n => n > 5 ? Size.Small : n);\n        const kept = [Size.Small: 1];\n        sizes[Size.Small] = 2;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int named(Map<string|Status, int> given)\n    {\n        let tally = given;\n        tally[\"active\"] = 1;\n        tally[Status.Active] = 2;\n        return (tally[\"active\"] ?? 0) + (tally.get(Status.Active) ?? 0) + tally.keys().count();\n    }\n\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> sums, Map<Status, int> statuses, Map<Size, int> sizes, bool first, Status|int key, Map<Spot|string, int> spots, Map<Spot, int> placed, Spot spot)\n    {\n        let totals = sums;\n        for (const [k, n] of spots) {\n        }\n        for (const [k, n] of placed) {\n        }\n        const stops = placed.keys();\n        const here = placed.has(spot);\n        const mixed = spots.keys();\n        const found = spots.has(spot);\n        const at = spots[spot] ?? 0;\n        const listed = [spot: 1, \"a\": 2];\n        const grouped = [spot].groupBy(s => s.x > 0 ? s : \"none\");\n        for (const [k, n] of counts) {\n        }\n        for (const [k, n] of totals) {\n        }\n        for (const [k, n] of statuses) {\n        }\n        const both = (first ? statuses : sizes).keys();\n        const keys = totals.keys();\n        const held = totals.has(key);\n        const value = totals.get(key);\n        const removed = totals.remove(key);\n        const active = totals.has(Status.Active) && totals.remove(Status.Active);\n        const cases = statuses.keys();\n    }\n\n    public void write(Map<int|Size, int> ranked, Map<Size, int> sized, Map<int, int> ids, List<int> amounts)\n    {\n        let ranks = ranked;\n        let sizes = sized;\n        const literal = [1: 5, Size.Small: 6];\n        const read = ranks[Size.Small] ?? 0;\n        ranks[Size.Small] = 1;\n        ranks[Size.Small] ??= 1;\n        const spread = [...sizes, ...ids];\n        const grouped = amounts.groupBy(n => n > 5 ? Size.Small : n);\n        const associated = amounts.associateBy(n => n > 5 ? Size.Small : n);\n        const kept = [Size.Small: 1];\n        sizes[Size.Small] = 2;\n    }\n}\n";
     let spot =
         ("src/Demo/Spot.sharp", "namespace Demo;\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n");
 
@@ -18522,16 +18610,16 @@ fn a_set_element_takes_what_a_map_key_takes() {
 /// `clear` change it, `filter` gives a `Set`, and `map` and `sortedBy` give a `List`.
 #[test]
 fn set_methods_take_and_give_the_types_of_their_elements() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\nimport Lib.Words;\n\nclass Tags\n{\n    public int run(Set<string> tags, Set<Status> statuses)\n    {\n        bool added = tags.add(\"vip\");\n        bool removed = tags.remove(\"new\");\n        bool held = tags.contains(\"vip\") && statuses.contains(Status.Active);\n        List<string> listed = tags.toList();\n        Set<string> kept = tags.filter(tag => tag != \"x\");\n        List<int> sizes = tags.map(tag => Words.length(tag));\n        bool lengthy = tags.any(tag => Words.length(tag) > 3);\n        string first = tags.first(tag => tag != \"\");\n        List<Status> sorted = statuses.sortedBy(status => status.value);\n        statuses.add(Status.Closed);\n        statuses.remove(Status.Active);\n        tags.clear();\n        return tags.count() + tags.sumOf(tag => Words.length(tag)) + listed.count() + kept.count() + sizes.count() + sorted.count() + (added && removed && held && lengthy ? 1 : 0) + Words.length(first);\n    }\n\n    public void wrong(Set<string> tags, Set<Status> statuses)\n    {\n        tags.add(1);\n        statuses.add(\"active\");\n        List<int> kept = tags.filter(tag => tag != \"x\");\n        Set<int> sizes = tags.map(tag => Words.length(tag));\n        tags.get(0);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\nimport Lib.Words;\n\nclass Tags\n{\n    public int run(Set<string> named, Set<Status> kinds)\n    {\n        let tags = named;\n        let statuses = kinds;\n        bool added = tags.add(\"vip\");\n        bool removed = tags.remove(\"new\");\n        bool held = tags.contains(\"vip\") && statuses.contains(Status.Active);\n        List<string> listed = tags.toList();\n        Set<string> kept = tags.filter(tag => tag != \"x\");\n        List<int> sizes = tags.map(tag => Words.length(tag));\n        bool lengthy = tags.any(tag => Words.length(tag) > 3);\n        string first = tags.first(tag => tag != \"\");\n        List<Status> sorted = statuses.sortedBy(status => status.value);\n        statuses.add(Status.Closed);\n        statuses.remove(Status.Active);\n        tags.clear();\n        return tags.count() + tags.sumOf(tag => Words.length(tag)) + listed.count() + kept.count() + sizes.count() + sorted.count() + (added && removed && held && lengthy ? 1 : 0) + Words.length(first);\n    }\n\n    public int wrong(Set<string> named, Set<Status> kinds)\n    {\n        let tags = named;\n        let statuses = kinds;\n        tags.add(1);\n        statuses.add(\"active\");\n        List<int> kept = tags.filter(tag => tag != \"x\");\n        Set<int> sizes = tags.map(tag => Words.length(tag));\n        tags.get(0);\n        return statuses.count();\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tags.sharp", sharp), &[("src/Lib/Status.php", STATUS), WORDS]),
         [
-            "27:18 invalid-argument",
-            "28:22 invalid-argument",
-            "29:26 invalid-local-assignment-value",
-            "30:26 invalid-local-assignment-value",
-            "31:14 non-existent-method",
+            "31:18 invalid-argument",
+            "32:22 invalid-argument",
+            "33:26 invalid-local-assignment-value",
+            "34:26 invalid-local-assignment-value",
+            "35:14 non-existent-method",
         ]
     );
 }
@@ -18540,7 +18628,7 @@ fn set_methods_take_and_give_the_types_of_their_elements() {
 /// parameter's `Set` type reads as PHP# writes it.
 #[test]
 fn a_set_message_names_the_sharp_type() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public void wrong(Set<string> tags, Set<Status> statuses, Map<string, int> counts)\n    {\n        tags.add(1);\n        statuses.contains(\"active\");\n        tags.get(0);\n        this.mark(counts);\n    }\n\n    public void mark(Set<Status> statuses)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public void wrong(Set<string> named, Set<Status> statuses, Map<string, int> counts)\n    {\n        let tags = named;\n        tags.add(1);\n        statuses.contains(\"active\");\n        tags.get(0);\n        this.mark(counts);\n    }\n\n    public void mark(Set<Status> statuses)\n    {\n    }\n}\n";
 
     let issues =
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]);
@@ -18756,7 +18844,7 @@ fn a_union_that_holds_a_collection_compares_as_each_of_its_types_does() {
 /// empty one, and `[:]` is an empty `Map`, which is refused. A set of sets of `int|string` compares too.
 #[test]
 fn sets_compare_by_their_elements_in_any_order() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Set<int> items, Set<int> others, Set<int>? maybe) => items == others && items != maybe;\n\n    public static bool nested(List<Set<int>> rows, List<Set<int>> others, Map<string, Set<int>> named, Map<string, Set<int>> again, Set<Set<int>> groups, Set<Set<int>> more) => rows == others && named == again && groups == more;\n\n    public static int search(List<Set<int>> rows, Set<int> row) => (rows.contains(row) && rows.remove(row) ? 1 : 0) + (rows.indexOf(row) ?? 0);\n\n    public static bool tagged(Tagged a, Tagged b) => a == b;\n\n    public static bool wrong(Set<int> items, Set<string> words, List<int> listed, Map<int, int> mapped) => items == words || items == listed || items == mapped;\n\n    public static bool literal(Set<int> items) => items == [] || items == [2, 1] || items == [:];\n\n    public static bool mixed(Set<Set<int|string>> a, Set<Set<int|string>> b) => a == b;\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Set<int> items, Set<int> others, Set<int>? maybe) => items == others && items != maybe;\n\n    public static bool nested(List<Set<int>> rows, List<Set<int>> others, Map<string, Set<int>> named, Map<string, Set<int>> again, Set<Set<int>> groups, Set<Set<int>> more) => rows == others && named == again && groups == more;\n\n    public static int search(List<Set<int>> given, Set<int> row)\n    {\n        let rows = given;\n        return (rows.contains(row) && rows.remove(row) ? 1 : 0) + (rows.indexOf(row) ?? 0);\n    }\n\n    public static bool tagged(Tagged a, Tagged b) => a == b;\n\n    public static bool wrong(Set<int> items, Set<string> words, List<int> listed, Map<int, int> mapped) => items == words || items == listed || items == mapped;\n\n    public static bool literal(Set<int> items) => items == [] || items == [2, 1] || items == [:];\n\n    public static bool mixed(Set<Set<int|string>> a, Set<Set<int|string>> b) => a == b;\n}\n";
     let tagged = (
         "src/Demo/Tagged.sharp",
         "namespace Demo;\n\nstruct Tagged\n{\n    public Tagged(public Set<int> tags { get; }) { }\n}\n",
@@ -18766,10 +18854,10 @@ fn sets_compare_by_their_elements_in_any_order() {
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[tagged]),
         [
-            "13:108 invalid-operand `==` compares `Set<int>` with `Set<string>` element by element, and `int` never equals `string`. | ",
-            "13:126 invalid-operand `==` cannot compare `Set<int>` with `List<int>`. | Convert one side so both sides have the same type.",
-            "13:145 invalid-operand `==` cannot compare `Set<int>` with `Map<int, int>`. | Convert one side so both sides have the same type.",
-            "15:94 invalid-array-element `[:]` is an empty Map. An empty Set is written `[]`. | ",
+            "17:108 invalid-operand `==` compares `Set<int>` with `Set<string>` element by element, and `int` never equals `string`. | ",
+            "17:126 invalid-operand `==` cannot compare `Set<int>` with `List<int>`. | Convert one side so both sides have the same type.",
+            "17:145 invalid-operand `==` cannot compare `Set<int>` with `Map<int, int>`. | Convert one side so both sides have the same type.",
+            "19:94 invalid-array-element `[:]` is an empty Map. An empty Set is written `[]`. | ",
         ]
     );
 }
@@ -18843,12 +18931,12 @@ fn a_list_literal_is_passed_where_a_set_is_expected_and_a_list_or_a_map_is_not()
 /// A plain PHP caller still passes a list to a PHP# method, which makes it a `Set` before its body runs.
 #[test]
 fn a_list_literal_argument_is_the_set_its_parameter_declares_and_a_list_variable_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public void take(Set<string> tags)\n    {\n    }\n\n    public void many(Set<string> ...tags)\n    {\n    }\n\n    public void run(List<string> names, List<Set<string>> all, Function<bool(Set<string>)> check)\n    {\n        this.take(names);\n        this.many(names, [\"vip\"]);\n        all.add([\"vip\"]);\n        all.add(names);\n        check([\"vip\"]);\n        const typed = (Set<string> tags) => tags.contains(\"vip\");\n        typed([\"vip\"]);\n        Function<bool(Set<string>)> inferred = tags => tags.contains(\"vip\");\n        inferred(names);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    private List<Set<string>> all = [];\n\n    public void take(Set<string> tags)\n    {\n    }\n\n    public void many(Set<string> ...tags)\n    {\n    }\n\n    public void run(List<string> names, Function<bool(Set<string>)> check)\n    {\n        this.take(names);\n        this.many(names, [\"vip\"]);\n        this.all.add([\"vip\"]);\n        this.all.add(names);\n        check([\"vip\"]);\n        const typed = (Set<string> tags) => tags.contains(\"vip\");\n        typed([\"vip\"]);\n        Function<bool(Set<string>)> inferred = tags => tags.contains(\"vip\");\n        inferred(names);\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function run(Tags $tags): void\n    {\n        $tags->take(['vip']);\n        $tags->many(['vip'], ['new']);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tags.sharp", sharp), &[]),
-        ["15:19 invalid-argument", "16:19 invalid-argument", "18:17 invalid-argument", "23:18 invalid-argument"]
+        ["17:19 invalid-argument", "18:19 invalid-argument", "20:22 invalid-argument", "25:18 invalid-argument"]
     );
     assert_eq!(issues(("src/Demo/Caller.php", php), &[("src/Demo/Tags.sharp", sharp)]), Vec::<String>::new());
 }
@@ -19562,13 +19650,13 @@ fn a_conditional_of_two_any_values_or_two_lists_of_any_goes_into_a_declared_any(
 /// that type, as one written into a property must, and the place keeps its type. PHP keeps widening an array.
 #[test]
 fn an_element_written_into_a_typed_local_or_parameter_must_fit_its_type() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int put(Map<string, int> counts)\n    {\n        counts[\"x\"] = \"text\";\n        Map<string, int> local = [:];\n        local[\"y\"] = 2;\n        local[\"z\"] = \"text\";\n        return counts.count() + local.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int put(Map<string, int> given)\n    {\n        Map<string, int> counts = given;\n        counts[\"x\"] = \"text\";\n        Map<string, int> local = [:];\n        local[\"y\"] = 2;\n        local[\"z\"] = \"text\";\n        return counts.count() + local.count();\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Tally.sharp", sharp), &[]),
         [
-            "7:9 invalid-local-assignment-value Invalid assignment to `counts`: it is declared as `Map<string, int>`. | Write a value of `Map<string, int>`'s element type, or change the type `counts` is declared with.",
-            "10:9 invalid-local-assignment-value Invalid assignment to `local`: it is declared as `Map<string, int>`. | Write a value of `Map<string, int>`'s element type, or change the type `local` is declared with.",
+            "8:9 invalid-local-assignment-value Invalid assignment to `counts`: it is declared as `Map<string, int>`. | Write a value of `Map<string, int>`'s element type, or change the type `counts` is declared with.",
+            "11:9 invalid-local-assignment-value Invalid assignment to `local`: it is declared as `Map<string, int>`. | Write a value of `Map<string, int>`'s element type, or change the type `local` is declared with.",
         ]
     );
 }
@@ -19578,12 +19666,12 @@ fn an_element_written_into_a_typed_local_or_parameter_must_fit_its_type() {
 /// array, and its array of arrays takes `[]`.
 #[test]
 fn an_empty_list_literal_written_as_a_value_of_a_map_of_maps_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    private Map<string, Map<string, int>> named = [:];\n\n    public int put(Map<string, Map<string, int>> counts)\n    {\n        counts[\"a\"] = [];\n        counts[\"a\"] = [:];\n        counts[\"a\"] = [\"x\": 1];\n        this.named[\"a\"] = [];\n        Map<string, Map<string, int>> local = [:];\n        local[\"a\"] = [];\n        return counts.count() + local.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    private Map<string, Map<string, int>> named = [:];\n\n    public int put(Map<string, Map<string, int>> given)\n    {\n        Map<string, Map<string, int>> counts = given;\n        counts[\"a\"] = [];\n        counts[\"a\"] = [:];\n        counts[\"a\"] = [\"x\": 1];\n        this.named[\"a\"] = [];\n        Map<string, Map<string, int>> local = [:];\n        local[\"a\"] = [];\n        return counts.count() + local.count();\n    }\n}\n";
 
     let message = "invalid-array-element `[]` is an empty List. An empty Map is written `[:]`.";
     assert_eq!(
         reported(("src/Demo/Tally.sharp", sharp), &[]),
-        [format!("9:23 {message}"), format!("12:27 {message}"), format!("14:22 {message}")]
+        [format!("10:23 {message}"), format!("13:27 {message}"), format!("15:22 {message}")]
     );
 }
 
@@ -19603,13 +19691,13 @@ fn an_empty_list_literal_written_two_levels_into_a_list_of_maps_is_an_error() {
 /// and a `Map` of `Set`s refuse `[:]`. PHP has one empty array, and its array of arrays takes `[]`.
 #[test]
 fn an_empty_map_literal_written_as_a_value_of_a_map_of_lists_or_of_sets_is_an_error() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int put(Map<string, List<int>> lists, Map<string, Set<int>> sets)\n    {\n        lists[\"a\"] = [:];\n        lists[\"a\"] = [];\n        lists[\"a\"] = [1];\n        sets[\"a\"] = [:];\n        return lists.count() + sets.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int put(Map<string, List<int>> listed, Map<string, Set<int>> grouped)\n    {\n        Map<string, List<int>> lists = listed;\n        Map<string, Set<int>> sets = grouped;\n        lists[\"a\"] = [:];\n        lists[\"a\"] = [];\n        lists[\"a\"] = [1];\n        sets[\"a\"] = [:];\n        return lists.count() + sets.count();\n    }\n}\n";
 
     assert_eq!(
         reported(("src/Demo/Tally.sharp", sharp), &[]),
         [
-            "7:22 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.",
-            "10:21 invalid-array-element `[:]` is an empty Map. An empty Set is written `[]`.",
+            "9:22 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.",
+            "12:21 invalid-array-element `[:]` is an empty Map. An empty Set is written `[]`.",
         ]
     );
 }
@@ -19648,11 +19736,11 @@ fn a_loop_over_a_set_reads_its_elements_and_no_keys() {
 /// So is one written into a `Map` entry declared a `Set`.
 #[test]
 fn a_list_literal_where_a_set_is_declared_is_a_set() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tags\n{\n    public Set<string> all { get; set; } = [];\n    public Set<Status> open { get; set; } = [Status.Active];\n    public Map<string, Set<string>> groups { get; set; } = [\"d\": [\"w\"]];\n\n    public Set<string> run(Set<string> extra = [\"new\"])\n    {\n        Set<string> tags = [\"vip\", \"new\"];\n        tags = [\"old\"];\n        this.all = [\"a\", \"b\"];\n        Set<string> wrong = [\"vip\", 1];\n        return [\"x\"];\n    }\n\n    public List<Set<int>> nested(Map<string, Set<string>> given, List<Set<int>> fallback = [[0]])\n    {\n        List<Set<int>> sets = [[1, 1], [2]];\n        Map<string, Set<string>> named = [\"a\": [\"x\"]];\n        named[\"b\"] = [\"y\"];\n        given[\"c\"] = [\"z\"];\n        this.groups[\"e\"] = [\"v\"];\n        List<List<Set<int>>> deep = [[[3]]];\n        List<Set<int>> wrong = [[\"a\"]];\n        List<Set<int>> spread = [...sets, [5]];\n        Map<string, Set<string>> merged = [...named, \"f\": [\"u\"]];\n        List<Set<int>> skipped = [, [6]];\n        return [[4]];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tags\n{\n    public Set<string> all { get; set; } = [];\n    public Set<Status> open { get; set; } = [Status.Active];\n    public Map<string, Set<string>> groups { get; set; } = [\"d\": [\"w\"]];\n\n    public Set<string> run(Set<string> extra = [\"new\"])\n    {\n        Set<string> tags = [\"vip\", \"new\"];\n        tags = [\"old\"];\n        this.all = tags;\n        this.all = [\"a\", \"b\"];\n        Set<string> wrong = [\"vip\", 1];\n        return [\"x\"];\n    }\n\n    public List<Set<int>> nested(Map<string, Set<string>> incoming, List<Set<int>> fallback = [[0]])\n    {\n        let given = incoming;\n        List<Set<int>> sets = [[1, 1], [2]];\n        Map<string, Set<string>> named = [\"a\": [\"x\"]];\n        named[\"b\"] = [\"y\"];\n        given[\"c\"] = [\"z\"];\n        this.groups[\"e\"] = [\"v\"];\n        List<List<Set<int>>> deep = [[[3]]];\n        List<Set<int>> wrong = [[\"a\"]];\n        List<Set<int>> spread = [...sets, [5]];\n        Map<string, Set<string>> merged = [...named, ...given, \"f\": [\"u\"]];\n        List<Set<int>> skipped = [, [6]];\n        return [[4]];\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tags.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
-        ["31:35 parse", "16:29 invalid-local-assignment-value", "28:32 invalid-local-assignment-value"]
+        ["33:35 parse", "17:29 invalid-local-assignment-value", "30:32 invalid-local-assignment-value"]
     );
 }
 
@@ -22187,7 +22275,7 @@ fn a_type_test_in_a_while_condition_narrows_the_variable_in_the_body() {
 /// loop that repeats the lambda, or in a lambda ends it. A local of the same name inside a lambda is another local.
 #[test]
 fn a_local_a_lambda_assigns_is_never_narrowed_and_a_lambda_keeps_a_narrowing_no_later_write_ends() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int afterTheLambda()\n    {\n        Report? s = new Report();\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            s = null;\n            return f();\n        }\n        return 0;\n    }\n\n    public static int cleared()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s != null) { clear(); return s.size(); }\n        return 0;\n    }\n\n    public static int viaGetter()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            const n = h.ran;\n            return s.size() + n;\n        }\n        return 0;\n    }\n\n    public static int viaOperator()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            const g = h + h;\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int nestedParameter(Report? s)\n    {\n        Function<int()> outer = () => {\n            if (s != null) {\n                Function<int()> inner = () => s.size();\n                s = null;\n                return inner();\n            }\n            return 0;\n        };\n        return outer();\n    }\n\n    public static int nestedWriter()\n    {\n        Report? s = new Report();\n        Function<void()> outer = () => {\n            Function<void()> inner = () => { s = null; };\n            inner();\n        };\n        if (s != null) {\n            outer();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int loop()\n    {\n        Report? s = new Report();\n        Function<void()> f = () => { };\n        int total = 0;\n        if (s != null) {\n            for (int i = 0; i < 2; i++) {\n                f();\n                total += s.size();\n                f = () => { s = null; };\n            }\n        }\n        return total;\n    }\n\n    public static int arrow()\n    {\n        Report? s = new Report();\n        Function<Report?()> clear = () => s = null;\n        if (s != null) {\n            clear();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int loopVariable(List<Report?> reports)\n    {\n        int total = 0;\n        for (let r of reports) {\n            Function<void()> clear = () => { r = null; };\n            if (r != null) {\n                clear();\n                total += r.size();\n            }\n        }\n        return total;\n    }\n\n    public static int neverCalled()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            return s.size();\n        }\n        clear();\n        return 0;\n    }\n\n    public static int writtenBefore(bool flag)\n    {\n        Report? s = null;\n        if (flag) {\n            s = new Report();\n        }\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            return f();\n        }\n        return 0;\n    }\n\n    public static int writtenInTheLoop(List<Report?> reports)\n    {\n        Report? s = null;\n        List<Function<int()>> later = [];\n        for (const r of reports) {\n            s = r;\n            if (s != null) {\n                later.add(() => s.size());\n            }\n        }\n        return later.count();\n    }\n\n    public static int kept(Report? s)\n    {\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            return f();\n        }\n        return 0;\n    }\n\n    public static int pattern(Any? value)\n    {\n        if (value is Report r) {\n            Function<void()> other = () => { value = null; };\n            other();\n            return r.size();\n        }\n        return 0;\n    }\n\n    public static int sameName()\n    {\n        Function<void()> make = () => {\n            Report? t = new Report();\n            Function<void()> clear = () => { t = null; };\n            clear();\n        };\n        Report? t = new Report();\n        if (t != null) {\n            make();\n            return t.size();\n        }\n        return 0;\n    }\n\n    public static int stored()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            h.action();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int whileCondition()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        int total = 0;\n        while (s != null) {\n            clear();\n            total += s.size();\n        }\n        return total;\n    }\n\n    public static int earlyReturn()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s == null) {\n            return 0;\n        }\n        clear();\n        return s.size();\n    }\n\n    public int size() => 1;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int afterTheLambda()\n    {\n        Report? s = new Report();\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            s = null;\n            return f();\n        }\n        return 0;\n    }\n\n    public static int cleared()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s != null) { clear(); return s.size(); }\n        return 0;\n    }\n\n    public static int viaGetter()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            const n = h.ran;\n            return s.size() + n;\n        }\n        return 0;\n    }\n\n    public static int viaOperator()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            const g = h + h;\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int nestedParameter(Report? given)\n    {\n        Report? s = given;\n        Function<int()> outer = () => {\n            if (s != null) {\n                Function<int()> inner = () => s.size();\n                s = null;\n                return inner();\n            }\n            return 0;\n        };\n        return outer();\n    }\n\n    public static int nestedWriter()\n    {\n        Report? s = new Report();\n        Function<void()> outer = () => {\n            Function<void()> inner = () => { s = null; };\n            inner();\n        };\n        if (s != null) {\n            outer();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int loop()\n    {\n        Report? s = new Report();\n        Function<void()> f = () => { };\n        int total = 0;\n        if (s != null) {\n            for (int i = 0; i < 2; i++) {\n                f();\n                total += s.size();\n                f = () => { s = null; };\n            }\n        }\n        return total;\n    }\n\n    public static int arrow()\n    {\n        Report? s = new Report();\n        Function<Report?()> clear = () => s = null;\n        if (s != null) {\n            clear();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int loopVariable(List<Report?> reports)\n    {\n        int total = 0;\n        for (let r of reports) {\n            Function<void()> clear = () => { r = null; };\n            if (r != null) {\n                clear();\n                total += r.size();\n            }\n        }\n        return total;\n    }\n\n    public static int neverCalled()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            return s.size();\n        }\n        clear();\n        return 0;\n    }\n\n    public static int writtenBefore(bool flag)\n    {\n        Report? s = null;\n        if (flag) {\n            s = new Report();\n        }\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            return f();\n        }\n        return 0;\n    }\n\n    public static int writtenInTheLoop(List<Report?> reports)\n    {\n        Report? s = null;\n        List<Function<int()>> later = [];\n        for (const r of reports) {\n            s = r;\n            if (s != null) {\n                later.add(() => s.size());\n            }\n        }\n        return later.count();\n    }\n\n    public static int kept(Report? s)\n    {\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            return f();\n        }\n        return 0;\n    }\n\n    public static int pattern(Any? given)\n    {\n        Any? value = given;\n        if (value is Report r) {\n            Function<void()> other = () => { value = null; };\n            other();\n            return r.size();\n        }\n        return 0;\n    }\n\n    public static int sameName()\n    {\n        Function<void()> make = () => {\n            Report? t = new Report();\n            Function<void()> clear = () => { t = null; };\n            clear();\n        };\n        Report? t = new Report();\n        if (t != null) {\n            make();\n            return t.size();\n        }\n        return 0;\n    }\n\n    public static int stored()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            h.action();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int whileCondition()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        int total = 0;\n        while (s != null) {\n            clear();\n            total += s.size();\n        }\n        return total;\n    }\n\n    public static int earlyReturn()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s == null) {\n            return 0;\n        }\n        clear();\n        return s.size();\n    }\n\n    public int size() => 1;\n}\n";
     let holder = "namespace Demo;\n\npublic class Holder\n{\n    public Holder(public Function<void()> action { get; }) { }\n\n    public int ran => this.fire();\n\n    public static Holder operator +(Holder a, Holder b)\n    {\n        a.action();\n        return new Holder(b.action);\n    }\n\n    private int fire()\n    {\n        this.action();\n        return 1;\n    }\n}\n";
 
     assert_eq!(
@@ -22197,16 +22285,16 @@ fn a_local_a_lambda_assigns_is_never_narrowed_and_a_lambda_keeps_a_narrowing_no_
             "20:42 possible-method-access-on-null",
             "30:20 possible-method-access-on-null",
             "41:20 possible-method-access-on-null",
-            "50:47 possible-method-access-on-null",
-            "68:20 possible-method-access-on-null",
-            "81:26 possible-method-access-on-null",
-            "94:20 possible-method-access-on-null",
-            "106:26 possible-method-access-on-null",
-            "117:20 possible-method-access-on-null",
-            "143:33 possible-method-access-on-null",
-            "189:20 possible-method-access-on-null",
-            "201:22 possible-method-access-on-null",
-            "214:16 possible-method-access-on-null",
+            "51:47 possible-method-access-on-null",
+            "69:20 possible-method-access-on-null",
+            "82:26 possible-method-access-on-null",
+            "95:20 possible-method-access-on-null",
+            "107:26 possible-method-access-on-null",
+            "118:20 possible-method-access-on-null",
+            "144:33 possible-method-access-on-null",
+            "191:20 possible-method-access-on-null",
+            "203:22 possible-method-access-on-null",
+            "216:16 possible-method-access-on-null",
         ]
     );
 }
@@ -22216,7 +22304,7 @@ fn a_local_a_lambda_assigns_is_never_narrowed_and_a_lambda_keeps_a_narrowing_no_
 /// section 21 keeps a property's tested value. A read no test narrowed says nothing more.
 #[test]
 fn an_error_at_a_local_a_lambda_assigns_names_the_lambda_and_binds_the_tested_value() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int tested(Report? s)\n    {\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            clear();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int untested(Report? s)\n    {\n        Function<void()> clear = () => { s = null; };\n        clear();\n        return s.size();\n    }\n\n    public static int argument(string? s)\n    {\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            clear();\n            return Report.count(s);\n        }\n        return 0;\n    }\n\n    public static int count(string text) => 1;\n\n    public int size() => 1;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int tested(Report? given)\n    {\n        Report? s = given;\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            clear();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int untested(Report? given)\n    {\n        Report? s = given;\n        Function<void()> clear = () => { s = null; };\n        clear();\n        return s.size();\n    }\n\n    public static int argument(string? given)\n    {\n        string? s = given;\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            clear();\n            return Report.count(s);\n        }\n        return 0;\n    }\n\n    public static int count(string text) => 1;\n\n    public int size() => 1;\n}\n";
 
     let explained: Vec<(String, Vec<String>, Option<String>)> =
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[])
@@ -22227,22 +22315,22 @@ fn an_error_at_a_local_a_lambda_assigns_names_the_lambda_and_binds_the_tested_va
         explained,
         [
             (
-                "10:20 possible-method-access-on-null".to_owned(),
+                "11:20 possible-method-access-on-null".to_owned(),
                 vec![
-                    "`s` is not narrowed to `Report` here: the lambda on line 7 assigns it, so it may change before this read."
+                    "`s` is not narrowed to `Report` here: the lambda on line 8 assigns it, so it may change before this read."
                         .to_owned()
                 ],
                 Some("Bind the tested value to a name, as in `s is Report t`, and read `t`.".to_owned()),
             ),
             (
-                "19:16 possible-method-access-on-null".to_owned(),
+                "21:16 possible-method-access-on-null".to_owned(),
                 vec![],
                 Some("Use the nullsafe operator (`?.`) if `null` is an expected value.".to_owned()),
             ),
             (
-                "27:33 possibly-null-argument".to_owned(),
+                "30:33 possibly-null-argument".to_owned(),
                 vec![
-                    "`s` is not narrowed to `string` here: the lambda on line 24 assigns it, so it may change before this read."
+                    "`s` is not narrowed to `string` here: the lambda on line 27 assigns it, so it may change before this read."
                         .to_owned()
                 ],
                 Some("Bind the tested value to a name, as in `s is string t`, and read `t`.".to_owned()),
@@ -24332,14 +24420,14 @@ fn null_passes_only_where_the_parameter_type_writes_it() {
     let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public void add(TItem item)\n    {\n    }\n\n    public void maybe(TItem? item)\n    {\n    }\n\n    public void any(Any? item)\n    {\n    }\n\n    public void poison(TItem? item)\n    {\n        this.add(null);\n        this.add(item);\n        this.maybe(null);\n        this.any(null);\n    }\n}\n";
     let lists = (
         "src/Demo/Lists.sharp",
-        "namespace Demo;\n\npublic class Lists\n{\n    public static List<T> padded<T>(List<T> items)\n    {\n        items.add(null);\n        return items;\n    }\n\n    public static T kept<T>(T item) => item;\n\n    public static Any? keptNull() => Lists.kept(null);\n}\n",
+        "namespace Demo;\n\npublic class Lists\n{\n    public static List<T> padded<T>(List<T> given)\n    {\n        let items = given;\n        items.add(null);\n        return items;\n    }\n\n    public static T kept<T>(T item) => item;\n\n    public static Any? keptNull() => Lists.kept(null);\n}\n",
     );
     let php = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass Box\n{\n    /** @param TItem $item */\n    public function add(mixed $item): void\n    {\n    }\n\n    /** @param TItem|null $item */\n    public function maybe(mixed $item): void\n    {\n    }\n\n    public function any(mixed $item): void\n    {\n    }\n\n    /** @param TItem|null $item */\n    public function poison(mixed $item): void\n    {\n        $this->add(null);\n        $this->add($item);\n        $this->maybe(null);\n        $this->any(null);\n    }\n}\n\nclass Lists\n{\n    /**\n     * @template T\n     * @param list<T> $items\n     * @return list<T>\n     */\n    public static function padded(array $items): array\n    {\n        $items[] = null;\n        return $items;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Box.php", php), &[]), Vec::<String>::new());
     assert_eq!(
         each_file(issues, &[("src/Demo/Box.sharp", sharp), lists], &[]).concat(),
-        ["19:18 null-argument", "20:18 possibly-null-argument", "7:19 null-argument"]
+        ["19:18 null-argument", "20:18 possibly-null-argument", "8:19 null-argument"]
     );
 }
 
@@ -25095,8 +25183,8 @@ fn every_equality_on_a_type_parameter_needs_its_bound() {
         "src/Demo/Pair.sharp",
         "namespace Demo;\n\npublic struct Pair<TValue>\n{\n    public Pair(public TValue value { get; }) { }\n}\n",
     );
-    let unbounded = "namespace Demo;\n\npublic class Checks<T>\n{\n    public string arm(T a) => match (a) {\n        5 => \"five\",\n        default => \"other\",\n    };\n\n    public int? found(List<T> items, T item) => items.indexOf(item);\n\n    public void dropped(List<T> items, T item) { items.remove(item); }\n\n    public bool maybe(T? a, T? b) => a == b;\n\n    public bool lists(List<T> a, List<T> b) => a == b;\n\n    public bool pairs(Pair<T> a, Pair<T> b) => a == b;\n\n    public bool any(List<T> items, T item) => items.any((T x) => x == item);\n}\n";
-    let bounded = "namespace Demo;\n\npublic class Checks<T : Equatable>\n{\n    public string arm(T a) => match (a) {\n        5 => \"five\",\n        default => \"other\",\n    };\n\n    public int? found(List<T> items, T item) => items.indexOf(item);\n\n    public void dropped(List<T> items, T item) { items.remove(item); }\n\n    public bool maybe(T? a, T? b) => a == b;\n\n    public bool lists(List<T> a, List<T> b) => a == b;\n\n    public bool pairs(Pair<T> a, Pair<T> b) => a == b;\n\n    public bool any(List<T> items, T item) => items.any((T x) => x == item);\n}\n";
+    let unbounded = "namespace Demo;\n\npublic class Checks<T>\n{\n    public string arm(T a) => match (a) {\n        5 => \"five\",\n        default => \"other\",\n    };\n\n    public int? found(List<T> items, T item) => items.indexOf(item);\n\n    public List<T> dropped(List<T> given, T item) { let items = given; items.remove(item); return items; }\n\n    public bool maybe(T? a, T? b) => a == b;\n\n    public bool lists(List<T> a, List<T> b) => a == b;\n\n    public bool pairs(Pair<T> a, Pair<T> b) => a == b;\n\n    public bool any(List<T> items, T item) => items.any((T x) => x == item);\n}\n";
+    let bounded = "namespace Demo;\n\npublic class Checks<T : Equatable>\n{\n    public string arm(T a) => match (a) {\n        5 => \"five\",\n        default => \"other\",\n    };\n\n    public int? found(List<T> items, T item) => items.indexOf(item);\n\n    public List<T> dropped(List<T> given, T item) { let items = given; items.remove(item); return items; }\n\n    public bool maybe(T? a, T? b) => a == b;\n\n    public bool lists(List<T> a, List<T> b) => a == b;\n\n    public bool pairs(Pair<T> a, Pair<T> b) => a == b;\n\n    public bool any(List<T> items, T item) => items.any((T x) => x == item);\n}\n";
     let shared =
         "namespace Demo;\n\npublic class Checks<T : Shareable>\n{\n    public bool same(T a, T b) => a == b;\n}\n";
     let fix = "bound it with `Equatable`, as in `<T : Equatable>`";
@@ -25106,7 +25194,7 @@ fn every_equality_on_a_type_parameter_needs_its_bound() {
         [
             format!("6:9 invalid-operand `T` has no `==`: {fix}."),
             format!("10:63 invalid-argument `indexOf` compares elements with `==`, and `T` has no `==`: {fix}."),
-            format!("12:63 invalid-argument `remove` compares elements with `==`, and `T` has no `==`: {fix}."),
+            format!("12:85 invalid-argument `remove` compares elements with `==`, and `T` has no `==`: {fix}."),
             format!("14:38 invalid-operand `T` has no `==`: {fix}."),
             format!(
                 "16:48 invalid-operand `==` compares `List<T>` with `List<T>` element by element, and `T` has no `==`: {fix}."
@@ -27267,7 +27355,7 @@ fn a_value_of_a_literal_type_is_named_by_its_general_type() {
         "src/Lib/Mode.php",
         "<?php\n\nnamespace Lib;\n\nfinal class Mode\n{\n    /** @param 'a'|'b' $mode */\n    public static function set(string $mode): void\n    {\n    }\n}\n",
     );
-    let sharp = "namespace Demo;\n\nimport Lib.Mode;\n\npublic class Pick\n{\n    public const string NAME = \"a\";\n\n    public static void run(string text)\n    {\n        Mode.set(text);\n        Pick.take(Pick.NAME);\n        let count = 1;\n        count = \"many\";\n    }\n\n    public static void take(int value = \"none\")\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Mode;\n\npublic class Pick\n{\n    public const string NAME = \"a\";\n\n    public static void run(string text)\n    {\n        Mode.set(text);\n        Pick.take(Pick.NAME);\n        let count = 1;\n        count = \"many\";\n        Pick.take(count);\n    }\n\n    public static void take(int value = \"none\")\n    {\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Mode;\n\nfinal class Pick\n{\n    public const string NAME = 'a';\n\n    public static function run(string $text): void\n    {\n        Mode::set($text);\n        Pick::take(Pick::NAME);\n    }\n\n    public static function take(int $value = 'none'): void\n    {\n    }\n}\n";
 
     assert_eq!(
@@ -27284,7 +27372,7 @@ fn a_value_of_a_literal_type_is_named_by_its_general_type() {
             "11:18 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Mode.set`: expected `\"a\"|\"b\"`, but possibly received `string`. | This might not be type `\"a\"|\"b\"` | Arguments to this method are incorrect | The provided type `string` overlaps with `\"a\"|\"b\"` but is not fully contained. | Ensure the argument always has the expected type using checks or assertions.",
             "12:19 invalid-argument Invalid argument type for argument #1 of `Pick.take`: expected `int`, but found `string`. | This has type `string` | Arguments to this method are incorrect | The provided type `string` is not compatible with the expected type `int`. | Change the argument value to match `int`, or update the parameter's type declaration.",
             "14:17 invalid-local-assignment-value Invalid assignment to `count`: it is declared as `int`. | This value has type `string`. | `count` is declared as `int` here. | Assign a `int` value, or change the type `count` is declared with.",
-            "17:41 invalid-parameter-default-value Default value for parameter `value` is not assignable to its declared type. | This default value has type `string` | Parameter `value` is declared with type `int` | A parameter's default value must be assignable to the parameter's declared type. | Change the default value to match the declared type, or widen the parameter type to accept the default.",
+            "18:41 invalid-parameter-default-value Default value for parameter `value` is not assignable to its declared type. | This default value has type `string` | Parameter `value` is declared with type `int` | A parameter's default value must be assignable to the parameter's declared type. | Change the default value to match the declared type, or widen the parameter type to accept the default.",
         ]
     );
 }
@@ -29275,7 +29363,7 @@ fn a_function_parameter_whose_type_states_no_effects_never_escapes() {
     );
     let keeper = (
         "app/Shop/Keeper.sharp",
-        "namespace App.Shop;\n\nimport Lib.Runner;\n\npublic class Keeper\n{\n    private Function<int()> kept = () => 0;\n\n    private Function<int() uses Http>? spare = null;\n\n    private Function<int(Function<int()>)> handler = (Function<int()> g) => g();\n\n    private static Function<int()>? cached = null;\n\n    public void store(Function<int()> f) { this.kept = f; }\n\n    public void spared(Function<int()> f) => this.spare = f;\n\n    public void cache(Function<int()> f) { Keeper.cached = f; }\n\n    public int local(Function<int()> f)\n    {\n        const g = f;\n        Function<int()> h = () => 0;\n        h = () => g();\n        this.kept = h;\n        return g();\n    }\n\n    public List<Function<int()>> listed(Function<int()> f) => [f];\n\n    public void indexed(Map<string, Function<int()>> all, Function<int()> f) { all[\"a\"] = f; }\n\n    public void added(List<Function<int()>> all, Function<int()> f) => all.add(f);\n\n    public Holder held(Function<int()> f) => new Holder(f);\n\n    public Function<int()> returned(Function<int()> f) => f;\n\n    public Function<int()> either(Function<int()>? f) => f ?? (() => 0);\n\n    public Function<int()> wrapped(Function<int()> f) => () => f() + 1;\n\n    public Function<int()> wrappedBlock(Function<int()> f) => () => { return f() + 2; };\n\n    public int capped(Function<int()> f) => Keeper.capping(f);\n\n    public static int capping(Function<int() uses Http> g) => g();\n\n    public int handled(Function<int()> f) => this.handler(f);\n\n    public int valued(Function<int(Function<int()>)> run, Function<int()> f) => run(f);\n\n    public int called(Function<int()> f) => f() + Keeper.passing(f) + Keeper.passing(() => f()) + Runner.call(f) + Runner.run(f);\n\n    public static int passing(Function<int()> g) => g();\n\n    public Keeper chained(Function<int()> f) => this;\n\n    public int lambda(Function<int()> f)\n    {\n        const r = (Function<int()> g) => g();\n        return r(f);\n    }\n\n    public int run() => this.kept() + (this.spare?.() ?? 0) + (Keeper.cached?.() ?? 0);\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Runner;\n\npublic class Keeper\n{\n    private Function<int()> kept = () => 0;\n\n    private Function<int() uses Http>? spare = null;\n\n    private Function<int(Function<int()>)> handler = (Function<int()> g) => g();\n\n    private static Function<int()>? cached = null;\n\n    public void store(Function<int()> f) { this.kept = f; }\n\n    public void spared(Function<int()> f) => this.spare = f;\n\n    public void cache(Function<int()> f) { Keeper.cached = f; }\n\n    public int local(Function<int()> f)\n    {\n        const g = f;\n        Function<int()> h = () => 0;\n        h = () => g();\n        this.kept = h;\n        return g();\n    }\n\n    public List<Function<int()>> listed(Function<int()> f) => [f];\n\n    public int indexed(Function<int()> f) { Map<string, Function<int()>> all = [:]; all[\"a\"] = f; return all.count(); }\n\n    public int added(Function<int()> f) { List<Function<int()>> all = []; all.add(f); return all.count(); }\n\n    public Holder held(Function<int()> f) => new Holder(f);\n\n    public Function<int()> returned(Function<int()> f) => f;\n\n    public Function<int()> either(Function<int()>? f) => f ?? (() => 0);\n\n    public Function<int()> wrapped(Function<int()> f) => () => f() + 1;\n\n    public Function<int()> wrappedBlock(Function<int()> f) => () => { return f() + 2; };\n\n    public int capped(Function<int()> f) => Keeper.capping(f);\n\n    public static int capping(Function<int() uses Http> g) => g();\n\n    public int handled(Function<int()> f) => this.handler(f);\n\n    public int valued(Function<int(Function<int()>)> run, Function<int()> f) => run(f);\n\n    public int called(Function<int()> f) => f() + Keeper.passing(f) + Keeper.passing(() => f()) + Runner.call(f) + Runner.run(f);\n\n    public static int passing(Function<int()> g) => g();\n\n    public Keeper chained(Function<int()> f) => this;\n\n    public int lambda(Function<int()> f)\n    {\n        const r = (Function<int()> g) => g();\n        return r(f);\n    }\n\n    public int run() => this.kept() + (this.spare?.() ?? 0) + (Keeper.cached?.() ?? 0);\n}\n",
     );
     let lib = (
         "src/Lib/Lib.php",
@@ -29303,8 +29391,8 @@ fn a_function_parameter_whose_type_states_no_effects_never_escapes() {
                 pure.to_owned(),
             ),
             ("30:64 invalid-array-element", "`f` can't be stored in a collection", "Stored", either.to_owned()),
-            ("32:91 invalid-array-element", "`f` can't be stored in a collection", "Stored", either.to_owned()),
-            ("34:80 invalid-argument", "`f` can't be passed to `List.add`, which may keep it", "Passed", either.to_owned()),
+            ("32:96 invalid-array-element", "`f` can't be stored in a collection", "Stored", either.to_owned()),
+            ("34:83 invalid-argument", "`f` can't be passed to `List.add`, which may keep it", "Passed", either.to_owned()),
             (
                 "36:57 invalid-argument",
                 "`f` can't be stored in a new object",
@@ -34066,7 +34154,7 @@ fn a_law_body_holds_only_conditions_matches_locals_returns_and_law_calls() {
     for (body, at) in [
         ("        for (const item of items) { Count.f(item, items); }", "7:9"),
         ("        return true;", "7:9"),
-        ("        int y = 0;\n        y = 1;", "8:9"),
+        ("        int y = 0;\n        y = x;\n        if (y > 0) { return; }", "8:9"),
         (
             "        match (items) {\n            [] => Count.f(x, items),\n            default => { return; },\n        }",
             "8:13",
@@ -36706,7 +36794,7 @@ fn a_readonly_method_cannot_write_this() {
 /// expected, so it stays read only. The error names the `readonly` to write, or why there is none.
 #[test]
 fn a_readonly_value_never_goes_where_a_writable_one_is_expected() {
-    let keeper = "namespace App;\n\nimport Lib.Archive;\n\npublic class Keeper\n{\n    public Order? kept { get; set; } = null;\n\n    public void save(Order order) { }\n\n    public Order give(readonly Order order) { return order; }\n\n    public void keep(readonly Order order, List<Order> orders, List<readonly Order> views, Box<Order> box)\n    {\n        this.save(order);\n        Order o = order;\n        this.kept = order;\n        orders.add(order);\n        views.add(order);\n        box.put(order);\n        Archive.store(order);\n        readonly Order fine = order;\n        this.save(fine);\n    }\n}\n";
+    let keeper = "namespace App;\n\nimport Lib.Archive;\n\npublic class Keeper\n{\n    public Order? kept { get; set; } = null;\n\n    public void save(Order order) { }\n\n    public Order give(readonly Order order) { return order; }\n\n    public int keep(readonly Order order, List<Order> stored, List<readonly Order> shown, Box<Order> box)\n    {\n        let orders = stored;\n        let views = shown;\n        this.save(order);\n        Order o = order;\n        this.kept = order;\n        orders.add(order);\n        views.add(order);\n        box.put(order);\n        Archive.store(order);\n        readonly Order fine = order;\n        this.save(fine);\n        return orders.count() + views.count();\n    }\n}\n";
     let boxed = "namespace App;\n\npublic class Box<T>\n{\n    public void put(T item) { }\n}\n";
     let archive = "<?php\n\nnamespace Lib;\n\nclass Archive\n{\n    public static function store(\\App\\Order $order): void {}\n}\n";
     let mut others = READONLY_CLASSES.to_vec();
@@ -37052,7 +37140,7 @@ fn plain_php_messages_show_a_readonly_type_as_its_php_type() {
 #[test]
 fn a_pattern_reads_no_local_and_names_the_when_that_compares_it() {
     let delivery = "namespace App;\n\nenum Delivery\n{\n    case Noted(string note);\n}\n";
-    let code = "namespace App;\n\nclass Post\n{\n    private int limit = 3;\n\n    public string run(Delivery delivery, Any? value, string code, int extra)\n    {\n        const top = 10.5;\n        let label = match (value) {\n            top => \"local\",\n            extra => \"parameter\",\n            default => \"other\",\n        };\n        let tested = value is this.limit;\n        tested = value is < top;\n        tested = value is 2 + extra;\n        tested = delivery is Delivery.Noted(code);\n        tested = delivery is Delivery.Noted { note: code };\n        match (value) {\n            extra => { },\n            default => { },\n        }\n        return label;\n    }\n}\n";
+    let code = "namespace App;\n\nclass Post\n{\n    private int limit = 3;\n\n    public string run(Delivery delivery, Any? value, string code, int extra)\n    {\n        const top = 10.5;\n        let label = match (value) {\n            top => \"local\",\n            extra => \"parameter\",\n            default => \"other\",\n        };\n        let tested = value is this.limit;\n        tested = value is < top;\n        tested = value is 2 + extra;\n        tested = delivery is Delivery.Noted(code);\n        tested = delivery is Delivery.Noted { note: code };\n        match (value) {\n            extra => { },\n            default => { },\n        }\n        return tested ? label : \"\";\n    }\n}\n";
 
     assert_eq!(
         refusals(("src/App/Post.sharp", code), &[("src/App/Delivery.sharp", delivery)]),
