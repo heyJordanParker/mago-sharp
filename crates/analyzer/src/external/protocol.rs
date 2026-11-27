@@ -81,6 +81,7 @@ use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_non_empty_string;
 use mago_codex::ttype::get_non_negative_int;
 use mago_codex::ttype::get_object;
+use mago_codex::ttype::get_object_collection;
 use mago_codex::ttype::get_string;
 use mago_codex::ttype::get_true;
 use mago_codex::ttype::template::variance::Variance;
@@ -3509,7 +3510,7 @@ fn decode_complete_atomic(reader: &mut ValueReader<'_>, depth: usize) -> Result<
 
             TAtomic::Mixed(mixed)
         }
-        SNAPSHOT_OBJECT => into_collection(decode_complete_object(reader, depth + 1)?),
+        SNAPSHOT_OBJECT => get_object_collection(decode_complete_object(reader, depth + 1)?),
         SNAPSHOT_ARRAY => TAtomic::Array(decode_complete_array(reader, depth + 1)?),
         SNAPSHOT_ITERABLE => {
             let key_type = Arc::new(decode_complete_union(reader, depth + 1)?);
@@ -3717,29 +3718,6 @@ fn decode_complete_callable(reader: &mut ValueReader<'_>, depth: usize) -> Resul
             .with_source(source)
             .with_constraints(constraints),
     ))
-}
-
-/// The PHP# collection a `Sharp\Map<K, V>` or `Sharp\Set<T>` object is, as `collection_object` sends it, so a type an
-/// external analyzer returns names a `Map` or a `Set` as the analyzer types one. Any other object stays as it is.
-fn into_collection(object: TObject) -> TAtomic {
-    if let TObject::Named(named) = &object
-        && let Some(parameters) = named.type_parameters.as_deref()
-    {
-        match parameters {
-            [key_type, value_type] if named.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Map") => {
-                return TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
-                    Arc::new(key_type.clone()),
-                    Arc::new(value_type.clone()),
-                )));
-            }
-            [element_type] if named.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Set") => {
-                return TAtomic::Array(TArray::Set(Arc::new(element_type.clone())));
-            }
-            _ => {}
-        }
-    }
-
-    TAtomic::Object(object)
 }
 
 fn decode_complete_object(reader: &mut ValueReader<'_>, depth: usize) -> Result<TObject, ExternalAnalyzerError> {
@@ -4461,17 +4439,17 @@ pub(super) mod testing {
         };
 
         assert!(matches!(
-            into_collection(object(b"Sharp\\Map", Some(vec![get_string(), get_int()]))),
+            get_object_collection(object(b"Sharp\\Map", Some(vec![get_string(), get_int()]))),
             TAtomic::Array(TArray::Keyed(TKeyedArray { parameters: Some((key, value)), .. }))
                 if key.is_string() && value.is_int()
         ));
         assert!(matches!(
-            into_collection(object(b"Sharp\\Set", Some(vec![get_int()]))),
+            get_object_collection(object(b"Sharp\\Set", Some(vec![get_int()]))),
             TAtomic::Array(TArray::Set(element)) if element.is_int()
         ));
-        assert!(matches!(into_collection(object(b"Sharp\\Map", None)), TAtomic::Object(TObject::Named(_))));
+        assert!(matches!(get_object_collection(object(b"Sharp\\Map", None)), TAtomic::Object(TObject::Named(_))));
         assert!(matches!(
-            into_collection(object(b"Sharp\\Map", Some(vec![get_int()]))),
+            get_object_collection(object(b"Sharp\\Map", Some(vec![get_int()]))),
             TAtomic::Object(TObject::Named(_))
         ));
 
