@@ -9,6 +9,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::is_sealed_class;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::Member;
+use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::BindingValueMetadata;
 use mago_codex::metadata::module::ModuleKind;
@@ -144,6 +145,7 @@ use mago_syntax::cst::StringPart;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Try;
 use mago_syntax::cst::TryCatchClause;
+use mago_syntax::cst::TypeArgumentList;
 use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::UnaryPostfixOperator;
 use mago_syntax::cst::UnaryPrefixOperator;
@@ -578,6 +580,9 @@ struct Lowering<'lowering, 'arena> {
     /// The type PHP writes for each type parameter, by the offset of its declared name: its bound, or `mixed` without
     /// one.
     type_parameters: HashMap<u32, PhpType>,
+    /// The index of each type parameter of a method, by the offset of its declared name, as a call's written order names
+    /// it, `#0`.
+    method_type_parameters: HashMap<u32, usize>,
     /// Whether the file declares a test module, so each of its classes starts and ends its tests.
     tested: bool,
     /// Whether the expression being lowered is one PHP evaluates as a constant expression, where a `Map` or a `Set`
@@ -627,6 +632,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             local_types: HashMap::default(),
             promoted_beside: false,
             type_parameters: HashMap::default(),
+            method_type_parameters: HashMap::default(),
             tested: false,
             in_constant_expression: false,
             in_default: false,
@@ -638,9 +644,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// in the tree is fully qualified.
     fn program(mut self, checked: &CheckedProgram<'arena>) -> Unit {
         for node in Node::Program(checked.program()).filter_map(|node| {
-            matches!(node, Node::ArrowFunction(_) | Node::Closure(_) | Node::TypeParameter(_)).then_some(*node)
+            matches!(node, Node::ArrowFunction(_) | Node::Closure(_) | Node::TypeParameter(_) | Node::Method(_))
+                .then_some(*node)
         }) {
             let lambda = match node {
+                Node::Method(method) => {
+                    for (index, parameter) in
+                        method.type_parameters.iter().flat_map(|list| list.parameters.iter()).enumerate()
+                    {
+                        self.method_type_parameters.insert(parameter.name.span.start.offset, index);
+                    }
+
+                    continue;
+                }
                 Node::TypeParameter(parameter) => {
                     // Only the standard library bounds one by a union, `int|float`, which PHP's one type can't name.
                     let php_type = match parameter.bound.as_ref().map(|bound| &bound.hint) {
@@ -1319,10 +1335,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             let fields = if parses { self.types.struct_parse_fields(word(self.class)) } else { Vec::new() };
             for field in fields {
-                if !self.types.has_property(word(self.class), field.name) {
+                if !self.types.has_property(field.declaring, field.name) {
                     continue;
                 }
-                let mut value = self.this_property(span, field.name);
+                let mut value = self.field_read(span, &field);
                 if Types::holds_secret(field.r#type) {
                     let mut path: Vec<u8> =
                         self.class.iter().map(|&byte| if byte == b'\\' { b'.' } else { byte }).collect();
@@ -1333,7 +1349,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 let write = self.json_write(span, &json, field.key, value);
                 statements.push(if field.omits_null {
-                    let held = self.this_property(span, field.name);
+                    let held = self.field_read(span, &field);
                     let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
                     let present = self.node(SHARP_AST_BINARY_OP, ZEND_IS_NOT_IDENTICAL, line, &[held, null]);
 
@@ -1385,6 +1401,53 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         ))
     }
 
+    /// The value of the stored `field` of `$this`, read in the scope of the class that declares it: `$this->name` for
+    /// one the class being lowered declares, and for one an ancestor declares, a parent's private property included,
+    /// PHP's read in another class's scope, a closure bound to it:
+    /// `\Closure::bind(static fn($stored) => $stored->name, null, 'App\Base')($this)`.
+    fn field_read(&mut self, span: Span, field: &ParsedField<'_>) -> u32 {
+        let Some(declaring) = self.declaring_name(field) else {
+            return self.this_property(span, field.name);
+        };
+        let line = self.line(span);
+        let name = self.string(0, line, b"stored");
+        let parameter = self.node(SHARP_AST_PARAM, 0, line, &[NULL, name, NULL, NULL, NULL, NULL]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
+        let stored = self.variable(span, b"stored");
+        let property = self.string(0, line, field.name);
+        let read = self.node(SHARP_AST_PROP, 0, line, &[stored, property]);
+        let reader = self.declaration(
+            SHARP_AST_ARROW_FUNC,
+            ZEND_ACC_STATIC,
+            span,
+            span,
+            b"",
+            &[parameters, NULL, read, NULL, NULL],
+        );
+        let closure = self.string(ZEND_NAME_FQ, line, b"Closure");
+        let bind = self.string(0, line, b"bind");
+        let unbound = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+        let scope = self.string(0, line, declaring.as_bytes());
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[reader, unbound, scope]);
+        let bound = self.node(SHARP_AST_STATIC_CALL, 0, line, &[closure, bind, arguments]);
+        let this = self.variable(span, b"this");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[this]);
+
+        self.node(SHARP_AST_CALL, 0, line, &[bound, arguments])
+    }
+
+    /// The name of the class that declares `field`, as `App\Base`, when it is not the class being lowered.
+    fn declaring_name(&self, field: &ParsedField<'_>) -> Option<String> {
+        let codebase = self.types.codebase();
+        if codebase.class_key(field.declaring) == codebase.class_key(word(self.class)) {
+            return None;
+        }
+
+        codebase
+            .get_class_like(field.declaring)
+            .map(|declaring| declaring.original_name.as_str_lossy().trim_start_matches('\\').to_owned())
+    }
+
     /// `$this->name`.
     fn this_property(&mut self, span: Span, name: &[u8]) -> u32 {
         let line = self.line(span);
@@ -1406,15 +1469,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The `#fields` of the struct or PHP# class being lowered, at `span`, with `members` its declared members, which the
     /// engine's reader calls to build the type, spec section 10: a row per field `struct_parse_fields` gives, of its
-    /// name, its key, its type text, whether the main constructor takes it, and whether a missing key leaves it to its
-    /// default, then, for a field whose declaration writes more than one class or scalar type, those in the order it
-    /// writes them, which a union of them tries in that order. None for a type with a field whose type has no type
-    /// text, a function, which no input holds. No PHP# or plain PHP code can call a method whose name holds `#`.
+    /// name, its key, its type text, whether the main constructor takes it, whether a missing key leaves it to its
+    /// default, and the class that declares it, in whose scope the reader writes it, then, for a field whose
+    /// declaration writes more than one class or scalar type, those in the order it writes them, which a union of them
+    /// tries in that order. None for a type with a field whose type has no type text, a function, which no input holds.
+    /// No PHP# or plain PHP code can call a method whose name holds `#`.
     ///
     /// ```php
     /// public static function '#fields'(): array
     /// {
-    ///     return [['returnUrl', 'return_url', 'string', true, false], ['method', 'method', 'App.Bank|App.Card', true, false, 'App.Card, App.Bank']];
+    ///     return [['returnUrl', 'return_url', 'string', true, false, 'App\Checkout'], ['method', 'method', 'App.Bank|App.Card', true, false, 'App\Checkout', 'App.Card, App.Bank']];
     /// }
     /// ```
     fn parse_fields(&mut self, members: &Sequence<ClassLikeMember>, span: Span) -> Option<u32> {
@@ -1438,6 +1502,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     |_| {},
                 ),
             ];
+            let declaring = self
+                .declaring_name(field)
+                .unwrap_or_else(|| String::from_utf8_lossy(self.class).trim_start_matches('\\').to_owned());
+            parts.push(self.string(0, line, declaring.as_bytes()));
             let mut order = Vec::new();
             if let Some(hint) = written_hint(members, field.name) {
                 self.written_order(hint, false, &mut order);
@@ -1466,8 +1534,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Adds to `order` each class the written type `hint` names, and each scalar type a union in it holds, at any depth,
-    /// in the order it writes them, once each: a class by its full dotted name as it is declared, `App.Card`, and a
-    /// scalar type as the type text writes it, `int`. `in_union` tells whether `hint` is a union's member.
+    /// in the order it writes them, once each: a class by its full dotted name as it is declared, `App.Card`, a scalar
+    /// type as the type text writes it, `int`, and a type parameter of the method it is written in as `#` and its index,
+    /// whose order the method's call gives. `in_union` tells whether `hint` is a union's member.
     fn written_order(&self, hint: &Hint, in_union: bool, order: &mut Vec<String>) {
         let mut add = |written: String| {
             if !order.contains(&written) {
@@ -1480,6 +1549,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
         };
         match hint {
+            Hint::Identifier(name) if let Some(Binding::TypeParameter { declaration }) = self.names.binding(name) => {
+                if let Some(index) = self.method_type_parameters.get(&declaration.start.offset) {
+                    add(format!("#{index}"));
+                }
+            }
             Hint::Identifier(name) => add_class(self.names.resolve(name)),
             Hint::String(_) if in_union => add("string".to_owned()),
             Hint::Integer(_) if in_union => add("int".to_owned()),
@@ -1498,6 +1572,60 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Hint::Nullable(nullable) => self.written_order(nullable.hint, in_union, order),
             Hint::Parenthesized(parenthesized) => self.written_order(parenthesized.hint, in_union, order),
             _ => {}
+        }
+    }
+
+    /// The written order of the type arguments `written` a call writes, the first child of its `SHARP_TYPE_ARGS`: each
+    /// one's [`Self::written_order`], when it holds more than one name or a type parameter of the method the call is in,
+    /// one after another, split by `; `. None when no union in them writes its members in an order other than the
+    /// sorted one of its type text, as `(float|int)?` does, whose members the engine tries in that order already, or
+    /// the call writes no type arguments.
+    fn call_order(&self, written: Option<&TypeArgumentList>) -> Option<String> {
+        let written = written?;
+        if !written.arguments.iter().any(|hint| self.writes_unsorted_union(hint)) {
+            return None;
+        }
+        let orders: Vec<String> = written
+            .arguments
+            .iter()
+            .map(|hint| {
+                let mut order = Vec::new();
+                self.written_order(hint, false, &mut order);
+                if order.len() > 1 || order.iter().any(|name| name.starts_with('#')) {
+                    order.join(", ")
+                } else {
+                    String::new()
+                }
+            })
+            .collect();
+
+        Some(orders.join("; "))
+    }
+
+    /// Whether the written type `hint` holds, at any depth, a union whose members it writes in an order other than the
+    /// one its type text sorts them in, as `(string|int)?`, whose text is `int|string`. A member is compared by its
+    /// [`Self::written_order`] name, so a member that names no one class, scalar type or type parameter is left out.
+    fn writes_unsorted_union(&self, hint: &Hint) -> bool {
+        match hint {
+            Hint::Union(_) => {
+                let members = union_members(hint);
+                let names: Vec<String> = members
+                    .iter()
+                    .filter_map(|member| {
+                        let mut order = Vec::new();
+                        self.written_order(member, true, &mut order);
+                        (order.len() == 1).then(|| order.remove(0))
+                    })
+                    .collect();
+
+                !names.is_sorted() || members.iter().any(|member| self.writes_unsorted_union(member))
+            }
+            Hint::Generic(generic) => {
+                generic.type_arguments.arguments.iter().any(|argument| self.writes_unsorted_union(argument))
+            }
+            Hint::Nullable(nullable) => self.writes_unsorted_union(nullable.hint),
+            Hint::Parenthesized(parenthesized) => self.writes_unsorted_union(parenthesized.hint),
+            _ => false,
         }
     }
 
@@ -1563,7 +1691,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let method = self.string(0, line, b"parse");
         let mut arguments = vec![self.variable(span, b"value")];
         if let Some(count) = self.static_type_parameters {
-            arguments.push(self.type_arguments_argument(line, &type_parameters_text(count)));
+            arguments.push(self.type_arguments_argument(line, &type_parameters_text(count), None));
         }
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
         let parsed = self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
@@ -3513,7 +3641,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.call(
                         Some(instantiation.span()),
                         arguments,
-                        type_arguments.clone(),
+                        type_arguments.clone().map(|text| (text, None)),
                         None,
                         callee,
                         |_, arguments| arguments,
@@ -5102,7 +5230,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             _ => return None,
         };
 
-        Some(AccessorPlace::Extern(object, self.types.extern_property_key(target)?))
+        Some(AccessorPlace::Extern(target, object, self.types.extern_property_key(target)?))
     }
 
     /// What `build` lowers on `place`, which it reads and then writes, with an `extern` property's object run once, as
@@ -5110,7 +5238,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn holding_place(&mut self, line: u32, place: AccessorPlace, build: impl FnOnce(&mut Self) -> u32) -> u32 {
         match place {
             AccessorPlace::Static(..) => build(self),
-            AccessorPlace::Extern(object, _) => self.with_held_receiver(line, object, build),
+            AccessorPlace::Extern(_, object, _) => self.with_held_receiver(line, object, build),
         }
     }
 
@@ -5134,6 +5262,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(kind, 0, line, &[object, method, arguments])
     }
 
+    /// The `__get` call `read` of the `extern` property `access`, read as `r#type`, spec section 14.3:
+    /// `\Sharp\Internal\returned($row->__get('answers'), null, '', 'Map<string, string?>', 'App.Rows.Answers.answers')`.
+    /// The value crosses in as the type PHP# reads, each PHP array a `Map` or `Set` it holds becoming the object, and is
+    /// checked against it, as a plain PHP call's result is, so a value of another type throws `TypeError` there.
+    fn extern_read(&mut self, line: u32, access: &Expression, read: u32, r#type: &TUnion) -> u32 {
+        let Some(check) = self.types.extern_read_check(access, r#type) else {
+            return read;
+        };
+        let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+        self.returned_result(line, read, null, b"", check)
+    }
+
     /// The call of `place`'s `accessor`, `get` or `set`, at `span`, with `arguments`. A static's is
     /// `Class::{'name#get'}()` or `Class::{'name#set'}(value)`, the call of its hidden method, with last the access's
     /// type arguments when its class is a generic PHP# class, whose type arguments each have their own static. An
@@ -5141,11 +5282,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn accessor_call(&mut self, place: AccessorPlace, accessor: &[u8], arguments: &[u32], span: Span) -> u32 {
         let (access, name) = match place {
             AccessorPlace::Static(access, name) => (access, name),
-            AccessorPlace::Extern(object, key) => {
+            AccessorPlace::Extern(access, object, key) => {
                 let line = self.line(span);
                 let object = self.expression(object);
+                let call = self.extern_call(line, object, key, &[b"__", accessor].concat(), arguments, false);
 
-                return self.extern_call(line, object, key, &[b"__", accessor].concat(), arguments, false);
+                let declared = self.types.extern_property_type(access).filter(|_| accessor == b"get");
+
+                return match declared {
+                    Some(declared) => self.extern_read(line, access, call, declared),
+                    None => call,
+                };
             }
         };
         let line = self.line(access.object);
@@ -5155,7 +5302,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let method = self.string(0, line, &[name, b"#", accessor].concat());
         let mut arguments = arguments.to_vec();
         if let Some(type_arguments) = self.types.statics_type_arguments(&span) {
-            arguments.push(self.type_arguments_argument(line, &type_arguments));
+            arguments.push(self.type_arguments_argument(line, &type_arguments, None));
         }
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
 
@@ -6690,14 +6837,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CALL, 0, line, &[function, callable])
             }
-            // Spec section 30: a named element of a tuple, which runs as a PHP list, is the index read of its position.
             Expression::Access(Access::Property(access))
-                if let Some(index) = self.types.tuple_element_index(access) =>
+                if let Some(index) = self.types.tuple_element_index(access.object, &access.property) =>
             {
                 let object = self.expression(access.object);
-                let index = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = index as i64);
 
-                self.node(SHARP_AST_DIM, 0, line, &[object, index])
+                self.tuple_element(line, object, index)
             }
             // `Class.y` and `Self.y` is the fetch of the member the checker found on the class: a constant or enum case,
             // a static property, or a static method as a first-class callable.
@@ -6710,7 +6855,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let is_method = self.is_method_value(expression, access.object, &access.property);
                     let object = self.expression(access.object);
                     match self.types.extern_property_key(expression) {
-                        Some(key) if !is_method => self.extern_call(line, object, key, b"__get", &[], false),
+                        Some(key) if !is_method => {
+                            let read = self.extern_call(line, object, key, b"__get", &[], false);
+
+                            self.extern_read(line, expression, read, self.types.expression_type(expression))
+                        }
                         _ => {
                             let member = self.member(&access.property);
 
@@ -6740,11 +6889,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                     return self.call_by_kind(expression, &kinds, parts, !tested);
                 }
+                if tested && let Some(position) = self.types.element_call(expression) {
+                    return self.tuple_element_call(call.span(), call.object, &call.argument_list, position);
+                }
 
                 let is_property_call = tested && self.is_property_call(expression, call.object);
                 let object = if tested { self.expression(call.object) } else { self.null_safe_object(call.object) };
                 let method = self.member(&call.method);
-                let type_arguments = self.types.call_type_arguments(expression);
+                let type_arguments = self
+                    .types
+                    .call_type_arguments(expression)
+                    .map(|text| (text, self.call_order(call.type_arguments.as_ref())));
                 let parameters = self.types.call_parameters(expression);
                 let callee = self.types.sharp_callee(expression);
 
@@ -6768,17 +6923,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 )
             }
             // A link whose chain's conditional tests the receiver, which `untested_link` found, is the extension's
-            // member, the method value, or the plain property read.
+            // member, the tuple's element, the method value, or the plain property read.
             Expression::Access(Access::NullSafeProperty(access)) => {
                 let tested = self.tested_links.contains(&expression.span());
                 if tested && let Some(extension) = self.types.extension(expression) {
                     return self.extension_access(expression, &extension, access.object, None);
                 }
+                if tested && let Some(index) = self.types.tuple_element_index(access.object, &access.property) {
+                    let object = self.expression(access.object);
+
+                    return self.tuple_element(line, object, index);
+                }
 
                 let is_method = tested && self.is_method_value(expression, access.object, &access.property);
                 let object = if tested { self.expression(access.object) } else { self.null_safe_object(access.object) };
                 if !is_method && let Some(key) = self.types.extern_property_key(expression) {
-                    return self.extern_call(line, object, key, b"__get", &[], !tested);
+                    let read = self.extern_call(line, object, key, b"__get", &[], !tested);
+
+                    return self.extern_read(line, expression, read, self.types.expression_type(expression));
                 }
                 let member = self.member(&access.property);
 
@@ -6895,7 +7057,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // A plain case of a generic enum is the object of the type arguments the read gives it, spec section 31.
             let type_arguments = self.types.statics_type_arguments(read);
             let type_arguments: Vec<u32> =
-                type_arguments.iter().map(|text| self.type_arguments_argument(line, text)).collect();
+                type_arguments.iter().map(|text| self.type_arguments_argument(line, text, None)).collect();
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &type_arguments);
 
             return self.node(SHARP_AST_STATIC_CALL, 0, line, &[case_class, instance, arguments]);
@@ -6973,7 +7135,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if classes.iter().any(|class| self.types.is_static_accessor(word(class), name.as_bytes())) {
             let method = self.string(0, line, &[name.as_bytes(), b"#get"].concat());
             let arguments: Vec<u32> = type_arguments
-                .map(|type_arguments| self.type_arguments_argument(line, &type_arguments))
+                .map(|type_arguments| self.type_arguments_argument(line, &type_arguments, None))
                 .into_iter()
                 .collect();
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
@@ -7792,8 +7954,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         let around = std::mem::take(&mut self.captures_type_arguments);
         if let Some(type_arguments) = type_arguments {
-            let text = self.type_text(line, type_arguments);
-            values.push(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text]));
+            values.push(self.type_arguments_argument(line, type_arguments, None));
         }
         let receiver = self.variable(value.span(), b"receiver");
         let body = call(self, receiver, &values);
@@ -7876,8 +8037,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.declaration(SHARP_AST_CLOSURE, 0, &span, &span, b"", &[parameters, uses, body, NULL, NULL])
     }
 
-    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, an
-    /// extension's member, a lazy operation of an `Iterable`, a call of a function that may be null, `f?.(x)`, or any link below a collection method call that runs as PHP on the array or below an
+    /// The highest null-safe link in `chain` that PHP's `?->` cannot write, a method value, a property call, a tuple's
+    /// named element or the call of its function, which run as an index read of the PHP list, an extension's member, a lazy operation of an `Iterable`, a call of a function that may be null, `f?.(x)`, or any link below a collection method call that runs as PHP on the array or below an
     /// extension's member, which runs as a static call, with its receiver, when `chain` is a member
     /// read, a call or an index whose chain holds one no conditional tests yet. A null there would reach the PHP
     /// function, where `?->` skips only the rest of its own chain. PHP's `?->` never writes, so in the target of a
@@ -7912,6 +8073,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     if !self.tested_links.contains(&link.span())
                         && (below_php_call
                             || self.types.extension(link).is_some()
+                            || self.types.tuple_element_index(access.object, &access.property).is_some()
                             || self.is_method_value(link, access.object, &access.property))
                     {
                         return Some((link, access.object));
@@ -7924,6 +8086,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         && (below_php_call
                             || self.types.extension(link).is_some()
                             || self.types.members_by_kind(link).is_some()
+                            || self.types.element_call(link).is_some()
                             || self.is_property_call(link, call.object))
                     {
                         return Some((link, call.object));
@@ -9025,17 +9188,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if self.names.is_current_position(call) {
             return self.position(call.object.span());
         }
-        // Spec section 30: `entry.twice(2)` runs the function the tuple's element holds, `($entry[0])(2)`.
         if let Some(position) = self.types.element_call(expression) {
-            let line = self.line(call);
-
-            return self.call(Some(call.span()), &call.argument_list, None, None, None, |this, arguments| {
-                let tuple = this.expression(call.object);
-                let index = this.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = position as i64);
-                let element = this.node(SHARP_AST_DIM, 0, line, &[tuple, index]);
-
-                this.node(SHARP_AST_CALL, 0, line, &[element, arguments])
-            });
+            return self.tuple_element_call(call.span(), call.object, &call.argument_list, position);
         }
         if let Some(extension) = self.types.extension(expression) {
             return self.extension_access(expression, &extension, call.object, Some(&call.argument_list));
@@ -9095,7 +9249,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             kind == SHARP_AST_STATIC_CALL && self.types.call_target(expression).kind == DeclarationKind::StaticProperty;
         // The type arguments a static field's call records are its class's, which pick the field's statics entry, and
         // a function value takes none.
-        let type_arguments = if static_property_call { None } else { self.types.call_type_arguments(expression) };
+        let type_arguments = if static_property_call { None } else { self.types.call_type_arguments(expression) }
+            .map(|text| (text, self.call_order(call.type_arguments.as_ref())));
         let parameters = self.types.call_parameters(expression);
         let callee = self.types.sharp_callee(expression);
         // A built-in method's failure the standard library reads from its value, as `ZipArchive::close`'s `false`,
@@ -9120,6 +9275,34 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let call = this.node(kind, 0, line, &[object, method, arguments]);
 
             if quiet { this.node(SHARP_AST_SILENCE, 0, line, &[call]) } else { call }
+        })
+    }
+
+    /// Spec section 30: the element at `index` of the tuple `object` holds, which runs as a PHP list, so a named
+    /// element is the index read of its position. Every read of a named element is this one: `.`, a `?.` its chain's
+    /// conditional tested, and an element's call.
+    fn tuple_element(&mut self, line: u32, object: u32, index: usize) -> u32 {
+        let index = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = index as i64);
+
+        self.node(SHARP_AST_DIM, 0, line, &[object, index])
+    }
+
+    /// Spec section 30: the call at `site` of the function the element at `position` of the tuple `object` holds, as
+    /// `entry.twice(2)` runs `($entry[0])(2)`, with `arguments`.
+    fn tuple_element_call(
+        &mut self,
+        site: Span,
+        object: &Expression,
+        arguments: &ArgumentList,
+        position: usize,
+    ) -> u32 {
+        let line = self.line(site);
+
+        self.call(Some(site), arguments, None, None, None, |this, arguments| {
+            let tuple = this.expression(object);
+            let element = this.tuple_element(line, tuple, position);
+
+            this.node(SHARP_AST_CALL, 0, line, &[element, arguments])
         })
     }
 
@@ -9196,7 +9379,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let method = self.types.call_target(expression).name;
         let object = self.variable(super_of.span(), b"this");
         let method = self.string(0, self.line(&call.method), &super_alias(interface, method));
-        let type_arguments = self.types.call_type_arguments(expression);
+        let type_arguments = self
+            .types
+            .call_type_arguments(expression)
+            .map(|text| (text, self.call_order(call.type_arguments.as_ref())));
         let parameters = self.types.call_parameters(expression);
         let callee = self.types.sharp_callee(expression);
 
@@ -9765,8 +9951,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             values.extend(self.caller_positions(access.span(), list, callee, 1));
         }
         if let Some(type_arguments) = self.types.extension_type_arguments(access, member) {
-            let text = self.type_text(line, &type_arguments);
-            values.push(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text]));
+            let written = match access {
+                Expression::Call(Call::Method(call)) => call.type_arguments.as_ref(),
+                Expression::Call(Call::NullSafeMethod(call)) => call.type_arguments.as_ref(),
+                _ => None,
+            };
+            let order = self.call_order(written);
+            values.push(self.type_arguments_argument(line, &type_arguments, order.as_deref()));
         }
 
         self.operator_call(line, extension.class, extension.name.as_bytes(), &values)
@@ -9902,17 +10093,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The last argument of a call of a generic method, the type arguments `text` the checker found, a
-    /// `SHARP_TYPE_ARGS` without a `new`, which the engine resolves right before the call.
-    fn type_arguments_argument(&mut self, line: u32, text: &str) -> u32 {
+    /// `SHARP_TYPE_ARGS` without a `new`, which the engine resolves right before the call. Its first child is the
+    /// written `order` of their unions, see [`Self::call_order`], or none.
+    fn type_arguments_argument(&mut self, line: u32, text: &str, order: Option<&str>) -> u32 {
         let text = self.type_text(line, text);
+        let order = order.map_or(NULL, |order| self.string(0, line, order.as_bytes()));
 
-        self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text])
+        self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[order, text])
     }
 
     /// The call `call` builds from its lowered arguments, which starts at `site`, or none for a call through a function
     /// value, where `callee` is the PHP# function, method or constructor it runs, when the analysis knows one, and
     /// otherwise `parameters` are the parameters of the plain PHP one, and `type_arguments` the type arguments of a
-    /// generic method, which go last, as [`Self::type_arguments_argument`] writes them. A value that holds a `Map` or a
+    /// generic method and their written order, which go last, as [`Self::type_arguments_argument`] writes them. A value that holds a `Map` or a
     /// `Set`, or can, crosses into a plain PHP parameter whose type takes an array, such as `array`, `iterable`, `mixed`
     /// or none, as its PHP array, spec section 12, as [`Self::received_value`] gives it. A
     /// parameter whose type takes no array, such as `object` or an interface, takes the object, and so does any
@@ -9923,7 +10116,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         &mut self,
         site: Option<Span>,
         list: &ArgumentList,
-        type_arguments: Option<String>,
+        type_arguments: Option<(String, Option<String>)>,
         parameters: Option<Vec<PlainParameter>>,
         callee: Option<&FunctionLikeMetadata>,
         call: impl FnOnce(&mut Self, u32) -> u32,
@@ -9939,7 +10132,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         &mut self,
         site: Option<Span>,
         list: &ArgumentList,
-        type_arguments: Option<String>,
+        type_arguments: Option<(String, Option<String>)>,
         parameters: Option<Vec<PlainParameter>>,
         callee: Option<&FunctionLikeMetadata>,
         receiver: Option<(Span, &[u8])>,
@@ -9951,8 +10144,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             (Some(parameters), None) => self.crossing_arguments(list, &parameters, receiver),
             (None, None) => (self.argument_nodes(list), Vec::new()),
         };
-        if let Some(type_arguments) = type_arguments {
-            arguments.push(self.type_arguments_argument(line, &type_arguments));
+        if let Some((type_arguments, order)) = type_arguments {
+            arguments.push(self.type_arguments_argument(line, &type_arguments, order.as_deref()));
         }
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
         let call = call(self, arguments);
@@ -10886,8 +11079,8 @@ enum AccessorPlace<'place, 'ast, 'key> {
     /// as [`Lowering::static_accessors`] writes them: the access and the name.
     Static(&'place PropertyAccess<'ast>, &'ast [u8]),
     /// `object.name` or `object?.name` of an `extern` property, spec section 14.3, read and written through the plain
-    /// PHP parent's `__get` and `__set` with its key: the object and the key.
-    Extern(&'place Expression<'ast>, &'key [u8]),
+    /// PHP parent's `__get` and `__set` with its key: the access, the object and the key.
+    Extern(&'place Expression<'ast>, &'place Expression<'ast>, &'key [u8]),
 }
 
 /// Whether a value of `r#type` is a `Set`, true, or a `Map`, false, where it may be one.

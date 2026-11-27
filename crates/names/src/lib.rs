@@ -78,6 +78,14 @@ pub const ENCODED_AS_JSON: &str = "Sharp\\Internal\\EncodedAsJson";
 /// `Behavior<T>`'s `get` and `set`.
 pub const ACCEPTS_ANY_EFFECT: &str = "Sharp\\Internal\\AcceptsAnyEffect";
 
+/// The mark of an engine function that gives the result of the PHP function its argument names, as `size` gives
+/// `count`'s.
+///
+/// The converter lists a standard library member whose body is one call of the engine function under that PHP
+/// function, as it lists a member whose body calls the PHP function itself, so it keeps no table of its own
+/// (decision 4).
+pub const RUNS_AS: &str = "Sharp\\Internal\\RunsAs";
+
 /// The attribute the standard library marks the method with whose call starts a listener of its first type argument,
 /// as `Events.on`.
 pub const STARTS_LISTENER: &str = "Sharp\\Internal\\StartsListener";

@@ -93,6 +93,13 @@ impl Converter<'_, '_> {
             return;
         }
 
+        // A lambda for a `void` function type gives no value, and any other returns one.
+        let returns = match declared.as_slice() {
+            [] => given.and_then(|given| given.get_return_type()).is_none_or(|returned| !returned.is_void()),
+            declared => {
+                declared.iter().any(|declared| declared.get_return_type().is_none_or(|returned| !returned.is_void()))
+            }
+        };
         let mut captures = Captures { every_name: matches!(body, Body::Expression(_)), names: Vec::new() };
         if let Expression::Closure(closure) = expression
             && let Some(clause) = &closure.use_clause
@@ -120,6 +127,12 @@ impl Converter<'_, '_> {
             });
         }
         self.lambda_head(attributes, keywords, parameters, body_start, expression.span());
+        let own: Vec<Vec<u8>> =
+            parameters.parameters.iter().map(|parameter| parameter.variable.name.to_vec()).collect();
+        let copies = self.lambda_copies(&own, |names| match &body {
+            Body::Block(block) => names.walk_block(block, &mut ()),
+            Body::Expression(value) => names.walk_expression(value, &mut ()),
+        });
 
         let returning = declared
             .filter(|declared| declared.return_from_body.is_none())
@@ -139,13 +152,16 @@ impl Converter<'_, '_> {
             returning: returning.clone(),
             checks_return,
             resolution,
-            parameters: parameters.parameters.iter().map(|parameter| parameter.variable.name.to_vec()).collect(),
+            parameters: own,
             variadic: parameters
                 .parameters
                 .iter()
                 .find(|parameter| parameter.ellipsis.is_some())
                 .map(|parameter| parameter.variable.name.to_vec()),
-            locals: Locals::default(),
+            locals: match body {
+                Body::Block(_) => Locals::copying(copies.clone()),
+                Body::Expression(_) => Locals::default(),
+            },
             super_call: None,
             storage: None,
             captures: Some(captures),
@@ -154,10 +170,17 @@ impl Converter<'_, '_> {
         });
         match body {
             Body::Block(block) => self.block(block),
+            // An arrow function that changes its parameter is a block that copies it first.
+            Body::Expression(value) if !copies.is_empty() => {
+                let end = self.copying_arrow(&copies, value, returns);
+                self.expression(value, returning.as_ref());
+                self.edits.insert(value.span().end.offset, end);
+            }
             Body::Expression(value) => self.expression(value, returning.as_ref()),
         }
         self.declare_locals();
         let lambda = std::mem::replace(&mut self.method, around);
+        self.forget_copies(&copies);
 
         for capture in lambda.and_then(|lambda| lambda.captures).map(|captures| captures.names).unwrap_or_default() {
             if capture.written && !capture.by_reference {

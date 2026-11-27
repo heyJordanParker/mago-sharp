@@ -8,9 +8,11 @@ use crate::cst::cst::BinaryOperator;
 use crate::cst::cst::BinaryPattern;
 use crate::cst::cst::ComparisonPattern;
 use crate::cst::cst::Conditional;
+use crate::cst::cst::ConstantAccess;
 use crate::cst::cst::Expression;
 use crate::cst::cst::FieldsPattern;
 use crate::cst::cst::Hint;
+use crate::cst::cst::Identifier;
 use crate::cst::cst::Is;
 use crate::cst::cst::ListPattern;
 use crate::cst::cst::ListPatternElement;
@@ -267,7 +269,13 @@ where
         let left_parenthesis = self.stream.eat_span(T!["("])?;
         let expression = self.parse_expression()?;
         let right_parenthesis = self.stream.eat_span(T![")"])?;
-        let arms = self.parse_comma_separated_sequence(T!["{"], T!["}"], Parser::parse_pattern_match_arm)?;
+        // The name a misplaced call's help compares with: the subject when it is a plain name, as `type`.
+        let subject: &'arena [u8] = match expression {
+            Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(name) }) => name.value,
+            _ => b"value",
+        };
+        let arms =
+            self.parse_comma_separated_sequence(T!["{"], T!["}"], |parser| parser.parse_pattern_match_arm(subject))?;
 
         Ok(PatternMatch {
             r#match,
@@ -280,7 +288,10 @@ where
         })
     }
 
-    fn parse_pattern_match_arm(&mut self) -> Result<PatternMatchArm<'arena>, ParseError<'arena>> {
+    fn parse_pattern_match_arm(
+        &mut self,
+        subject: &'arena [u8],
+    ) -> Result<PatternMatchArm<'arena>, ParseError<'arena>> {
         if self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"default") {
             return Ok(PatternMatchArm::Default(PatternMatchDefaultArm {
                 default: self.expect_any_keyword()?,
@@ -289,7 +300,10 @@ where
             }));
         }
 
-        let pattern = self.parse_pattern()?;
+        let mut pattern = self.parse_pattern()?;
+        if self.stream.is_at(T!["("])? {
+            pattern = self.parse_call_in_pattern(pattern, subject)?;
+        }
         let guard = match self.stream.lookahead(0)? {
             Some(token) if token.kind == T![Identifier] && token.value == b"when" => {
                 let when = self.expect_any_keyword()?;
@@ -306,6 +320,24 @@ where
             arrow: self.stream.eat_span(T!["=>"])?,
             body: self.parse_pattern_match_arm_body()?,
         }))
+    }
+
+    /// Reads the argument list written after a `match` arm's `pattern`, as in `typeof(Clock) =>`. Spec section 21: a
+    /// pattern takes types and constants only, and a value is compared in `when`. So this reports the call once, with
+    /// the `when` that compares it with `subject`, and returns it as an error pattern, so the arm's `=>`, the `match`
+    /// and the rest of the file parse on.
+    fn parse_call_in_pattern(
+        &mut self,
+        pattern: &'arena Pattern<'arena>,
+        subject: &'arena [u8],
+    ) -> Result<&'arena Pattern<'arena>, ParseError<'arena>> {
+        let arguments = self.parse_argument_list()?;
+        let span = pattern.span().join(arguments.span());
+        let source = self.source;
+        let call = &source[span.start.offset as usize..span.end.offset as usize];
+        self.errors.push(ParseError::CallInPatternInSharp(call, subject, span));
+
+        Ok(self.arena.alloc(Pattern::Value(self.arena.alloc(Expression::Error(span)))))
     }
 
     /// Reads a `? :` written at the top of a `when` condition, of a `match` arm or of a law, as in

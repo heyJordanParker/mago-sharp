@@ -7319,3 +7319,40 @@ fn readonly_before_a_declaration_or_in_plain_php_is_a_modifier() {
     assert!(php.errors.is_empty(), "{:#?}", php.errors);
     assert!(readonly_types(PHP, Node::Program(php)).is_empty());
 }
+
+/// Spec section 21: "A pattern takes types and constants only, such as `Circle`, `200` or `Status.Paid`. A local's
+/// value is compared in `when`." A call written as a `match` arm's pattern, as `typeof(Clock)`, is one error that names
+/// that rule and the `when` that compares it, and the arm, the `match` and the class parse on, so a member after it
+/// stays.
+#[test]
+fn a_call_in_a_match_pattern_is_one_error_and_the_file_parses_on() {
+    const CODE: &str = "namespace App.Arms;\n\npublic class Kind\n{\n    public string label(Class<Object> type) => match (type) {\n        typeof(Clock) => \"clock\",\n        _ => \"other\",\n    };\n\n    public int at() => 7;\n}\n";
+
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Arms/Kind.sharp", CODE);
+    let messages: Vec<String> = program.errors.iter().map(|error| Issue::from(error).message).collect();
+    assert_eq!(
+        messages,
+        [
+            "A pattern takes types and constants only, so `typeof(Clock)` can't be one. Compare it in `when`: `_ when type == typeof(Clock) =>`."
+        ]
+    );
+
+    let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+        panic!("expected a namespace, got {:#?}", program.statements);
+    };
+    let Some(Statement::Class(class)) =
+        namespace.statements().iter().find(|statement| matches!(statement, Statement::Class(_)))
+    else {
+        panic!("expected a class, got {:#?}", namespace.statements());
+    };
+    let methods: Vec<&[u8]> = class
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            ClassLikeMember::Method(method) => Some(method.name.value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(methods, [b"label".as_slice(), b"at".as_slice()]);
+}

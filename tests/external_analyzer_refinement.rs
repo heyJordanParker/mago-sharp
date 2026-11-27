@@ -160,6 +160,7 @@ fn registry_of(repository: &Path, environment: &[(&str, &str)]) -> Arc<PluginReg
     let host = common::host(
         &repository.join("composer/tests/Sdk/Fixtures/analyzer-refinement-worker.php"),
         common::NO_DEADLINE,
+        common::NO_DEADLINE,
         environment,
     );
     let analyzer = ExternalAnalyzer::initialize([host], PHPVersion::PHP85, &[], false)

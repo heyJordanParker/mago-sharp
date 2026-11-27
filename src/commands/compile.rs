@@ -5,9 +5,8 @@
 //! the root, with `.sharp` replaced by `.sharpc`. The folder mirrors the accepted sources exactly: a refused, removed
 //! or renamed source loses its compiled file. It writes nothing outside that folder.
 //!
-//! It writes `preload.php` in the `.sharp` folder too, the script `opcache.preload` names to preload every type it
-//! accepted outside `autoload-dev` folders, and `autoload.php`, which requires the project's Composer autoloader for a
-//! program and for the preload script, spec section 27.
+//! It writes `autoload.php` in the `.sharp` folder too, which requires the project's Composer autoloader for a program,
+//! spec section 27.
 //!
 //! A compile that warns of nothing beyond what it refused keeps a record of everything it read and wrote, and of what it
 //! printed, in the `.sharp` folder, and the next compile checks it before any analysis: when every input and output is
@@ -40,13 +39,8 @@ use mago_analyzer::external::ExternalAnalyzerError;
 use mago_analyzer::external::ExternalAnalyzerHandle;
 use mago_analyzer::external::ReturnTypeRequests;
 use mago_analyzer::plugin::PluginError;
-use mago_codex::metadata::CodebaseMetadata;
-use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::scanner::scan_program;
 use mago_codex::scanner::var_tag_class_likes;
-use mago_codex::symbol::SymbolKind;
-use mago_composer::autoload::Autoload;
-use mago_composer::autoload::AutoloadError;
 use mago_composer::autoload::MAPS;
 use mago_composer::autoload::vendor_folder;
 use mago_database::Database;
@@ -129,12 +123,8 @@ const VENDOR: &[u8] = b"vendor/";
 /// compile of a project with a PHP# file writes it, listeners or none, so the engine can tell when it is out of date.
 const LISTENERS: &str = "listeners.php";
 
-/// The preload script in the `.sharp` folder, spec section 27, which `opcache.preload` names to preload every type
-/// the compile accepted outside `autoload-dev` folders.
-const PRELOAD: &str = "preload.php";
-
 /// The script in the `.sharp` folder that requires the project's Composer autoloader, spec section 27, which a program
-/// loads before it builds its class, and the preload script before the types it preloads.
+/// loads before it builds its class.
 const AUTOLOAD: &str = "autoload.php";
 
 /// The record of everything the last compile read and wrote, in the `.sharp` folder and in the hosts' folder, which the
@@ -988,10 +978,13 @@ fn host_compiled_path(
     Ok(compiled_path_of(root, sources, file)?.and_then(|compiled| in_hosts_folder(root, folder, &compiled)))
 }
 
-/// Where the hosts' `folder` of the project at `root` keeps the compiled file the project's `.sharp` folder keeps at
-/// `compiled`, or none when `compiled` is outside that folder.
+/// Where the hosts' `folder` of the project at `root` keeps the compiled file the project's current generation keeps at
+/// `compiled`, or none when `compiled` is outside that generation.
 fn in_hosts_folder(root: &Path, folder: &Path, compiled: &Path) -> Option<PathBuf> {
-    compiled.strip_prefix(root.join(unit::COMPILED_FOLDER)).ok().map(|relative| folder.join(relative))
+    compiled
+        .strip_prefix(root.join(unit::COMPILED_FOLDER).join(unit::CURRENT_GENERATION))
+        .ok()
+        .map(|relative| folder.join(relative))
 }
 
 /// What the extension hosts of the project at `root` load as their workers start, before the compile reads what they
@@ -1389,6 +1382,143 @@ fn write_compiled(compiled: Option<PathBuf>, bytes: &[u8]) -> Result<Written, Da
     Ok(Written { hash: unit::source_hash(bytes), wrote })
 }
 
+/// The generation of the `.sharp` folder a compile writes, a new folder the [`unit::CURRENT_GENERATION`] link moves to
+/// once every file in it is written, so a process that is running keeps reading the generation it started on. A file
+/// that holds what the current generation's holds is a hard link to that one, as rsync's `--link-dest` builds a
+/// snapshot, and only a file that changed is written.
+struct Generation {
+    /// The generation's folder, `.sharp/generation-<time>-<process>`.
+    folder: PathBuf,
+    /// The [`unit::CURRENT_GENERATION`] link of the `.sharp` folder, which every reader reads through.
+    current: PathBuf,
+}
+
+impl Generation {
+    /// Starts a generation in the `.sharp` folder `compiled_folder`: its folder, with its lock file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of making the folder or the lock file.
+    fn start(compiled_folder: &Path) -> Result<Self, DatabaseError> {
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let folder =
+            compiled_folder.join(format!("{}{}-{}", unit::GENERATION_PREFIX, since.as_nanos(), std::process::id()));
+        std::fs::create_dir_all(&folder).map_err(|error| DatabaseError::io(IOAction::CreateFolder, &folder, error))?;
+        let lock = folder.join(unit::GENERATION_LOCK);
+        std::fs::File::create(&lock).map_err(|error| DatabaseError::io(IOAction::WriteFile, &lock, error))?;
+
+        Ok(Self { folder, current: compiled_folder.join(unit::CURRENT_GENERATION) })
+    }
+
+    /// The file of the generation that readers will find at `path`, under the current link.
+    fn place(&self, path: &Path) -> PathBuf {
+        path.strip_prefix(&self.current).map_or_else(|_| path.to_path_buf(), |relative| self.folder.join(relative))
+    }
+
+    /// Writes `bytes` as the file readers will find at `path`, under the current link: a link to the current file there
+    /// when it holds them, else a new file. Returns whether it wrote one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of making the link or of writing the file.
+    fn write(&self, path: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
+        if std::fs::read(path).ok().as_deref() == Some(bytes) {
+            self.keep(path)?;
+
+            return Ok(false);
+        }
+        write_by_rename(&self.place(path), bytes)?;
+
+        Ok(true)
+    }
+
+    /// Keeps the current file at `path`, under the current link, in the generation, as a hard link to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of making the folder or the link.
+    fn keep(&self, path: &Path) -> Result<(), DatabaseError> {
+        let placed = self.place(path);
+        if let Some(folder) = placed.parent() {
+            std::fs::create_dir_all(folder)
+                .map_err(|error| DatabaseError::io(IOAction::CreateFolder, folder, error))?;
+        }
+
+        std::fs::hard_link(path, &placed).map_err(|error| DatabaseError::io(IOAction::WriteFile, &placed, error))
+    }
+
+    /// Makes the generation the current one, with one rename of a new link over the current link, then deletes each
+    /// other generation of `compiled_folder` no process holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of making or renaming the link, or of deleting a generation.
+    fn publish(self, compiled_folder: &Path) -> Result<(), DatabaseError> {
+        let name = self.folder.file_name().unwrap_or_default();
+        let link = compiled_folder.join(format!("{}.{}", unit::CURRENT_GENERATION, std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(name, &link)
+            .map_err(|error| DatabaseError::io(IOAction::WriteFile, &link, error))?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(name, &link)
+            .map_err(|error| DatabaseError::io(IOAction::WriteFile, &link, error))?;
+        std::fs::rename(&link, &self.current)
+            .map_err(|error| DatabaseError::io(IOAction::WriteFile, &self.current, error))?;
+
+        collect_generations(compiled_folder)
+    }
+}
+
+/// Deletes each generation of the `.sharp` folder `compiled_folder` but the current one that no process reads: one whose
+/// lock file's exclusive lock the compile gets without waiting, which it holds while it deletes, so no process takes the
+/// shared one meanwhile, and one with no lock file, which a compile stopped before it made one.
+///
+/// # Errors
+///
+/// Returns the error of reading `compiled_folder`, or of opening a lock file or deleting a generation.
+fn collect_generations(compiled_folder: &Path) -> Result<(), DatabaseError> {
+    let current =
+        std::fs::read_link(compiled_folder.join(unit::CURRENT_GENERATION)).ok().map(|name| compiled_folder.join(name));
+    for path in generation_folders(compiled_folder)? {
+        if current.as_ref() == Some(&path) {
+            continue;
+        }
+        let lock_path = path.join(unit::GENERATION_LOCK);
+        let lock = match std::fs::File::open(&lock_path) {
+            Ok(lock) => Some(lock),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &lock_path, error)),
+        };
+        if lock.as_ref().is_some_and(|lock| lock.try_lock().is_err()) {
+            continue;
+        }
+        std::fs::remove_dir_all(&path).map_err(|error| DatabaseError::io(IOAction::DeleteFolder, &path, error))?;
+        drop(lock);
+    }
+
+    Ok(())
+}
+
+/// The folder of each generation in the `.sharp` folder `compiled_folder`.
+///
+/// # Errors
+///
+/// Returns the error of reading `compiled_folder`.
+fn generation_folders(compiled_folder: &Path) -> Result<Vec<PathBuf>, DatabaseError> {
+    let mut folders = Vec::new();
+    for entry in std::fs::read_dir(compiled_folder)
+        .map_err(|error| DatabaseError::io(IOAction::OpenFolder, compiled_folder, error))?
+    {
+        let entry = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, compiled_folder, error))?;
+        if entry.file_name().to_string_lossy().starts_with(unit::GENERATION_PREFIX) && entry.path().is_dir() {
+            folders.push(entry.path());
+        }
+    }
+
+    Ok(folders)
+}
+
 /// Whether the compile lowers `file`, a PHP# file of the project, which is the scope of its analysis. The compile
 /// refuses a PHP# file for the errors reported in it, and a node-analysis hook reports only in the file it inspects, so
 /// the hooks run only in these files, as they run only in the named files of `mago analyze <paths>`.
@@ -1651,6 +1781,9 @@ fn compiled(
         && every_input_is_current(record, configuration, &root, &sources, &mut filesystems)
         && let Some(database) = record.outcome.report_database(&root)?
     {
+        if writing.is_some() {
+            collect_generations(&compiled_folder)?;
+        }
         drop(writing);
         if let Some((hosts, (lock, held, exclusive, stale))) = hosts {
             let compiled = if stale {
@@ -1795,7 +1928,16 @@ fn compiled(
         Some(compiled) => read_listed(&compiled),
         None => Ok(None),
     };
-    let write = |file: &File, bytes: Vec<u8>| write_compiled(compiled_path_of(&root, &sources, file)?, &bytes);
+    // The generation of the `.sharp` folder the compile writes, while the project has a PHP# file to compile.
+    let generation = writing.as_ref().map(|_| Generation::start(&compiled_folder)).transpose()?;
+    let write = |file: &File, bytes: Vec<u8>| {
+        let wrote = match (compiled_path_of(&root, &sources, file)?, &generation) {
+            (Some(compiled), Some(generation)) => generation.write(&compiled, &bytes)?,
+            _ => false,
+        };
+
+        Ok(Written { hash: unit::source_hash(&bytes), wrote })
+    };
     let mut intact = |file: &File| match compiled_path_of(&root, &sources, file) {
         Ok(Some(compiled)) => is_unchanged(&compiled, outputs.get(&source_name(&root, &compiled)), &mut filesystems),
         _ => false,
@@ -1844,6 +1986,8 @@ fn compiled(
     stamped.extend(served_stamps(&root, database, autoloader.as_deref())?);
 
     let mut written = BTreeSet::new();
+    // Each file of the generation and the hash of its bytes, which the record keeps once the generation is current.
+    let mut published = Vec::new();
     let mut accepted = HashSet::new();
     let mut refused = IssueCollection::default();
     let mut refused_files = 0;
@@ -1867,19 +2011,16 @@ fn compiled(
         match compilation {
             Compilation::Accepted(output) => {
                 let Written { hash, .. } = output?;
-                if let Some(record) = record.as_mut() {
-                    record.output(&compiled, hash);
-                }
-                written.insert(compiled);
+                published.push((compiled, hash));
                 accepted.insert(file_id);
             }
             Compilation::Kept => {
-                if let Some(record) = record.as_mut()
-                    && let Some(output) = outputs.get(&source_name(&root, &compiled))
-                {
-                    record.unchanged_output(&compiled, *output);
+                if let Some(generation) = &generation {
+                    generation.keep(&compiled)?;
                 }
-                written.insert(compiled);
+                if let Some((_, hash)) = outputs.get(&source_name(&root, &compiled)) {
+                    published.push((compiled, *hash));
+                }
                 accepted.insert(file_id);
             }
             Compilation::Refused(issues) => {
@@ -1908,16 +2049,23 @@ fn compiled(
         let accepted: Vec<&Listener> =
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
         let effects = server.extern_effects();
-        let table = compiled_folder.join(LISTENERS);
+        let table = compiled_folder.join(unit::CURRENT_GENERATION).join(LISTENERS);
         let dispatcher = server.dispatcher_namespace();
         let modules = server.modules();
         let packages = package_folders(&root);
         let bytes = listener_table(&inputs, &accepted, dispatcher, &packages, &externs, &effects, &families, &modules);
-        write_if_changed(&table, &bytes)?;
-        if let Some(record) = record.as_mut() {
-            record.output(&table, unit::source_hash(&bytes));
+        if let Some(generation) = &generation {
+            generation.write(&table, &bytes)?;
+            published.push((table, unit::source_hash(&bytes)));
         }
-        written.insert(table);
+    }
+    if let Some(generation) = generation {
+        generation.publish(&compiled_folder)?;
+        if let Some(record) = record.as_mut() {
+            for (path, hash) in &published {
+                record.output(path, *hash);
+            }
+        }
     }
     if compiled_folder.is_dir() {
         let bytes = compiled_files.encode(BUILD_ID, configuration_hash(configuration))?;
@@ -1927,19 +2075,6 @@ fn compiled(
         }
         written.insert(compiled_files_path);
         written.insert(compiled_folder.join(PROOFS));
-        let codebase = server.codebase();
-        let mut types = BTreeSet::new();
-        let mut loaded = up_front_files(&root)?;
-        for class in codebase.class_likes.values() {
-            if class.flags.is_module() || !accepted.contains(&class.span.file_id) {
-                continue;
-            }
-            let file = database.get_ref(&class.span.file_id)?;
-            if file.folder_namespace != Some(FolderNamespace::Test) {
-                types.insert(file.name.as_ref());
-                loaded.insert(class.span.file_id);
-            }
-        }
         let autoload = compiled_folder.join(AUTOLOAD);
         let bytes = autoload_script(&root)?;
         write_if_changed(&autoload, &bytes)?;
@@ -1947,18 +2082,16 @@ fn compiled(
             record.output(&autoload, unit::source_hash(&bytes));
         }
         written.insert(autoload);
-        let preload = compiled_folder.join(PRELOAD);
-        let bytes = preload_script(&types, &anonymous_class_types(codebase, loaded));
-        write_if_changed(&preload, &bytes)?;
-        if let Some(record) = record.as_mut() {
-            record.output(&preload, unit::source_hash(&bytes));
-        }
-        written.insert(preload);
         let kept: BTreeSet<PathBuf> = written
             .iter()
             .cloned()
             .chain(record.as_ref().and_then(Record::marker_path))
-            .chain([compiled_folder.join(COMPILE_LOCK), compiled_folder.join(WRITE_LOCK)])
+            .chain([
+                compiled_folder.join(COMPILE_LOCK),
+                compiled_folder.join(WRITE_LOCK),
+                compiled_folder.join(unit::CURRENT_GENERATION),
+            ])
+            .chain(generation_folders(&compiled_folder)?)
             .collect();
         delete_all_but(&compiled_folder, &kept, &compiled_folder.join(PACKAGE_FOLDER))?;
     }
@@ -2916,78 +3049,6 @@ fn autoload_script(root: &Path) -> Result<Vec<u8>, Error> {
     script.extend_from_slice(b";\n");
 
     Ok(script)
-}
-
-/// The PHP source of the preload script, spec section 27, for `types`, the workspace-relative name of each source whose
-/// type the compile accepted, a test's left out. It requires the project's Composer autoloader through `autoload.php`,
-/// then each source, so a type whose parent another file declares, plain PHP or PHP#, gets its parent from the
-/// autoloader, as in a request. Then it loads each of `named`, a type an anonymous class names, through the function
-/// its kind's check takes.
-fn preload_script(types: &BTreeSet<&[u8]>, named: &BTreeSet<(&str, &[u8])>) -> Vec<u8> {
-    let mut script = b"<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/autoload.php';\n".to_vec();
-    for name in types {
-        script.extend_from_slice(b"require_once __DIR__ . ");
-        quoted(&mut script, &[b"/../", *name].concat());
-        script.extend_from_slice(b";\n");
-    }
-    for (check, name) in named {
-        script.extend_from_slice(check.as_bytes());
-        script.push(b'(');
-        quoted(&mut script, name);
-        script.extend_from_slice(b");\n");
-    }
-
-    script
-}
-
-/// The files Composer's autoloader in `root` loads up front, `autoload_files.php`'s, which the preload loads with it.
-///
-/// # Errors
-///
-/// Returns the error of reading `composer.json` or Composer's autoload maps.
-fn up_front_files(root: &Path) -> Result<HashSet<FileId>, Error> {
-    let unreadable = |error: AutoloadError| OrchestratorError::General(error.to_string());
-    let Some(autoload) = Autoload::read(&vendor_folder(root).map_err(unreadable)?).map_err(unreadable)? else {
-        return Ok(HashSet::new());
-    };
-
-    Ok(autoload.files().iter().map(|path| FileId::new(&File::logical_name(root, path))).collect())
-}
-
-/// Each type outside PHP's own an anonymous class names as its parent, an interface or a trait, with the function that
-/// loads it, for each anonymous class in a file the preload loads: one of `loaded`, or the file of a type a loaded
-/// file's types name so. PHP declares an anonymous class only when its code runs, so nothing else loads what it names
-/// before opcache links the preloaded classes, and opcache would warn that it can't preload it.
-fn anonymous_class_types(codebase: &CodebaseMetadata, mut loaded: HashSet<FileId>) -> BTreeSet<(&'static str, &[u8])> {
-    let mut declared: HashMap<FileId, Vec<&ClassLikeMetadata>> = HashMap::new();
-    for class in codebase.class_likes.values() {
-        declared.entry(class.span.file_id).or_default().push(class);
-    }
-
-    let mut named = BTreeSet::new();
-    let mut unread: Vec<FileId> = loaded.iter().copied().collect();
-    while let Some(file) = unread.pop() {
-        for class in declared.get(&file).into_iter().flatten() {
-            let names =
-                class.direct_parent_class.iter().chain(&class.direct_parent_interfaces).chain(&class.used_traits);
-            let used = names.filter_map(|name| codebase.get_class_like(*name));
-            for used in used.filter(|used| !used.flags.is_built_in()) {
-                if loaded.insert(used.span.file_id) {
-                    unread.push(used.span.file_id);
-                }
-                if class.name_span.is_none() {
-                    let check = match used.kind {
-                        SymbolKind::Trait => "trait_exists",
-                        SymbolKind::Interface => "interface_exists",
-                        SymbolKind::Class | SymbolKind::Enum => "class_exists",
-                    };
-                    named.insert((check, used.original_name.as_bytes()));
-                }
-            }
-        }
-    }
-
-    named
 }
 
 /// Appends `text` to `table` as a PHP single-quoted string.

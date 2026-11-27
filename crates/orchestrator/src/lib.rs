@@ -912,6 +912,7 @@ mod tests {
         let after = issues(&warm.analyze_incremental(None).unwrap().issues);
 
         assert!(vendor_names(warm.autoloaded().to_vec()).contains(&"vendor/acme/money/src/Ledger.php".to_owned()));
+        assert_eq!(warm.analyzed_files, HashSet::from_iter([FileId::new(b"src/Ledger.php")]));
         assert!(after.iter().any(|issue| issue.starts_with("non-existent-method")), "{after:?}");
         assert_eq!(after, analyzed(root.path()).2);
     }

@@ -3799,10 +3799,8 @@ mod tests {
             service.codebase.safe_symbol_members.clear();
             let unchanged: Vec<FileId> = files.iter().copied().filter(|file_id| *file_id != edited.id).collect();
             let extension_reads = super::super::extension_reads(&service.file_states, &service.before_analysis_reads);
-            let (mut invalid_files, extension_symbol_changed) = service
-                .codebase
-                .mark_safe_symbols(&diff, &service.native_symbol_references, &extension_reads.symbols)
-                .expect("each fixture's cascade ends within the warm path's limit");
+            let (mut invalid_files, extension_symbol_changed) =
+                service.codebase.mark_safe_symbols(&diff, &service.native_symbol_references, &extension_reads.symbols);
             if extension_symbol_changed {
                 invalid_files.extend(unchanged.iter().map(|file_id| mago_word::word(name(file_id).as_bytes())));
             }
@@ -5214,7 +5212,7 @@ mod tests {
         let report =
             "namespace App;\n\npublic class Report\n{\n    public string text(string name) => name.shout();\n}\n";
         let plain = "namespace App;\n\npublic class Plain\n{\n    public string text(string name) => name;\n}\n";
-        let listed = "namespace App;\n\npublic class Listed\n{\n    public int size(List<int> ids)\n    {\n        ids.add(1);\n        return ids.count();\n    }\n}\n";
+        let listed = "namespace App;\n\npublic class Listed\n{\n    public int size(List<int> ids)\n    {\n        let grown = ids;\n        grown.add(1);\n        return grown.count();\n    }\n}\n";
         let packaged = "vendor/acme/shapes/src/Report.sharp";
         let database = project(&[
             (
