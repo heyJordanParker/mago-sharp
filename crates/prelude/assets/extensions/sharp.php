@@ -482,6 +482,17 @@ final class PropertyBehavior {}
 final class AcceptsAnyEffect {}
 
 /**
+ * Marks an engine function that gives the result of the PHP function `$function`, as `size` gives `count`'s for a
+ * `Map` or a `Set`, so the converter turns PHP's `$function` into the standard library member whose body is one call
+ * of the engine function.
+ */
+#[\Attribute(\Attribute::TARGET_FUNCTION)]
+final class RunsAs
+{
+    public function __construct(public string $function) {}
+}
+
+/**
  * Marks the standard library method whose call starts a listener of its first type argument, as `Events.on` does, so
  * the checker refuses a type argument no event can be.
  */
@@ -1269,6 +1280,7 @@ function maxBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $selector, #[Ta
 /**
  * @return int how many entries the table holds, read in constant time.
  */
+#[RunsAs('count')]
 function size(\Sharp\Map|\Sharp\Set $table): int {}
 
 /**
