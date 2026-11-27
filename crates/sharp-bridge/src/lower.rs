@@ -5230,7 +5230,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             _ => return None,
         };
 
-        Some(AccessorPlace::Extern(object, self.types.extern_property_key(target)?))
+        Some(AccessorPlace::Extern(target, object, self.types.extern_property_key(target)?))
     }
 
     /// What `build` lowers on `place`, which it reads and then writes, with an `extern` property's object run once, as
@@ -5238,7 +5238,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn holding_place(&mut self, line: u32, place: AccessorPlace, build: impl FnOnce(&mut Self) -> u32) -> u32 {
         match place {
             AccessorPlace::Static(..) => build(self),
-            AccessorPlace::Extern(object, _) => self.with_held_receiver(line, object, build),
+            AccessorPlace::Extern(_, object, _) => self.with_held_receiver(line, object, build),
         }
     }
 
@@ -5262,6 +5262,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(kind, 0, line, &[object, method, arguments])
     }
 
+    /// The `__get` call `read` of the `extern` property `access`, read as `r#type`, spec section 14.3:
+    /// `\Sharp\Internal\returned($row->__get('answers'), null, '', 'Map<string, string?>', 'App.Rows.Answers.answers')`.
+    /// The value crosses in as the type PHP# reads, each PHP array a `Map` or `Set` it holds becoming the object, and is
+    /// checked against it, as a plain PHP call's result is, so a value of another type throws `TypeError` there.
+    fn extern_read(&mut self, line: u32, access: &Expression, read: u32, r#type: &TUnion) -> u32 {
+        let Some(check) = self.types.extern_read_check(access, r#type) else {
+            return read;
+        };
+        let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+        self.returned_result(line, read, null, b"", check)
+    }
+
     /// The call of `place`'s `accessor`, `get` or `set`, at `span`, with `arguments`. A static's is
     /// `Class::{'name#get'}()` or `Class::{'name#set'}(value)`, the call of its hidden method, with last the access's
     /// type arguments when its class is a generic PHP# class, whose type arguments each have their own static. An
@@ -5269,11 +5282,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn accessor_call(&mut self, place: AccessorPlace, accessor: &[u8], arguments: &[u32], span: Span) -> u32 {
         let (access, name) = match place {
             AccessorPlace::Static(access, name) => (access, name),
-            AccessorPlace::Extern(object, key) => {
+            AccessorPlace::Extern(access, object, key) => {
                 let line = self.line(span);
                 let object = self.expression(object);
+                let call = self.extern_call(line, object, key, &[b"__", accessor].concat(), arguments, false);
 
-                return self.extern_call(line, object, key, &[b"__", accessor].concat(), arguments, false);
+                let declared = self.types.extern_property_type(access).filter(|_| accessor == b"get");
+
+                return match declared {
+                    Some(declared) => self.extern_read(line, access, call, declared),
+                    None => call,
+                };
             }
         };
         let line = self.line(access.object);
@@ -6836,7 +6855,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let is_method = self.is_method_value(expression, access.object, &access.property);
                     let object = self.expression(access.object);
                     match self.types.extern_property_key(expression) {
-                        Some(key) if !is_method => self.extern_call(line, object, key, b"__get", &[], false),
+                        Some(key) if !is_method => {
+                            let read = self.extern_call(line, object, key, b"__get", &[], false);
+
+                            self.extern_read(line, expression, read, self.types.expression_type(expression))
+                        }
                         _ => {
                             let member = self.member(&access.property);
 
@@ -6915,7 +6938,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let is_method = tested && self.is_method_value(expression, access.object, &access.property);
                 let object = if tested { self.expression(access.object) } else { self.null_safe_object(access.object) };
                 if !is_method && let Some(key) = self.types.extern_property_key(expression) {
-                    return self.extern_call(line, object, key, b"__get", &[], !tested);
+                    let read = self.extern_call(line, object, key, b"__get", &[], !tested);
+
+                    return self.extern_read(line, expression, read, self.types.expression_type(expression));
                 }
                 let member = self.member(&access.property);
 
@@ -11054,8 +11079,8 @@ enum AccessorPlace<'place, 'ast, 'key> {
     /// as [`Lowering::static_accessors`] writes them: the access and the name.
     Static(&'place PropertyAccess<'ast>, &'ast [u8]),
     /// `object.name` or `object?.name` of an `extern` property, spec section 14.3, read and written through the plain
-    /// PHP parent's `__get` and `__set` with its key: the object and the key.
-    Extern(&'place Expression<'ast>, &'key [u8]),
+    /// PHP parent's `__get` and `__set` with its key: the access, the object and the key.
+    Extern(&'place Expression<'ast>, &'place Expression<'ast>, &'key [u8]),
 }
 
 /// Whether a value of `r#type` is a `Set`, true, or a `Map`, false, where it may be one.

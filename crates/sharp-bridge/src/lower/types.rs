@@ -1060,8 +1060,10 @@ impl<'analysis> Types<'analysis> {
         r#type: &TUnion,
         in_static: bool,
     ) -> Option<(String, String)> {
-        if let Some(read) = self.extern_property_read(call) {
-            return Some((text(r#type, self.codebase, Parameter::Index), read));
+        // An `extern` property's read crosses and is checked where its `__get` call is lowered, as
+        // [`Self::extern_read_check`] says.
+        if self.extern_property_read(call).is_some() {
+            return None;
         }
         if let Some(name) = self.unchecked_result_call(call) {
             return needs_result_check(r#type)
@@ -1080,15 +1082,33 @@ impl<'analysis> Types<'analysis> {
         Some((text, name))
     }
 
-    /// The name of the `extern` property the read `read` reaches, as `App.Offer.products`, spec section 14.3: plain PHP's
-    /// `__get` gives its value with no type PHP checks, so [`Self::call_check_as`] checks it whole where it enters PHP#.
-    /// None for any other expression.
+    /// The type text and the name `\Sharp\Internal\returned` takes for the read `read` of an `extern` property, read as
+    /// `r#type`, spec section 14.3: plain PHP's `__get` gives its value with no type PHP checks, so it crosses in as the
+    /// whole type, each PHP array a `Map` or `Set` holds becoming the object, and is checked against it, named as
+    /// [`Self::extern_property_read`] names it. None for any other expression.
+    pub(crate) fn extern_read_check(&self, read: &Expression, r#type: &TUnion) -> Option<(String, String)> {
+        Some((text(r#type, self.codebase, Parameter::Index), self.extern_property_read(read)?))
+    }
+
+    /// The name of the `extern` property the read `read` reaches, as `App.Offer.products`, spec section 14.3. None for
+    /// any other expression.
     fn extern_property_read(&self, read: &Expression) -> Option<String> {
         let (class, variable) = self.accessed_property(read)?;
         let declaring = self.codebase.get_class_like(word(class))?.magic_property_ids.get(&word(&variable))?;
         let owner = self.codebase.get_class_like(*declaring).filter(|owner| owner.flags.is_sharp())?;
 
         Some(format!("{}.{}", class_text(owner.name, self.codebase), String::from_utf8_lossy(&variable[1..])))
+    }
+
+    /// The type the `extern` property the access `access` reaches declares, spec section 14.3, which its class keeps
+    /// among its magic properties, not its declared ones. None for any other access.
+    pub(crate) fn extern_property_type(&self, access: &Expression) -> Option<&'analysis TUnion> {
+        let (class, variable) = self.accessed_property(access)?;
+        let name = word(&variable);
+        let declaring = *self.codebase.get_class_like(word(class))?.magic_property_ids.get(&name)?;
+        let property = self.codebase.get_class_like(declaring)?.magic_properties.get(&name)?;
+
+        Some(&property.type_metadata.as_ref()?.type_union)
     }
 
     /// The key plain PHP's `__get` and `__set` receive for the `extern` property the read or write `access` reaches,

@@ -37779,7 +37779,29 @@ fn a_constructor_starts_a_machine_property_with_an_entry_point() {
     assert_eq!(
         refusals(taken, &[ORDER_STATUS]),
         [
-            "5:37 invalid-machine `Order.status` holds the machine `OrderStatus`, so its initial value is an entry point of `OrderStatus`, as `OrderStatus.open()`. | Start it with an entry point."
+            "5:37 invalid-machine `Order.status` holds the machine `OrderStatus`, so it can't be a constructor parameter: a caller could pass any case of `OrderStatus`. | Declare it in the class body: `public OrderStatus status { get; private set; } = OrderStatus.open();`"
+        ]
+    );
+}
+
+/// Spec section 17: a promoted constructor parameter of a machine type is refused, since a caller could pass any case,
+/// even when its default is an entry point. The refusal says so, and its help names the class-body property, with the
+/// parameter's own access, started by the machine's entry point.
+#[test]
+fn a_promoted_machine_parameter_names_the_class_body_form() {
+    let verification = (
+        "src/App/Verification.sharp",
+        "namespace App;\n\npublic machine Verification : string\n{\n    case Unverified = \"unverified\"\n    {\n        public Verification.Verified verify() => Verification.Verified;\n    }\n\n    final case Verified = \"verified\";\n\n    public static Verification.Unverified ask() => Verification.Unverified;\n}\n",
+    );
+    let record = (
+        "src/App/Record.sharp",
+        "namespace App;\n\ninternal class Record\n{\n    public Record(public string kind { get; }, public Verification verification { get; private set; } = Verification.ask()) { }\n}\n",
+    );
+
+    assert_eq!(
+        refusals(record, &[verification]),
+        [
+            "5:68 invalid-machine `Record.verification` holds the machine `Verification`, so it can't be a constructor parameter: a caller could pass any case of `Verification`. | Declare it in the class body: `public Verification verification { get; private set; } = Verification.ask();`"
         ]
     );
 }
