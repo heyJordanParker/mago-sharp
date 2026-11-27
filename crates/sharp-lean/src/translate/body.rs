@@ -267,6 +267,8 @@ impl<'body, 'program> Body<'body, 'program> {
                 } else if let Some(family) = self.class_hint_family(name, generic) {
                     // Spec section 25: a `Class<F>` of a family `F` of classes is one of its classes.
                     self.class_value_type(&family)
+                } else if names::short_name(name) == "Class" {
+                    CLASS_VALUE.to_owned()
                 } else if is_collection(name) {
                     self.unmodeled(hint.span(), "a collection".to_owned(), issues::list_members(&LIST_MEMBERS))
                 } else {
@@ -825,10 +827,11 @@ impl<'body, 'program> Body<'body, 'program> {
         (lhs, rhs): (&str, &str),
         negated: bool,
     ) -> String {
-        // Spec section 25: two class values of one family's classes are equal when they are the same class.
-        if let (Some(left), Some(right)) = (self.class_value_family(types.0), self.class_value_family(types.1))
-            && self.reach.same_class(&left, &right)
-        {
+        // Spec section 25: two class values of one family's classes are equal when they are the same class, and two of
+        // types no family names are values of `CLASS_VALUE`, which Lean's `==` compares.
+        let families = (self.class_value_family(types.0), self.class_value_family(types.1));
+        let same_family = matches!(&families, (Some(left), Some(right)) if self.reach.same_class(left, right));
+        if same_family || (families == (None, None) && is_class_value(types.0) && is_class_value(types.1)) {
             return if negated { format!("({lhs} != {rhs})") } else { format!("({lhs} == {rhs})") };
         }
         let nullable = (types.0.is_nullable(), types.1.is_nullable());
@@ -3015,6 +3018,15 @@ fn names_values(pattern: &Pattern) -> bool {
 /// `lines`, each `by` spaces further in.
 pub(crate) fn indented(lines: &[String], by: usize) -> impl Iterator<Item = String> + '_ {
     lines.iter().map(move |line| format!("{}{line}", " ".repeat(by)))
+}
+
+/// The Lean type of a class value of a type no family names, spec section 25, as `Class<Object>`: one opaque type of
+/// `Sharp/Lean/Interface.lean`, so a law holds and compares such values and knows nothing else about them.
+const CLASS_VALUE: &str = "(Interface \"Sharp.Class\")";
+
+/// Whether `r#type` is a class value and never null, spec section 25.
+fn is_class_value(r#type: &TUnion) -> bool {
+    matches!(r#type.types.as_ref(), [TAtomic::Scalar(TScalar::ClassLikeString(_))])
 }
 
 /// The `List` members a law reads, each by its name and the arguments it takes, spec section 28: [`Body::list_call`]

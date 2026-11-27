@@ -983,7 +983,14 @@ fn refused(law: &Law, program: &Program<'_>, laws: &Laws<'_>, errored: &HashSet<
         }
     };
     let problems = program.problems(&law.statement);
-    let mut issues: Vec<Issue> = problems.unmodeled.iter().map(|construct| issues::unmodeled(law, construct)).collect();
+    // A construct reached in two places of another file stands on the law twice with one message, and prints once.
+    let mut printed = HashSet::default();
+    let mut issues: Vec<Issue> = problems
+        .unmodeled
+        .iter()
+        .map(|construct| issues::unmodeled(law, construct))
+        .filter(|issue| printed.insert((issue.message.clone(), issue.primary_span())))
+        .collect();
     issues.extend(problems.missing.iter().map(|missing| untranslated(&missing.place, missing.file)));
     issues.extend(
         law.proof
