@@ -85,6 +85,7 @@ use crate::operation::FilesystemOperation;
 mod utils;
 
 pub mod change;
+pub mod clock;
 pub mod error;
 pub mod exclusion;
 pub mod file;

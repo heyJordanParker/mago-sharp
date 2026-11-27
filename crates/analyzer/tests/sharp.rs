@@ -32167,11 +32167,6 @@ fn a_use_of_a_class_s_statics_has_the_effects_of_their_initial_values() {
     );
 }
 
-const DISPOSABLE_LIBRARY: (&str, &str) = (
-    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Disposable.sharp",
-    include_str!("../../../../composer/library/Sharp/Disposable.sharp"),
-);
-
 /// Spec section 2: a `using` local's block calls `dispose()` on the value it holds when it ends, so the value is a
 /// `Disposable`, as `Archive` is. Any other value is refused.
 #[test]
@@ -32185,10 +32180,7 @@ fn a_using_local_holds_a_disposable() {
         "namespace App.Shop;\n\npublic class Export\n{\n    public int count()\n    {\n        using archive = new Archive();\n        using total = 3;\n        return total;\n    }\n}\n",
     );
 
-    assert_eq!(
-        messages(export, &[archive, DISPOSABLE_LIBRARY]),
-        ["A `using` local holds a `Disposable`, and the type of `3` is `int`."]
-    );
+    assert_eq!(messages(export, &[archive]), ["A `using` local holds a `Disposable`, and the type of `3` is `int`."]);
 }
 
 /// Spec sections 2 and 29: a `Disposable`'s `dispose()` may have any effect, as `Transaction`'s reads the database,
@@ -32212,11 +32204,28 @@ fn a_using_local_carries_the_effects_of_its_value_s_dispose() {
     );
 
     assert_eq!(
-        effect_issues(&[report, transaction, database, counter, DISPOSABLE_LIBRARY]),
+        effect_issues(&[report, transaction, database, counter]),
         [
             "src/App/Shop/Report.sharp:9:9 incompatible-effects: `Report.count` reaches `Transaction.dispose`, which calls `App.Shop.Database.rows` with the effect `App.Shop.Database`, so the pure `Counter.count` cannot accept it."
         ]
     );
+}
+
+const ZIP_ARCHIVE_LIBRARY: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/IO/ZipArchive.sharp",
+    include_str!("../../../../composer/library/Sharp/IO/ZipArchive.sharp"),
+);
+
+/// Spec sections 2 and 29: a `ZipArchive` is `Disposable`, so a `using` local holds it and writes it when its block
+/// ends, and it has no `close()`.
+#[test]
+fn a_zip_archive_is_disposed_by_its_using_local_and_has_no_close() {
+    let export = (
+        "app/Shop/Export.sharp",
+        "namespace App.Shop;\n\nimport Sharp.IO.ZipArchive;\n\npublic class Export\n{\n    public string? readme(string path)\n    {\n        using archive = ZipArchive.open(path);\n        return archive.read(\"readme.txt\");\n    }\n\n    public void closed(string path)\n    {\n        using archive = ZipArchive.open(path);\n        archive.close();\n    }\n}\n",
+    );
+
+    assert_eq!(messages(export, &[ZIP_ARCHIVE_LIBRARY]), ["Method `ZipArchive.close` does not exist."]);
 }
 
 const BEHAVIOR_LIBRARY: (&str, &str) = (
@@ -33312,6 +33321,55 @@ fn decode_of_a_list_takes_its_elements_readers_effects() {
         effect_issues(&[memos, count, saved_list, MEMO, reading, disk, stub, saved, note, a, b, c, d, e, f, g]),
         [
             "app/Shop/SavedListReader.sharp:5:35 incompatible-effects: `SavedListReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
+/// The standard library's `Json`, `JsonValue`, `Query` and `Url`, which `Json.decode<T>` and `Query.decode<T>` run.
+const TEXT_READERS: [(&str, &str); 4] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Json.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/Json.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/JsonValue.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/JsonValue.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Query.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/Query.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Net/Url.sharp",
+        include_str!("../../../../composer/library/Sharp/Net/Url.sharp"),
+    ),
+];
+
+/// Spec sections 23, 24 and 29, the program on #1090: `Json.decode<T>` and `Query.decode<T>` read their text, then
+/// build `T` as `typeof(T).decode` does, so each has the effects of its text read and of the readers `T` holds. A
+/// struct, which has no effects, calls them for a `Map<string, string>`. A pure method that decodes a `Saved`, whose
+/// constructor writes to the database, is refused as `typeof(Saved).decode` is.
+#[test]
+fn json_and_query_decode_have_the_effects_of_the_readers_their_type_argument_holds() {
+    let probe = (
+        "app/Shop/DecodeProbe.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\nimport Sharp.Encoding.Query;\n\ninternal struct DecodeProbe\n{\n    internal int count() => this.byJson().count() + this.byType().count() + this.byQuery().count();\n\n    private Map<string, string> byJson() => Json.decode<Map<string, string>>(\"{\\\"name\\\":\\\"ada\\\"}\");\n\n    private Map<string, string> byType() => typeof(Map<string, string>).decode([\"name\": \"ada\"]) as Map<string, string> ?? throw new LogicException(\"decode built no map.\");\n\n    private Map<string, string> byQuery() => Query.decode<Map<string, string>>(\"name=ada\");\n}\n",
+    );
+    let saved_json = (
+        "app/Shop/SavedJsonReader.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class SavedJsonReader : Reading\n{\n    public Any? read(Any? row) => Json.decode<Saved>(\"{}\");\n}\n",
+    );
+    let [disk, stub, saved, note] = BUILT;
+    let [reading, _] = READING;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+    let [json, json_value, query, url] = TEXT_READERS;
+
+    assert_eq!(
+        effect_issues(&[
+            probe, saved_json, reading, disk, stub, saved, note, json, json_value, query, url, a, b, c, d, e, f, g
+        ]),
+        [
+            "app/Shop/SavedJsonReader.sharp:7:35 incompatible-effects: `SavedJsonReader.read` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
         ]
     );
 }
@@ -37904,6 +37962,25 @@ const PAYMENTS: [(&str, &str); 3] = [
 /// The section 31 tests' other files: the standard library's `Result` and `Error`, then `PAYMENTS`.
 fn payments() -> Vec<(&'static str, &'static str)> {
     RESULT_LIBRARY.iter().chain(&PAYMENTS).copied().collect()
+}
+
+/// Spec section 31, as Rust's `#[must_use]` on `Result`: a `Result` holds a failure the caller must handle, so a
+/// statement that discards one is refused, a call's and a case's alike. A `Result` the code keeps, and the `Ok` value
+/// `try` gives, are never refused.
+#[test]
+fn a_statement_that_discards_a_result_is_refused() {
+    let code = "namespace App;\n\nclass Checkout\n{\n    public Checkout(private Gateway gateway) { }\n\n    public Result<int, PaymentError> run()\n    {\n        this.gateway.charge();\n        const order = try this.gateway.charge();\n        const kept = this.gateway.charge();\n        Result<int, PaymentError>.Ok(order.total);\n        try this.gateway.charge();\n        return Result.Ok(order.total);\n    }\n}\n";
+
+    let refused = |line: u32, written: &str| {
+        format!(
+            "{line}:9 discarded-result `{written}` returns a Result: handle it with try, match, ok() or unwrap(). | A dropped Result loses its failure: pass it up with `try`, or keep the Result in a `const`."
+        )
+    };
+
+    assert_eq!(
+        refusals(("src/App/Checkout.sharp", code), &payments()),
+        [refused(9, "this.gateway.charge"), refused(12, "Result<int, PaymentError>.Ok")]
+    );
 }
 
 /// Spec section 31: `try` gives the `Ok` value, and on `Err` the method returns an `Err` holding the same error. It is a

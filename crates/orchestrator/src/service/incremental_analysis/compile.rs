@@ -138,7 +138,7 @@ pub type Compiled<Written = Vec<u8>> = (Vec<(FileId, Compilation<Written>)>, Com
 type Lowering = (Result<LoweredUnit, IssueCollection>, Option<Translation>);
 
 /// A file a folder keeps or lowered, its compilation there, and what the next compile into the folder keeps of it.
-type Made<'files, Written> = (&'files Arc<File>, Compilation<Written>, Option<CompiledFile>);
+type Made<'files, Written> = (&'files Arc<File>, Compilation<Written>, Option<Record>);
 
 /// What a compile holds of one folder it compiles into while it lowers.
 struct Target<'folder, Written> {
@@ -149,6 +149,8 @@ struct Target<'folder, Written> {
     unrefused: HashMap<FileId, IssueCollection>,
     /// Each file that keeps its compiled file in the folder.
     kept: HashMap<FileId, KeptFile<'folder>>,
+    /// Each file that keeps the refusal the last compile into the folder gave it.
+    kept_refusals: HashMap<FileId, &'folder RefusedFile>,
     /// Each file lowered for the folder, by its place in the compile's lowerings.
     lowered: HashMap<FileId, usize>,
 }
@@ -159,7 +161,14 @@ impl<'folder, Written> Target<'folder, Written> {
         errors: HashMap<FileId, IssueCollection>,
         unrefused: HashMap<FileId, IssueCollection>,
     ) -> Self {
-        Self { folder, errors, unrefused, kept: HashMap::default(), lowered: HashMap::default() }
+        Self {
+            folder,
+            errors,
+            unrefused,
+            kept: HashMap::default(),
+            kept_refusals: HashMap::default(),
+            lowered: HashMap::default(),
+        }
     }
 
     /// The inline forms of the files of `library` the folder lowered, from `lowerings`, then of those it keeps.
@@ -199,6 +208,11 @@ impl<Written> Inputs<'_, Written> {
     }
 }
 
+/// `file` refused with `issues`, and `refusal` for the next compile to keep.
+fn refused_with<Written>(file: &Arc<File>, issues: IssueCollection, refusal: RefusedFile) -> Made<'_, Written> {
+    (file, Compilation::Refused(issues), Some(Record::Refused(refusal)))
+}
+
 /// The fingerprint of each of `forms`, by its name.
 fn fingerprints_of(forms: &[(Vec<u8>, InlineForm)]) -> HashMap<Vec<u8>, u64> {
     forms.iter().map(|(name, form)| (name.clone(), form.fingerprint())).collect()
@@ -224,6 +238,24 @@ struct LoweredUnit {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CompiledFiles {
     files: BTreeMap<Vec<u8>, CompiledFile>,
+    /// Each `.sharp` file the last compile refused, by its name, so the next compile refuses it again without lowering
+    /// it while its refusal holds.
+    refused: BTreeMap<Vec<u8>, RefusedFile>,
+}
+
+/// Why [`CompiledFiles`] holds a file refused, with the issues that refused it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum RefusedFile {
+    /// The errors the analysis reported in it, which hold while the next compile's analysis reports the same.
+    Errors(IssueCollection),
+    /// A law that is not proved, which holds while the file's key does and no law that reaches it is checked again.
+    Laws(CompiledFile, IssueCollection),
+}
+
+/// What the next compile into a folder keeps of one file.
+enum Record {
+    Accepted(CompiledFile),
+    Refused(RefusedFile),
 }
 
 /// What [`CompiledFiles`] keeps of one file: its compiled file's key, the names of the reads its lowering made, which
@@ -259,6 +291,12 @@ impl CompiledFiles {
         })?);
 
         Ok(bytes)
+    }
+
+    /// Forgets each refusal of a law, as a compile whose laws' check ended a law on what no record holds keeps them, so
+    /// the next compile checks those laws again.
+    pub fn forget_law_refusals(&mut self) {
+        self.refused.retain(|_, refused| matches!(refused, RefusedFile::Errors(_)));
     }
 
     /// The files `bytes` hold, or none when a checker build other than `checker` or another `configuration` compiled
@@ -711,19 +749,46 @@ impl IncrementalAnalysisService {
             let hosts_forms: InlineForms = hosts_forms.into_iter().collect();
             self.lower_into(hosts, &rest, lowered, &hosts_forms, &reach, &effects, session.as_ref(), &mut lowerings)?;
         }
+        // The laws of a file are checked again when it or a file they reach was lowered again, with each file they reach
+        // that kept its compiled file translated beside them. A file that kept the refusal of a law checked again is
+        // lowered for that check, which may reach the laws of more files.
+        let (lowered_again, rechecked) = loop {
+            let lowered_again: HashSet<FileId> = first.lowered.keys().copied().collect();
+            let rechecked: HashSet<FileId> = reach
+                .law_files()
+                .map(|law_file| reach.files(law_file))
+                .filter(|reached| reached.iter().any(|file_id| lowered_again.contains(file_id)))
+                .flatten()
+                .copied()
+                .collect();
+            let refusals_checked_again: Vec<&Arc<File>> = rest
+                .iter()
+                .filter(|file| {
+                    rechecked.contains(&file.id)
+                        && matches!(first.kept_refusals.get(&file.id), Some(RefusedFile::Laws(..)))
+                })
+                .copied()
+                .collect();
+            if refusals_checked_again.is_empty() {
+                break (lowered_again, rechecked);
+            }
+            for file in &refusals_checked_again {
+                first.kept_refusals.remove(&file.id);
+            }
+            self.lower_into(
+                &mut first,
+                &refusals_checked_again,
+                None,
+                &forms,
+                &reach,
+                &effects,
+                session.as_ref(),
+                &mut lowerings,
+            )?;
+        };
         lowering.end();
 
         let laws = Phase::start("laws");
-        // The laws of a file are checked again when it or a file they reach was lowered again, with each file they reach
-        // that kept its compiled file translated beside them.
-        let lowered_again: HashSet<FileId> = first.lowered.keys().copied().collect();
-        let rechecked: HashSet<FileId> = reach
-            .law_files()
-            .map(|law_file| reach.files(law_file))
-            .filter(|reached| reached.iter().any(|file_id| lowered_again.contains(file_id)))
-            .flatten()
-            .copied()
-            .collect();
         let translated_only: Vec<&Arc<File>> =
             files.iter().filter(|file| rechecked.contains(&file.id) && first.kept.contains_key(&file.id)).collect();
         let refusals = (&first.errors, &first.unrefused);
@@ -734,10 +799,12 @@ impl IncrementalAnalysisService {
             })?;
         translation.end();
         tracing::debug!(
-            "Kept the compiled file of {} PHP# files, lowered {} again, and translated {} more for the laws that reach them.",
+            "Kept the compiled file of {} PHP# files, lowered {} again, and translated {} more for the laws that reach them. \
+             Kept the refusal of {} more.",
             first.kept.len(),
             lowered_again.len(),
             translated_only.len(),
+            first.kept_refusals.len(),
         );
         // Past the laws' translation only `law_refusals` reads what the analysis gave the lowering, of each file a law
         // reaches, until the next analysis replaces it all, so every other file's goes before the compile stamps and
@@ -876,7 +943,7 @@ impl IncrementalAnalysisService {
         effects: &Effects,
     ) -> Result<(), OrchestratorError> {
         for file in files {
-            let Target { folder, errors, kept, .. } = &mut *target;
+            let Target { folder, errors, kept, kept_refusals, .. } = &mut *target;
             if let Some(found) = self.kept(
                 file,
                 checker,
@@ -889,13 +956,44 @@ impl IncrementalAnalysisService {
                 errors,
             )? {
                 kept.insert(file.id, found);
+            } else if let Some(refusal) = self.kept_refusal(file, checker, folder.last, reads, forms, effects, errors) {
+                kept_refusals.insert(file.id, refusal);
             }
         }
 
         Ok(())
     }
 
-    /// Lowers for `target` each of `files` its folder keeps no compiled file of, with `forms` to inline, as
+    /// The refusal `last` holds of `file`, when it holds for the checker build `checker`: the analysis reports the
+    /// errors that refused it, or no error refuses it, it is no standard library file, whose forms the others' lowering
+    /// reads first, and its key, as [`Self::kept`] reads it, is the one `last` kept with the law issues. A law refusal
+    /// holds only while no law that reaches the file is checked again, which
+    /// [`IncrementalAnalysisService::compile`] checks once the files are lowered.
+    #[allow(clippy::too_many_arguments)]
+    fn kept_refusal<'last>(
+        &self,
+        file: &File,
+        checker: [u8; 16],
+        last: &'last CompiledFiles,
+        reads: &HashMap<FileId, (Reads, HashSet<FileId>)>,
+        forms: &HashMap<Vec<u8>, u64>,
+        effects: &Effects,
+        errors: &HashMap<FileId, IssueCollection>,
+    ) -> Option<&'last RefusedFile> {
+        let refusal = last.refused.get(file.name.as_ref())?;
+        let holds = match refusal {
+            RefusedFile::Errors(issues) => errors.get(&file.id) == Some(issues),
+            RefusedFile::Laws(record, _) => {
+                !file.is_standard_library
+                    && !errors.contains_key(&file.id)
+                    && self.current_key(file, checker, record, reads, forms, effects) == record.key
+            }
+        };
+
+        holds.then_some(refusal)
+    }
+
+    /// Lowers for `target` each of `files` its folder keeps no compiled file or refusal of, with `forms` to inline, as
     /// [`Self::lower_all`] lowers it, into `lowerings`. A file `lowered` lowered and neither target refuses takes that
     /// lowering instead, since a file's lowering rests only on its errors and the forms it inlines, which `lowered`
     /// passes only when they are `target`'s.
@@ -912,7 +1010,10 @@ impl IncrementalAnalysisService {
         lowerings: &mut Vec<Lowering>,
     ) -> Result<(), OrchestratorError> {
         let mut stale = Vec::new();
-        for file in files.iter().filter(|file| !target.kept.contains_key(&file.id)) {
+        for file in files
+            .iter()
+            .filter(|file| !target.kept.contains_key(&file.id) && !target.kept_refusals.contains_key(&file.id))
+        {
             let taken = lowered
                 .filter(|lowered| !lowered.errors.contains_key(&file.id) && !target.errors.contains_key(&file.id))
                 .and_then(|lowered| lowered.lowered.get(&file.id));
@@ -1069,30 +1170,44 @@ impl IncrementalAnalysisService {
                 .map(|(path, declarations_hash)| Input { declarations_hash, ..stamps[&path].clone() })
                 .collect()
         };
-        // Each file the folder keeps or lowered, in file name order, with the issues that refuse it, its inputs and what
-        // it keeps.
+        // Each file the folder keeps or lowered, in file name order, with the issues that refuse it, its inputs, what it
+        // keeps and the refusal it keeps.
         let made: Vec<_> = files
             .iter()
             .filter_map(|file| {
                 let kept = target.kept.remove(&file.id);
-                (kept.is_some() || target.lowered.contains_key(&file.id))
-                    .then(|| (file, refused.remove(&file.id), input_paths.remove(&file.id).unwrap_or_default(), kept))
+                let kept_refusal = target.kept_refusals.remove(&file.id);
+                (kept.is_some() || kept_refusal.is_some() || target.lowered.contains_key(&file.id)).then(|| {
+                    (
+                        file,
+                        refused.remove(&file.id),
+                        input_paths.remove(&file.id).unwrap_or_default(),
+                        kept,
+                        kept_refusal,
+                    )
+                })
             })
             .collect();
-        let Target { folder: Folder { compiled, write, .. }, lowered, .. } = &target;
+        let Target { folder: Folder { compiled, write, .. }, errors, lowered, .. } = &target;
         let made: Vec<Result<Made<'_, Written>, OrchestratorError>> = made
             .into_par_iter()
-            .map(|(file, issues, paths, kept)| {
+            .map(|(file, issues, paths, kept, kept_refusal)| {
+                if let Some(kept_refusal) = kept_refusal {
+                    let (RefusedFile::Errors(issues) | RefusedFile::Laws(_, issues)) = kept_refusal;
+                    return Ok(refused_with(file, issues.clone(), kept_refusal.clone()));
+                }
                 let declarations_hash = read_by_declarations.get(&file.id).copied().unwrap_or_default();
                 if let Some((bytes, record)) = kept {
                     if let Some(issues) = issues {
-                        return Ok((file, Compilation::Refused(issues), None));
+                        return Ok(refused_with(file, issues.clone(), RefusedFile::Laws(record.clone(), issues)));
                     }
                     let inputs = stamped(paths);
                     let stamps = stamps_hash(declarations_hash, &inputs, standard_library);
                     let next = CompiledFile { stamps, ..record.clone() };
                     let bytes = match bytes {
-                        None if stamps == record.stamps => return Ok((file, Compilation::Kept, Some(next))),
+                        None if stamps == record.stamps => {
+                            return Ok((file, Compilation::Kept, Some(Record::Accepted(next))));
+                        }
                         Some(bytes) => bytes,
                         None => compiled(file)?
                             .filter(|bytes| !unit::is_stale(bytes, checker, record.key))
@@ -1108,41 +1223,57 @@ impl IncrementalAnalysisService {
                         unreachable!("a compiled file the compile keeps is one `unit::is_stale` read");
                     };
 
-                    return Ok((file, Compilation::Accepted(write(file, bytes)), Some(next)));
+                    return Ok((file, Compilation::Accepted(write(file, bytes)), Some(Record::Accepted(next))));
                 }
-                match (&lowerings[lowered[&file.id]].0, issues) {
-                    (Ok(_), Some(issues)) => Ok((file, Compilation::Refused(issues), None)),
-                    (Err(issues), _) => Ok((file, Compilation::Refused(issues.clone()), None)),
-                    (Ok(LoweredUnit { unit, forms, namespace_classes, reaches_extension }), None) => {
-                        let mut reads = reads.get(&file.id).map(|(reads, _)| reads.clone()).unwrap_or_default();
-                        reads.inlined = unit.inlined().to_vec();
-                        reads.function_types = unit.function_types().to_vec();
-                        let key = key(checker, source_hash(&file.contents), &reads);
-                        let inputs = stamped(paths);
-                        let stamps = stamps_hash(declarations_hash, &inputs, standard_library);
-                        let next = CompiledFile {
-                            key,
-                            inlined: reads.inlined.into_iter().map(|read| read.name).collect(),
-                            function_types: reads.function_types.into_iter().map(|read| read.name).collect(),
-                            forms: forms.clone(),
-                            namespace_classes: namespace_classes.clone(),
-                            reaches_extension: *reaches_extension,
-                            stamps,
-                        };
-                        let bytes =
-                            encode(unit, &file.contents, key, declarations_hash, &inputs, checker, standard_library);
-
-                        Ok((file, Compilation::Accepted(write(file, bytes)), Some(next)))
+                let LoweredUnit { unit, forms, namespace_classes, reaches_extension } = match &lowerings
+                    [lowered[&file.id]]
+                    .0
+                {
+                    Ok(lowered) => lowered,
+                    Err(issues) if errors.get(&file.id).is_none() => {
+                        return Ok((file, Compilation::Refused(issues.clone()), None));
                     }
+                    Err(issues) => return Ok(refused_with(file, issues.clone(), RefusedFile::Errors(issues.clone()))),
+                };
+                let mut reads = reads.get(&file.id).map(|(reads, _)| reads.clone()).unwrap_or_default();
+                reads.inlined = unit.inlined().to_vec();
+                reads.function_types = unit.function_types().to_vec();
+                let key = key(checker, source_hash(&file.contents), &reads);
+                let next = CompiledFile {
+                    key,
+                    inlined: reads.inlined.into_iter().map(|read| read.name).collect(),
+                    function_types: reads.function_types.into_iter().map(|read| read.name).collect(),
+                    forms: forms.clone(),
+                    namespace_classes: namespace_classes.clone(),
+                    reaches_extension: *reaches_extension,
+                    stamps: [0; 16],
+                };
+                if let Some(issues) = issues {
+                    return Ok(refused_with(file, issues.clone(), RefusedFile::Laws(next, issues)));
                 }
+                let inputs = stamped(paths);
+                let stamps = stamps_hash(declarations_hash, &inputs, standard_library);
+                let bytes = encode(unit, &file.contents, key, declarations_hash, &inputs, checker, standard_library);
+
+                Ok((
+                    file,
+                    Compilation::Accepted(write(file, bytes)),
+                    Some(Record::Accepted(CompiledFile { stamps, ..next })),
+                ))
             })
             .collect();
         let mut next = CompiledFiles::default();
         let mut compilations = Vec::with_capacity(made.len());
         for made in made {
             let (file, compilation, record) = made?;
-            if let Some(record) = record {
-                next.files.insert(file.name.to_vec(), record);
+            match record {
+                Some(Record::Accepted(record)) => {
+                    next.files.insert(file.name.to_vec(), record);
+                }
+                Some(Record::Refused(refusal)) => {
+                    next.refused.insert(file.name.to_vec(), refusal);
+                }
+                None => {}
             }
             compilations.push((file.id, compilation));
         }
@@ -1173,6 +1304,29 @@ impl IncrementalAnalysisService {
         let Some(record) = last.files.get(file.name.as_ref()).filter(|_| !errors.contains_key(&file.id)) else {
             return Ok(None);
         };
+        let key = self.current_key(file, checker, record, reads, forms, effects);
+        if key != record.key {
+            return Ok(None);
+        }
+        if intact(file) {
+            return Ok(Some((None, record)));
+        }
+
+        Ok(compiled(file)?.filter(|bytes| !unit::is_stale(bytes, checker, key)).map(|bytes| (Some(bytes), record)))
+    }
+
+    /// The key of `file` for the checker build `checker`: the hash of its source and the current fingerprints of the
+    /// reads `record` kept, as `reads` holds the declarations, inferred returns and sets of names it reads, `forms` the
+    /// fingerprint of each library form by its name and `effects` its function types' effects.
+    fn current_key(
+        &self,
+        file: &File,
+        checker: [u8; 16],
+        record: &CompiledFile,
+        reads: &HashMap<FileId, (Reads, HashSet<FileId>)>,
+        forms: &HashMap<Vec<u8>, u64>,
+        effects: &Effects,
+    ) -> [u8; 16] {
         let read = reads.get(&file.id).map(|(reads, _)| reads);
         let current = Reads {
             signatures: read.map(|reads| reads.signatures.clone()).unwrap_or_default(),
@@ -1192,15 +1346,8 @@ impl IncrementalAnalysisService {
                 })
                 .collect(),
         };
-        let key = key(checker, source_hash(&file.contents), &current);
-        if key != record.key {
-            return Ok(None);
-        }
-        if intact(file) {
-            return Ok(Some((None, record)));
-        }
 
-        Ok(compiled(file)?.filter(|bytes| !unit::is_stale(bytes, checker, key)).map(|bytes| (Some(bytes), record)))
+        key(checker, source_hash(&file.contents), &current)
     }
 
     /// Refuses each plain PHP file that declares a class extending or implementing a PHP# type that it doesn't satisfy,
@@ -3535,7 +3682,19 @@ mod tests {
         last: &CompiledFiles,
         previous: &BTreeMap<String, Compilation>,
         stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
+        intact: impl FnMut(&File) -> bool,
+    ) -> (BTreeMap<String, Compilation>, CompiledFiles, BTreeSet<String>) {
+        compile_keeping_checked(service, last, previous, stamp, intact, proved)
+    }
+
+    /// What [`compile_keeping`] gives, with `check` checking the laws.
+    fn compile_keeping_checked(
+        service: &mut IncrementalAnalysisService,
+        last: &CompiledFiles,
+        previous: &BTreeMap<String, Compilation>,
+        stamp: impl Fn(&[u8]) -> Result<Option<Input>, DatabaseError> + Sync,
         mut intact: impl FnMut(&File) -> bool,
+        check: impl FnOnce(Vec<Translation>, &Reach, &HashSet<FileId>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
     ) -> (BTreeMap<String, Compilation>, CompiledFiles, BTreeSet<String>) {
         let asked = std::sync::Mutex::new(BTreeSet::new());
         let compiled = |file: &File| {
@@ -3549,7 +3708,7 @@ mod tests {
         };
         let folder = Folder { last, compiled: &compiled, intact: &mut intact, write: &unwritten };
         let ((compiled, kept), _) = service
-            .compile(folder, None, stamp, proved, CHECKER, &Library::default(), |issues| issues)
+            .compile(folder, None, stamp, check, CHECKER, &Library::default(), |issues| issues)
             .expect("the compile runs");
         let database = service.database();
         let compiled = compiled
@@ -3563,6 +3722,94 @@ mod tests {
             .collect();
 
         (compiled, kept, asked.into_inner().unwrap())
+    }
+
+    /// A compile after one that refused a file for its errors, and a law that reaches it, checks no law again and
+    /// refuses both with the messages the last compile gave, while nothing changed, as a clean compile does.
+    #[test]
+    fn a_compile_after_no_change_checks_no_law_again_and_keeps_each_refusal() {
+        let database = project(&[
+            ("app/Bag.sharp", "namespace App;\n\npublic class Bag\n{\n    public int count() => \"one\";\n}\n"),
+            (
+                "app/Shelf.sharp",
+                "namespace App;\n\npublic class Shelf\n{\n    law holdsOne(Bag bag) => bag.count() == 1;\n}\n",
+            ),
+            ("app/Order.sharp", ORDER),
+        ]);
+        let checked = std::cell::RefCell::new(Vec::new());
+        let check = |translations: Vec<Translation>, _: &Reach, errored: &HashSet<FileId>| {
+            checked.borrow_mut().push(translations.len());
+            Ok(refusals(&translations, errored))
+        };
+        let mut service = analyzed(&database);
+        let (first, last, _) = compile_keeping_checked(
+            &mut service,
+            &CompiledFiles::default(),
+            &BTreeMap::new(),
+            empty_stamp,
+            |_| false,
+            check,
+        );
+        let last = CompiledFiles::decode(&last.encode(CHECKER, [0; 16]).expect("the record encodes"), CHECKER, [0; 16]);
+        service.analyze_incremental(None).expect("the warm path runs");
+
+        let (second, _, _) = compile_keeping_checked(&mut service, &last, &first, empty_stamp, |_| false, check);
+
+        let refused = |compiled: &BTreeMap<String, Compilation>| {
+            ["app/Bag.sharp", "app/Shelf.sharp"].map(|name| match compiled.get(name) {
+                Some(Compilation::Refused(issues)) => messages(issues),
+                other => panic!("{name} is not refused: {other:?}"),
+            })
+        };
+        assert_eq!(refused(&second), refused(&first));
+        assert_eq!(checked.into_inner()[1], 0, "the second compile checks a law again");
+    }
+
+    /// Once an edit fixes the file whose errors refused it and the law that reaches it, a compile after the one that
+    /// refused both lowers the file and checks the law again, and gives what a clean compile of the edited files gives.
+    #[test]
+    fn a_compile_after_an_edit_that_fixes_a_refused_file_gives_what_a_clean_compile_gives() {
+        let files = |count: &str| {
+            project(&[
+                (
+                    "app/Bag.sharp",
+                    &format!("namespace App;\n\npublic class Bag\n{{\n    public int count() => {count};\n}}\n"),
+                ),
+                (
+                    "app/Shelf.sharp",
+                    "namespace App;\n\npublic class Shelf\n{\n    law holdsOne(Bag bag) => bag.count() == 1;\n}\n",
+                ),
+                ("app/Order.sharp", ORDER),
+            ])
+        };
+        let check =
+            |translations: Vec<Translation>, _: &Reach, errored: &HashSet<FileId>| Ok(refusals(&translations, errored));
+        let edited = files("1");
+        let mut service = analyzed(&files("\"one\""));
+        let (first, last, _) = compile_keeping_checked(
+            &mut service,
+            &CompiledFiles::default(),
+            &BTreeMap::new(),
+            empty_stamp,
+            |_| false,
+            check,
+        );
+        let last = CompiledFiles::decode(&last.encode(CHECKER, [0; 16]).expect("the record encodes"), CHECKER, [0; 16]);
+        service.update_database(edited.read_only());
+        service.analyze_incremental(None).expect("the warm path runs");
+
+        let (second, _, _) = compile_keeping_checked(&mut service, &last, &first, empty_stamp, |_| false, check);
+
+        let (clean, _, _) = compile_keeping_checked(
+            &mut analyzed(&edited),
+            &CompiledFiles::default(),
+            &BTreeMap::new(),
+            empty_stamp,
+            |_| false,
+            check,
+        );
+        assert!(matches!(first.get("app/Shelf.sharp"), Some(Compilation::Refused(_))), "{first:?}");
+        assert_eq!(whole(&second), whole(&clean));
     }
 
     /// Each compiled file's bytes, and each refused file's messages.
