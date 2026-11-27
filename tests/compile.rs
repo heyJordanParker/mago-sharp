@@ -65,6 +65,7 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
     assert_eq!(
         files_under(&root.join(".sharp")),
         [
+            Path::new("analysis.bin"),
             Path::new("autoload.php"),
             Path::new("compiled.bin"),
             Path::new("current/app/Order.sharpc"),
@@ -2729,6 +2730,7 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
     assert_eq!(
         files_under(&root.join(".sharp")),
         [
+            Path::new("analysis.bin"),
             Path::new("autoload.php"),
             Path::new("compiled.bin"),
             Path::new("current/generation.lock"),
@@ -2811,6 +2813,7 @@ fn compile_reports_a_link_to_a_file_outside_the_project_and_writes_no_compiled_f
     assert_eq!(
         files_under(&root.join(".sharp")),
         [
+            Path::new("analysis.bin"),
             Path::new("autoload.php"),
             Path::new("compiled.bin"),
             Path::new("current/app/Order.sharpc"),
@@ -4898,6 +4901,93 @@ fn a_transaction_s_body_emits_and_reaches_the_database_and_sending_mail_in_it_is
         ],
         "{}",
         printed(&refused)
+    );
+}
+
+/// `app/Cart.sharp`, which calls `Order.total`, so a signature edit of `Order` reaches it.
+const CART: &str = "namespace App;\n\npublic class Cart\n{\n    public int sum() => new Order().total(1);\n}\n";
+
+/// The key of each compiled file under the `.sharp` folder of `root`, by its path there. A compiled file's inputs hold
+/// their modification times, so its key, not its bytes, tells the code it holds.
+fn compiled_keys(root: &Path) -> Vec<(PathBuf, [u8; 16])> {
+    let folder = root.join(".sharp");
+    files_under(&folder)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "sharpc"))
+        .map(|path| {
+            let key = header(&std::fs::read(folder.join(&path)).unwrap()).unwrap().key;
+            (path, key)
+        })
+        .collect()
+}
+
+/// A compile of the project with `app/Cart.sharp`, then `between` and `edit`, then a compile again, which restores the
+/// analysis the first compile left, prints what a full compile of a fresh copy with `edit` prints, and writes compiled
+/// files of the same keys.
+fn assert_a_compile_after_an_edit_matches_a_full_compile(between: impl Fn(&Path), edit: impl Fn(&Path)) {
+    let seeded = project(ORDER, MONEY);
+    write(seeded.path(), "app/Cart.sharp", CART);
+    compile_succeeds(seeded.path());
+    assert!(seeded.path().join(".sharp/analysis.bin").is_file());
+    between(seeded.path());
+    edit(seeded.path());
+
+    let after = compile_lines(seeded.path());
+
+    let fresh = project(ORDER, MONEY);
+    write(fresh.path(), "app/Cart.sharp", CART);
+    edit(fresh.path());
+    let full = compile_lines(fresh.path());
+    assert_eq!(after.status.code(), full.status.code(), "{}", printed(&after));
+    assert_eq!(issue_lines(&after), issue_lines(&full), "{}", printed(&after));
+    assert_eq!(compiled_keys(seeded.path()), compiled_keys(fresh.path()));
+}
+
+/// After a body edit, a compile restores the analysis the last compile left and gives what a full compile gives.
+#[test]
+fn a_compile_after_a_body_edit_gives_what_a_full_compile_gives() {
+    assert_a_compile_after_an_edit_matches_a_full_compile(
+        |_| {},
+        |root| write(root, "app/Order.sharp", &ORDER.replace("extra + 1", "extra + 2")),
+    );
+}
+
+/// After a signature edit that breaks a caller in another file, a compile restores the last analysis, checks the
+/// caller again, and refuses it as a full compile does.
+#[test]
+fn a_compile_after_a_signature_edit_checks_each_caller_again_as_a_full_compile_does() {
+    assert_a_compile_after_an_edit_matches_a_full_compile(
+        |_| {},
+        |root| write(root, "app/Order.sharp", &ORDER.replace("int total(int extra)", "int total(string extra)")),
+    );
+}
+
+/// After a file is added, and after one is deleted, a compile gives what a full compile gives.
+#[test]
+fn a_compile_after_a_file_is_added_or_deleted_gives_what_a_full_compile_gives() {
+    assert_a_compile_after_an_edit_matches_a_full_compile(
+        |_| {},
+        |root| {
+            write(root, "app/Extra.sharp", "namespace App;\n\npublic class Extra\n{\n    public int one() => 1;\n}\n")
+        },
+    );
+    assert_a_compile_after_an_edit_matches_a_full_compile(
+        |_| {},
+        |root| std::fs::remove_file(root.join("app/Cart.sharp")).unwrap(),
+    );
+}
+
+/// An analysis the compile can't read, here one damaged after the compile that wrote it, leaves the next compile to
+/// analyze from scratch, which gives what a full compile gives.
+#[test]
+fn a_compile_after_a_damaged_analysis_analyzes_from_scratch() {
+    assert_a_compile_after_an_edit_matches_a_full_compile(
+        |root| {
+            let path = root.join(".sharp/analysis.bin");
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+        },
+        |root| write(root, "app/Order.sharp", &ORDER.replace("extra + 1", "extra + 2")),
     );
 }
 

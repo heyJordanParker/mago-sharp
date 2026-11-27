@@ -143,6 +143,12 @@ const INPUTS: &str = "inputs.json";
 /// holds instead of lowering it again.
 const COMPILED_FILES: &str = "compiled.bin";
 
+/// The state of the last compile's analysis, in the `.sharp` folder, as `Server::persist` writes it after
+/// [`analysis_key`]: the codebase, the reference graphs and each file's state. A compile whose record holds in all but
+/// its source files restores it and rechecks the files that changed since, as watch mode does. Every other compile
+/// analyzes from scratch, and the compile with nothing to do never reads it.
+const ANALYSIS: &str = "analysis.bin";
+
 /// The file in the `.sharp` folder whose lock the engine holds while it runs `sharp.compile_command`, so a project
 /// compiles once at a time on demand, and in the hosts' folder whose lock [`compile_for_hosts`] takes the same way. The
 /// compile keeps it, since a lock on a file it deleted would lock nothing.
@@ -1807,8 +1813,12 @@ fn compiled(
         .then(|| mago_database::lock::exclusive(&compiled_folder.join(WRITE_LOCK)))
         .transpose()?;
     let mut last = Record::read(&record_path);
-    if let Some(record) = last.as_mut()
-        && every_input_is_current(record, configuration, &root, &sources, &mut filesystems)
+    let all_but_the_sources = last
+        .as_ref()
+        .is_some_and(|record| every_input_but_the_sources_is_current(record, configuration, &root, &mut filesystems));
+    if all_but_the_sources
+        && let Some(record) = last.as_mut()
+        && the_sources_are_current(record, &root, &sources)
         && let Some(database) = record.outcome.report_database(&root)?
     {
         if writing.is_some() {
@@ -1831,6 +1841,15 @@ fn compiled(
 
         return Ok((std::mem::take(&mut record.outcome), database, Loaded::Nothing, start()));
     }
+    // A record that holds in all but the source files names the analysis its compile left, which this compile restores
+    // and rechecks the changed files from, as watch mode does. A run that passes its analysis on, or compiles with the
+    // extension hosts, analyzes from scratch.
+    let analysis = last
+        .as_ref()
+        .filter(|_| all_but_the_sources && keeping == Keeping::Nothing && hosts.is_none())
+        .and_then(|record| {
+            Some((std::fs::read(compiled_folder.join(ANALYSIS)).ok()?, analysis_key(configuration, record.marker)))
+        });
     let (hosts, held) = match hosts {
         Some((hosts, (lock, held, exclusive, stale))) => (stale.then_some(hosts), Some((hosts, lock, held, exclusive))),
         None => (None, None),
@@ -1949,7 +1968,12 @@ fn compiled(
     // the files it loads would. A compile alone needs the node-analysis hooks only in the files it lowers.
     let mut server =
         if reports { server.scoped_to(move |file| !included.contains(&file.id)) } else { server.scoped_to(is_lowered) };
-    let issues = server.analyze()?.issues;
+    // The analysis the last compile left, restored, rechecks only what changed since. One it can't restore leaves the
+    // server to analyze the whole workspace.
+    if let Some((bytes, key)) = &analysis {
+        server.restore(bytes, key)?;
+    }
+    let issues = server.analyze_changed()?.issues;
     // The requests of this analysis alone: a file the compile analyzes again to lower it makes the same ones.
     let requests = orchestrator.get_analyzer_plugin_registry().take_return_type_requests();
     let hidden = Hidden::new(configuration)?;
@@ -2135,6 +2159,20 @@ fn compiled(
             record.output(&compiled_files_path, unit::source_hash(&bytes));
         }
         written.insert(compiled_files_path);
+        // The analysis this compile ran, under the key of this compile's record, for the next compile to restore when
+        // only source files changed since, written while the compile keeps that record, as it keeps it below. A run with
+        // extension hosts, or one that passes its analysis on, writes none.
+        if keeping == Keeping::Nothing
+            && held.is_none()
+            && logger::warnings() == warnings
+            && outcomes_kept
+            && let Some(record) = record.as_ref()
+            && let Some(bytes) = server.persist(&analysis_key(configuration, record.marker))?
+        {
+            let analysis = compiled_folder.join(ANALYSIS);
+            write_by_rename(&analysis, &bytes)?;
+            written.insert(analysis);
+        }
         written.insert(compiled_folder.join(PROOFS));
         if let Some(bytes) = &codex_bytes {
             let codex = compiled_folder.join(LIBRARY_CODEX);
@@ -2622,18 +2660,23 @@ fn every_input_is_current(
     sources: &BTreeMap<String, Found>,
     filesystems: &mut Filesystems,
 ) -> bool {
-    let found: Vec<(&String, &Found)> =
-        sources.iter().filter(|(name, _)| !record.outputs.contains_key(name.as_str())).collect();
-    let hashes_as =
-        |path: &Path, hash: &[u8; 16]| std::fs::read(path).is_ok_and(|bytes| unit::source_hash(&bytes) == *hash);
+    every_input_but_the_sources_is_current(record, configuration, root, filesystems)
+        && the_sources_are_current(record, root, sources)
+}
 
+/// Whether `record` stands for a compile of the project at `root` with `configuration` now in all but its source
+/// files: its header names this checker build, `root` and `configuration`, each output is unchanged, and each other
+/// input passes `unit::stamp`, as [`every_input_is_current`] checks them. A compile whose record holds this rechecks
+/// the sources from the analysis that record's compile left in [`ANALYSIS`].
+fn every_input_but_the_sources_is_current(
+    record: &Record,
+    configuration: &Configuration,
+    root: &Path,
+    filesystems: &mut Filesystems,
+) -> bool {
     record.build == BUILD_ID
         && record.root == root
         && record.configuration == configuration_hash(configuration)
-        && found.len() == record.files.len()
-        && found.iter().zip(&record.files).all(|((name, Found(_, real)), (recorded, (Found(_, recorded_real), _)))| {
-            *name == recorded && real == recorded_real
-        })
         && record.outputs.iter().all(|(name, output)| {
             let path = root.join(name);
             is_unchanged(&path, Some(output), filesystems) || hashes_as(&path, &output.1)
@@ -2644,9 +2687,38 @@ fn every_input_is_current(
             Ok(None) => (*size, *hash) == (0, [0; 16]) && !root.join(path).exists(),
             Err(_) => false,
         })
+}
+
+/// Whether `record` holds the source files `sources` of the project at `root`, at the same real paths, each unchanged,
+/// as [`every_input_is_current`] checks them.
+fn the_sources_are_current(record: &Record, root: &Path, sources: &BTreeMap<String, Found>) -> bool {
+    let found: Vec<(&String, &Found)> =
+        sources.iter().filter(|(name, _)| !record.outputs.contains_key(name.as_str())).collect();
+
+    found.len() == record.files.len()
+        && found.iter().zip(&record.files).all(|((name, Found(_, real)), (recorded, (Found(_, recorded_real), _)))| {
+            *name == recorded && real == recorded_real
+        })
         && found.iter().zip(record.files.values()).all(|((name, Found(status, _)), (Found(recorded, _), hash))| {
             (status == recorded && status.is_older_than(record.marker)) || hashes_as(&root.join(name), hash)
         })
+}
+
+/// The key of the analysis a compile with `configuration` writes beside its record, whose marker is `marker`: this
+/// checker build, the configuration's hash and the marker, so the analysis stands only for the compile whose record
+/// holds, whose other inputs' stamps that record checks.
+#[allow(clippy::little_endian_bytes)]
+fn analysis_key(configuration: &Configuration, marker: i64) -> Vec<u8> {
+    let mut key = BUILD_ID.to_vec();
+    key.extend(configuration_hash(configuration));
+    key.extend(marker.to_le_bytes());
+
+    key
+}
+
+/// Whether the bytes of the file at `path` hash to `hash`, as `unit::source_hash` hashes them.
+fn hashes_as(path: &Path, hash: &[u8; 16]) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| unit::source_hash(&bytes) == *hash)
 }
 
 /// Whether the file at `path`, an output a compile recorded as `output`, is the one it wrote: its status is the one

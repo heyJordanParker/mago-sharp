@@ -84,6 +84,7 @@ where
 /// Each is named by the engine's rule, spec section 24: a PHP# class-like only as written, so `App\MATH` wins over no
 /// `Math`, and a plain PHP one in any case, as PHP compares class names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NamespaceClasses {
     sharp: HashSet<std::vec::Vec<u8>>,
     plain: HashSet<std::vec::Vec<u8>>,
@@ -126,6 +127,7 @@ impl NamespaceClasses {
 /// those classes named in its namespace, as `WordPress\WP_Post`, is the class of PHP's root namespace,
 /// `WP_Post`, which the code runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExternNamespaces(HashSet<(std::vec::Vec<u8>, std::vec::Vec<u8>)>);
 
 impl ExternNamespaces {
@@ -171,6 +173,7 @@ impl ExternNamespaces {
 /// They are the standard library's members that take their receiver by `ref`, spec section 26, as a `List`'s `add`,
 /// which the project's scan finds. The binder counts a call of one on a local as a write to the local.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ChangingMembers(HashSet<std::vec::Vec<u8>>);
 
 impl ChangingMembers {

@@ -1639,6 +1639,20 @@ impl<'analysis> Types<'analysis> {
         self.codebase.get_parent_constructor(class)
     }
 
+    /// How PHPUnit creates an object of the fully qualified class name `class` whose services the container fills, spec
+    /// section 32: a test class extends PHPUnit's `TestCase`, which PHPUnit creates with the test's name for each test,
+    /// and a PHPUnit extension implements its `Extension`, which PHPUnit creates with no argument. None for any other.
+    #[must_use]
+    pub fn filled_class(&self, class: Word) -> Option<FilledClass> {
+        if self.codebase.class_extends(class, word("PHPUnit\\Framework\\TestCase")) {
+            Some(FilledClass::Test)
+        } else if self.codebase.class_implements(class, word("PHPUnit\\Runner\\Extension\\Extension")) {
+            Some(FilledClass::Extension)
+        } else {
+            None
+        }
+    }
+
     /// The parameters of the main constructor the fully qualified class name `class` declares, which the container
     /// fills, spec section 32.
     #[must_use]
@@ -2032,15 +2046,23 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The inline form of a call of the method `declaration` names that passes `arity` values, the receiver counted,
-    /// and leaves out the rest, which folds what their defaults decide. Else the form of a call that passes them all.
-    pub(crate) fn inline_form_passing(&self, declaration: &Declaration, arity: usize) -> Option<&'analysis InlineForm> {
+    /// and leaves out the rest, which folds what their defaults decide, else the form of a call that passes them all,
+    /// with the name the standard library gives that form, which a compile looks its fingerprint up by.
+    pub(crate) fn inline_form_passing(
+        &self,
+        declaration: &Declaration,
+        arity: usize,
+    ) -> Option<(Vec<u8>, &'analysis InlineForm)> {
         if !matches!(declaration.kind, DeclarationKind::Method { .. } | DeclarationKind::StaticMethod) {
             return None;
         }
+        let (class, method) = (declaration.class.as_bytes(), declaration.name.as_bytes());
+        let folded = folded_key(class, method, arity);
+        if let Some(form) = self.inline_forms.get(&folded) {
+            return Some((folded, form));
+        }
 
-        self.inline_forms
-            .get(&folded_key(declaration.class.as_bytes(), declaration.name.as_bytes(), arity))
-            .or_else(|| self.inline_form(declaration))
+        self.inline_form(declaration).map(|form| (key(class, method), form))
     }
 
     /// The declaration of what the analysis recorded a method call runs. A method `__call` or `__callStatic` serves is
@@ -2826,6 +2848,17 @@ impl<'analysis> Types<'analysis> {
 
 /// The fully qualified names of the classes a value of `r#type` can be, leaving out `null`, or none when part of the
 /// type is no class, such as a collection. A value of a type parameter can be the classes of its bound.
+/// A class PHPUnit creates with `new`, whose services the container fills instead of its main constructor's caller,
+/// spec section 32, as [`Types::filled_class`] reads it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FilledClass {
+    /// A test class: PHPUnit creates one for each test, with the test's name, and the class's `__sharpStartTest` fills
+    /// it.
+    Test,
+    /// A PHPUnit extension: PHPUnit creates it once with no argument, and its constructor fills it.
+    Extension,
+}
+
 pub(crate) fn receiver_classes(r#type: &TUnion) -> Option<Vec<&[u8]>> {
     Some(receiver_intersections(r#type)?.into_iter().map(|classes| classes[0]).collect())
 }
