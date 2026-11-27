@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use foldhash::HashMap;
+use foldhash::HashSet;
 use mago_allocator::Arena;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -91,6 +92,9 @@ where
     /// The value each PHP# type test tests, by the span of the test, the `is` or the pattern of a `match` arm, which
     /// a name the test binds records as its declaration, spec section 21.
     pub(crate) pattern_tests: HashMap<Span, Span>,
+    /// The name of each PHP# `let` local where code changes the collection it holds, by a `ref` member call or an
+    /// index write, spec section 2. The name is no read of the local there.
+    pub(crate) local_changes: HashSet<Span>,
 }
 
 impl<'ctx, 'arena, A> Context<'ctx, 'arena, A>
@@ -133,6 +137,7 @@ where
             unnarrowed_reads: HashMap::default(),
             unnarrowed_branches: HashMap::default(),
             pattern_tests: HashMap::default(),
+            local_changes: HashSet::default(),
         }
     }
 
