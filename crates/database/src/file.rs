@@ -57,8 +57,10 @@ pub enum FileType {
 #[derive(Debug, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct File {
-    /// A stable, unique identifier for the file, generated from its logical name.
-    /// This ID persists across application runs and content modifications.
+    /// A stable, unique identifier for the file, which persists across application runs and content modifications.
+    ///
+    /// It is generated from the file's logical name, or, for a file of the standard library, from its path in the
+    /// library's package, so the codex the library ships with names it as every project that installs the library does.
     pub id: FileId,
 
     /// The logical name of the file, typically the path relative to the root of the project.

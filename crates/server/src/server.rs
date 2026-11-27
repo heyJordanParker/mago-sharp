@@ -21,6 +21,7 @@ use mago_database::file::FileId;
 use mago_orchestrator::error::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_orchestrator::service::incremental_analysis::Scans;
+use mago_orchestrator::service::incremental_analysis::codex::LibraryCodex;
 use mago_orchestrator::service::incremental_analysis::compile::Compiled;
 use mago_orchestrator::service::incremental_analysis::compile::ExternAttributes;
 use mago_orchestrator::service::incremental_analysis::compile::ExternEffects;
@@ -119,6 +120,14 @@ impl Server {
     #[must_use]
     pub fn with_package_files(mut self, package_files: impl IntoIterator<Item = FileId>) -> Self {
         self.service = self.service.with_package_files(package_files);
+        self
+    }
+
+    /// Take the standard library from `library`, its codex, in place of its files, as
+    /// [`IncrementalAnalysisService::with_library`] does.
+    #[must_use]
+    pub fn with_library(mut self, library: Option<Arc<LibraryCodex>>) -> Self {
+        self.service = self.service.with_library(library);
         self
     }
 
@@ -299,6 +308,19 @@ impl Server {
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<InlineForms, ServerError> {
         self.service.standard_library_forms(refusing).map_err(ServerError::from)
+    }
+
+    /// The standard library's codex, from the last analysis of the library's own package, as
+    /// [`IncrementalAnalysisService::library_codex`] gives it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a library file fails.
+    pub fn library_codex(
+        &mut self,
+        refusing: impl FnOnce(IssueCollection) -> IssueCollection,
+    ) -> Result<LibraryCodex, ServerError> {
+        self.service.library_codex(refusing).map_err(ServerError::from)
     }
 
     /// Every PHP# listener of the last analysis, in the order the engine runs them.

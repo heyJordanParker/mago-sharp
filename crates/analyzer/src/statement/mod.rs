@@ -953,6 +953,18 @@ where
     true
 }
 
+/// Whether the analyzed file is a PHP# file outside the standard library and `namespace`, a PHP name, is `Sharp` or a
+/// namespace under it, which [`report_standard_library_namespace`] refuses.
+pub(crate) fn refuses_standard_library_namespace<A>(context: &Context<'_, '_, A>, namespace: &[u8]) -> bool
+where
+    A: Arena,
+{
+    context.dialect.is_sharp()
+        && !context.source_file.is_standard_library
+        && namespace.get(..b"Sharp".len()).is_some_and(|root| root.eq_ignore_ascii_case(b"Sharp"))
+        && matches!(namespace.get(b"Sharp".len()), None | Some(b'\\'))
+}
+
 /// Checks statement expressions for unused results or lack of side effects.
 /// Refuses a PHP# file outside the standard library that declares `namespace Sharp` or a namespace under it. The name
 /// would reach the standard library's own classes and `Sharp.Internal` with no import, and only the analyzer knows the
@@ -962,11 +974,7 @@ where
     A: Arena,
 {
     let namespace = php_name(name);
-    if !context.dialect.is_sharp()
-        || context.source_file.is_standard_library
-        || !namespace.get(..b"Sharp".len()).is_some_and(|root| root.eq_ignore_ascii_case(b"Sharp"))
-        || !matches!(namespace.get(b"Sharp".len()), None | Some(b'\\'))
-    {
+    if !refuses_standard_library_namespace(context, &namespace) {
         return;
     }
 

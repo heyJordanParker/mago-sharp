@@ -67,18 +67,47 @@ use crate::translate::proof::Proof;
 use crate::translate::proof::Prover;
 
 /// The Lean translation of one accepted `.sharp` file: its laws and the declarations laws reach in it.
-#[derive(Debug)]
+///
+/// A standard library file's translation is kept in the library's codex without its laws, which its release proved, so
+/// a project's laws take the declarations they reach from it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Translation {
     pub(crate) file: FileId,
     /// Workspace-relative, with `/` separators.
     pub(crate) name: Vec<u8>,
     /// The Lean name of the file's first class-like, which names its generated module, and that name's span.
     pub(crate) class: Option<(String, Span)>,
+    #[serde(skip)]
     pub(crate) laws: Vec<Law>,
     pub(crate) declarations: Vec<Declaration>,
     /// Each member PHP# calls on a value, by its Lean name, and whether it is a property: `m.add(x)` and `m.total`. A goal
     /// names any other member on its class, as `Money.refundable(a, b)`.
     pub(crate) receivers: Vec<(String, bool)>,
+}
+
+impl Translation {
+    /// Names each file the translation names as `moved` gives it, a file it gives none for as it was: a standard library
+    /// file's translation, written where the library's package is the workspace, moves to where a project installs the
+    /// package.
+    pub fn relocate(&mut self, moved: impl Fn(FileId) -> Option<(FileId, Vec<u8>)>) {
+        let file = |file_id: FileId| moved(file_id).map_or(file_id, |(file_id, _)| file_id);
+        if let Some((file_id, name)) = moved(self.file) {
+            self.file = file_id;
+            self.name = name;
+        }
+        if let Some((_, span)) = &mut self.class {
+            span.file_id = file(span.file_id);
+        }
+        for declaration in &mut self.declarations {
+            declaration.span.file_id = file(declaration.span.file_id);
+            for used in &mut declaration.uses {
+                used.file = used.file.map(file);
+            }
+            for construct in &mut declaration.unmodeled {
+                construct.span.file_id = file(construct.span.file_id);
+            }
+        }
+    }
 }
 
 /// A law the file states.
@@ -124,7 +153,7 @@ struct LawStatement {
 }
 
 /// One Lean declaration: a structure, an inductive, a definition or a law's statement.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Declaration {
     /// Its Lean name.
     pub(crate) key: String,
@@ -141,7 +170,7 @@ pub(crate) struct Declaration {
 }
 
 /// What a declaration is in Lean.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Role {
     /// A structure or an inductive: a cycle of them is a type that holds itself.
     Type,
@@ -152,7 +181,7 @@ pub(crate) enum Role {
 }
 
 /// A declaration another one uses.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Use {
     pub(crate) key: String,
     /// The file that declares it, when the analysis knows it.
@@ -168,7 +197,7 @@ pub(crate) struct Use {
 
 /// The parameter a recursive method's calls each make smaller, by the same step, and the `termination_by` that tells
 /// Lean.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Measure {
     pub(crate) parameter: usize,
     pub(crate) step: Step,
@@ -219,7 +248,7 @@ impl Measure {
 }
 
 /// A construct the translation does not model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Unmodeled {
     pub(crate) span: Span,
     /// What it is: `a float`.
