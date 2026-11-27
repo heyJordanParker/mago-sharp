@@ -80,6 +80,7 @@ use crate::effects::member_of_effect_class;
 use crate::effects::sharp_attributes;
 use crate::external::Listing;
 use crate::resolver::class_name::class_value_classes;
+use crate::resolver::class_name::get_class_name_from_atomic;
 use crate::resolver::static_property::StaticProperty;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_holder;
@@ -1662,9 +1663,21 @@ where
             Expression::ConstantAccess(name) => resolved_names.resolve(&name.name).map(word).into_iter().collect(),
             // `new (type)(…)` builds the class `type`'s `Class<T>` names or a subclass, whose constructor below a
             // `required` one may add no effect to it, so it has the effects of `T`'s constructor, spec sections 25 and
-            // 29, as `new T(…)` has them.
+            // 29, as `new T(…)` has them. A `Class<Owner & Row>` builds a `Row`, since an interface declares no
+            // constructor, spec section 9.
             class_value if matches!(instantiation.class, Expression::Parenthesized(_)) => {
-                self.artifacts.get_expression_type(class_value).and_then(class_value_classes).unwrap_or_default()
+                let codebase = self.codebase();
+                self.artifacts
+                    .get_expression_type(class_value)
+                    .filter(|class_value_type| class_value_classes(class_value_type).is_some())
+                    .map(|class_value_type| {
+                        class_value_type
+                            .types
+                            .iter()
+                            .filter_map(|atomic| get_class_name_from_atomic(codebase, atomic)?.created_class(codebase))
+                            .collect()
+                    })
+                    .unwrap_or_default()
             }
             _ => Vec::new(),
         };

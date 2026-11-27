@@ -25735,6 +25735,38 @@ fn new_through_a_class_value_gives_the_object_the_type_arguments_it_names_or_the
     );
 }
 
+/// Spec sections 24, 9 and 25: `new (owner)(…)` from a `Class<Owner & Row>` creates an object of every type the
+/// intersection joins, so it is an `Owner & Row`, and `Row`'s members are its own. An interface declares no
+/// constructor, so the `required` constructor the creation needs is the class part's, `Row`'s, and the refusal of one
+/// that isn't names `Row`. The wrong return shows the type the `new` gives.
+#[test]
+fn new_from_a_class_value_of_an_interface_and_a_class_is_of_both_and_reads_the_class_s_constructor() {
+    let owner = ("src/Demo/Owner.sharp", "namespace Demo;\n\ninternal interface Owner\n{\n}\n");
+    let owned_row =
+        ("src/Demo/OwnedRow.sharp", "namespace Demo;\n\ninternal final class OwnedRow : Row, Owner\n{\n}\n");
+    let report = (
+        "src/Demo/Report.sharp",
+        "namespace Demo;\n\ninternal class Report\n{\n    public static string tableOf(Class<Owner & Row> owner) => new (owner)().table();\n\n    public static int typed(Class<Owner & Row> owner) => new (owner)();\n}\n",
+    );
+    let required = (
+        "src/Demo/Row.sharp",
+        "namespace Demo;\n\ninternal class Row\n{\n    public required Row() { }\n\n    public string table() => \"rows\";\n}\n",
+    );
+    let loose =
+        ("src/Demo/Row.sharp", "namespace Demo;\n\ninternal class Row\n{\n    public string table() => \"rows\";\n}\n");
+    let typed = "7:58 invalid-return-statement Invalid return type for method `Report.typed`: expected `int`, but found `Owner & Row`. | This has type `Owner & Row` | The type `Owner & Row` returned here is not compatible with the declared return type `int`. | Change the return value to match `int`, or update the method's return type declaration.";
+
+    assert_eq!(worded(report, &[owner, owned_row, required]), [typed]);
+    assert_eq!(
+        worded(report, &[owner, owned_row, loose]),
+        [
+            "5:63 unsafe-instantiation `new (owner)(…)` needs a `required` constructor: a class value can hold any subclass of `Row`, so every subclass must keep a constructor that `new (owner)(…)` can call. | Created here. | Declare the constructor of `Row` `required`, as in `public required Row(…)`.",
+            "7:58 unsafe-instantiation `new (owner)(…)` needs a `required` constructor: a class value can hold any subclass of `Row`, so every subclass must keep a constructor that `new (owner)(…)` can call. | Created here. | Declare the constructor of `Row` `required`, as in `public required Row(…)`.",
+            typed,
+        ]
+    );
+}
+
 /// `typeof(Box<Order>)` is a `Class<Box<Order>>`, spec section 25, which carries its type arguments, so it is no
 /// `Class<Box<int>>`. The wrong return shows the type the expression has.
 #[test]
@@ -33216,6 +33248,26 @@ fn a_class_value_new_has_its_required_constructors_effects() {
         [
             "app/Shop/DirectMaker.sharp:5:28 incompatible-effects: `DirectMaker.make` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Maker.make` cannot accept it.",
             "app/Shop/ValueMaker.sharp:7:28 incompatible-effects: `ValueMaker.make` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Maker.make` cannot accept it.",
+        ]
+    );
+}
+
+/// Spec sections 9, 25 and 29: `new (type)(…)` of a `Class<Marked & Saved>` builds a `Saved`, the class the
+/// intersection joins, since an interface declares no constructor, so it has the effects of `Saved`'s `required`
+/// constructor, and a pure method that builds one through it is refused as one that writes `new Saved()` is.
+#[test]
+fn a_class_value_new_of_an_interface_and_a_class_has_the_class_s_constructors_effects() {
+    let marked = ("app/Shop/Marked.sharp", "namespace App.Shop;\n\npublic interface Marked\n{\n}\n");
+    let value = (
+        "app/Shop/MarkedMaker.sharp",
+        "namespace App.Shop;\n\npublic class MarkedMaker : Maker\n{\n    public MarkedMaker(private Class<Marked & Saved> type) { }\n\n    public Saved make() => new (this.type)();\n}\n",
+    );
+    let [disk, stub, saved, _] = BUILT;
+
+    assert_eq!(
+        effect_issues(&[value, marked, MAKER, disk, stub, saved]),
+        [
+            "app/Shop/MarkedMaker.sharp:7:28 incompatible-effects: `MarkedMaker.make` reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so the pure `Maker.make` cannot accept it.",
         ]
     );
 }
