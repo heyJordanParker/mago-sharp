@@ -2687,7 +2687,8 @@ impl Status {
 type Filesystems = HashMap<u64, bool>;
 
 /// Whether the filesystem that holds `path` records every write in a file's status change time, as `statfs` names
-/// it: every one but FAT and exFAT, which keep no status change time. One `statfs` can't name is taken not to.
+/// it, so a file whose status is unchanged is unchanged, as [`records_writes`] decides. One `statfs` can't name is
+/// taken not to.
 #[cfg(target_os = "macos")]
 fn change_time_records_writes(path: &Path) -> bool {
     filesystem_of(path).is_some_and(|filesystem| {
@@ -2698,10 +2699,13 @@ fn change_time_records_writes(path: &Path) -> bool {
     })
 }
 
-/// Whether the filesystem macOS names `name` records every write in a file's status change time.
+/// Whether the filesystem macOS names `name` records every write in a file's status change time: every one but FAT's
+/// `msdos` and `exfat`, which keep no status change time, and the network filesystems `nfs`, `smbfs`, `webdav` and
+/// `afpfs`, whose client caches a file's attributes, so its stat can be an old one while its bytes are new, as
+/// Watchman doesn't trust their change records. A compile reads every file there.
 #[cfg(target_os = "macos")]
 fn records_writes(name: &[u8]) -> bool {
-    !matches!(name, b"msdos" | b"exfat")
+    !matches!(name, b"msdos" | b"exfat" | b"nfs" | b"smbfs" | b"webdav" | b"afpfs")
 }
 
 #[cfg(target_os = "linux")]
@@ -2710,10 +2714,14 @@ fn change_time_records_writes(path: &Path) -> bool {
 }
 
 /// Whether the filesystem of the Linux magic number `magic` records every write in a file's status change time: every
-/// one but FAT's `MSDOS_SUPER_MAGIC` and exFAT's `EXFAT_SUPER_MAGIC`.
+/// one but FAT's `MSDOS_SUPER_MAGIC` and exFAT's `EXFAT_SUPER_MAGIC`, which keep no status change time, and the
+/// filesystems whose client caches a file's attributes, so its stat can be an old one while its bytes are new: FUSE's
+/// `FUSE_SUPER_MAGIC`, which a container's bind mount from macOS, virtiofs and sshfs are, 9p's `V9FS_MAGIC`, which
+/// WSL2 and Docker on Windows mount, `NFS_SUPER_MAGIC`, and `CIFS_SUPER_MAGIC`, `SMB2_SUPER_MAGIC` and
+/// `SMB_SUPER_MAGIC`, as Watchman doesn't trust their change records. A compile reads every file there.
 #[cfg(target_os = "linux")]
 fn records_writes(magic: u64) -> bool {
-    !matches!(magic, 0x4d44 | 0x2011_bab0)
+    !matches!(magic, 0x4d44 | 0x2011_bab0 | 0x6573_5546 | 0x0102_1997 | 0x6969 | 0xff53_4d42 | 0xfe53_4d42 | 0x517b)
 }
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
