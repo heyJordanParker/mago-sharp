@@ -6,6 +6,7 @@ use std::process::Command;
 use std::process::Output;
 use std::process::Stdio;
 
+use mago_database::clock::poll_until;
 use mago_database::process;
 use mago_sharp_bridge::unit::GENERATION_LOCK;
 use mago_sharp_bridge::unit::GENERATION_PREFIX;
@@ -1310,10 +1311,7 @@ fn a_later_run_rewrites_the_hosts_folder_only_once_the_hosts_reading_it_are_done
     };
     let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
     let wait_until = |done: &dyn Fn() -> bool, seconds: u64| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
-        while !done() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        poll_until(std::time::Duration::from_secs(seconds), done);
     };
 
     let (first, next) = std::thread::scope(|scope| {
@@ -4756,7 +4754,6 @@ fn a_signal_that_ends_a_compile_ends_the_lean_it_waits_on() {
     use std::os::unix::process::ExitStatusExt;
     use std::process::Stdio;
     use std::time::Duration;
-    use std::time::Instant;
 
     for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGHUP, libc::SIGTERM] {
         let lake = tempfile::tempdir().unwrap();
@@ -4779,20 +4776,16 @@ fn a_signal_that_ends_a_compile_ends_the_lean_it_waits_on() {
             })
         };
         let mut compile = process::spawn(&mut compiling).unwrap();
-        let started = Instant::now();
-        while !lake.path().join("stalled").exists() {
-            assert!(started.elapsed() < Duration::from_secs(300), "{signal}: the stalled Lean never started");
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        assert!(
+            poll_until(Duration::from_secs(300), || lake.path().join("stalled").exists()),
+            "{signal}: the stalled Lean never started"
+        );
 
         // SAFETY: `kill` only sends a signal, to the group the compile leads, as a terminal does.
         assert_eq!(unsafe { libc::kill(-i32::try_from(compile.id()).unwrap(), signal) }, 0);
 
         assert_eq!(compile.wait().unwrap().signal(), Some(signal));
-        let ended = Instant::now();
-        while !leans().is_empty() && ended.elapsed() < Duration::from_secs(10) {
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        poll_until(Duration::from_secs(10), || leans().is_empty());
         let left = leans();
         if !left.is_empty() {
             process::status(Command::new("pkill").args(["-f", &script])).unwrap();
