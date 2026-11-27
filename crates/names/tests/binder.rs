@@ -911,12 +911,11 @@ fn a_class_of_an_extern_namespace_is_php_s_root_class() {
 /// prelude declares directly in `Sharp` is that class-like, with no import.
 #[test]
 fn every_class_like_directly_in_sharp_is_a_default_name() {
-    const CODE: &str = "namespace App;\n\nclass Wiring\n{\n    public void run(Behavior<int> a, ClassMembers b, Dispatcher c, ImmediateDispatcher d, InvalidFields e, Listening f, Key g)\n    {\n    }\n}\n";
+    const CODE: &str = "namespace App;\n\nclass Wiring\n{\n    public void run(Behavior<int> a, ClassMembers b, Dispatcher c, ImmediateDispatcher d, ParseError e, Listening f, Key g)\n    {\n    }\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
-    for class in ["Behavior", "ClassMembers", "Dispatcher", "ImmediateDispatcher", "InvalidFields", "Listening", "Key"]
-    {
+    for class in ["Behavior", "ClassMembers", "Dispatcher", "ImmediateDispatcher", "ParseError", "Listening", "Key"] {
         let needle = format!("{class} ");
         let needle = if class == "Behavior" { "Behavior<" } else { needle.as_str() };
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, 0)), format!("Sharp\\{class}"), "{class}");

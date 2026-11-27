@@ -2401,13 +2401,13 @@ fn compile_proves_a_law_that_orders_two_values_through_their_interface_s_compari
 }
 
 /// Spec section 28: a standard library member a law can't reach is refused where the law reaches it, with the reason
-/// project code gives, as `Instant.tryParse`, which calls plain PHP.
+/// project code gives, as `Instant.parse`, whose `Instant.read` calls plain PHP.
 #[test]
 fn a_law_reaching_a_standard_library_member_that_calls_plain_php_is_refused_naming_the_call() {
     assert_unmodeled_beside(
-        "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic class Shape\n{\n    law parses(string text) => Instant.tryParse(text) != null;\n}\n",
+        "namespace App.Shared;\n\nimport Sharp.Time.Instant;\n\npublic class Shape\n{\n    law parses(string text) => Instant.parse(text).ok() != null;\n}\n",
         &[],
-        "Law parses reaches the plain PHP function `global.preg_match` in Instant.tryParse. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
+        "Law parses reaches the plain PHP function `global.preg_match` in Instant.read. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
     );
 }
 
@@ -4991,7 +4991,7 @@ fn a_law_over_two_cases_of_a_machine_holds_for_each_pair_of_their_values() {
     assert!(compiled(root, "app/Store/OrderStatus.sharp").exists());
 }
 
-/// Spec section 20.2: `Json.decode` builds a case that keeps its invariants, whatever value a move gives, so a law
+/// Spec section 20.2: `Json.parse` builds a case that keeps its invariants, whatever value a move gives, so a law
 /// true of the one value every move builds, `Paid(5)`, is not proven, and the small values that break it keep the
 /// case's invariants: `Paid(0)` breaks `paidIsPositive`, so it names `Paid(1)`.
 #[test]
