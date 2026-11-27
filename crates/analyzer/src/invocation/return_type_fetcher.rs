@@ -11,6 +11,7 @@ use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_object_collection;
 use mago_codex::ttype::get_php_received_type;
 use mago_codex::ttype::get_sharp_received_type;
 use mago_codex::ttype::is_key_type;
@@ -113,7 +114,23 @@ where
         return Ok(fetch_map_return_type(context, invocation, template_result, parameters));
     }
 
-    Ok(fetch_declared_invocation_return_type(context, invocation, template_result, parameters))
+    let return_type = fetch_declared_invocation_return_type(context, invocation, template_result, parameters);
+    // Spec section 12: a `Sharp\Map` or `Sharp\Set` object plain PHP returns is the `Map` or `Set` PHP# code types, so
+    // `Map.from(array)` gives the `Map<int|string, Any?>` a `Map` of that type is.
+    if context.dialect.is_sharp() && return_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Object(_))) {
+        let types = return_type
+            .types
+            .iter()
+            .map(|atomic| match atomic {
+                TAtomic::Object(object) => get_object_collection(object.clone()),
+                atomic => atomic.clone(),
+            })
+            .collect();
+
+        return Ok(return_type.clone_with_types(types));
+    }
+
+    Ok(return_type)
 }
 
 /// Records the type the PHP# call `invocation` of plain PHP resolves a conditional declared result to, as plain PHP

@@ -4024,6 +4024,16 @@ fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
     );
 }
 
+/// `Map.from` of a plain PHP `array` gives the `Map` of its keys and values, `Map<int|string, Any?>`, with or without
+/// type arguments, so it returns, assigns and spreads where that type is declared, as the array itself does, spec
+/// section 12.
+#[test]
+fn map_from_a_plain_php_array_returns_as_the_map_it_gives() {
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Row : Model\n{\n    internal Map<int|string, Any?> held() => Map.from(this.appends);\n\n    internal Map<int|string, Any?> kept() => this.appends;\n\n    internal Map<int|string, Any?> copied()\n    {\n        Map<int|string, Any?> copy = Map.from(this.appends);\n        Map<int|string, Any?> typed = Map<int|string, Any?>.from(this.appends);\n\n        return [...copy, ...typed];\n    }\n\n    internal Map<int|string, Any?> spread() => [...Map.from(this.appends), \"b\": 2];\n}\n";
+
+    assert_eq!(worded(("src/Demo/Row.sharp", sharp), &[("src/Lib/Model.php", MODEL)]), Vec::<String>::new());
+}
+
 /// An override keeps its written type instead of inheriting the parent's `@var` type, so a type that does not fit is
 /// one issue, not a second one for its initial value against the inherited type. Both types are named as PHP# writes
 /// them. The PHP twin keeps Mago's text.
