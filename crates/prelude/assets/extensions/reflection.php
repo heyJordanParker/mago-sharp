@@ -947,7 +947,7 @@ abstract class ReflectionFunctionAbstract implements Reflector
     public function getNumberOfRequiredParameters(): int {}
 
     /**
-     * @return ReflectionParameter[]
+     * @return list<ReflectionParameter>
      *
      * @pure
      */
