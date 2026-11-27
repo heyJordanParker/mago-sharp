@@ -208,6 +208,17 @@ impl<Written> Inputs<'_, Written> {
     }
 }
 
+/// Whether `left` and `right` hold the same issues, each as many times, in any order: the analysis gathers a file's
+/// errors from each check that reports them, in no fixed order between compiles.
+fn same_issues(left: &IssueCollection, right: &IssueCollection) -> bool {
+    let mut unmatched: Vec<&Issue> = right.iter().collect();
+
+    left.len() == right.len()
+        && left.iter().all(|issue| {
+            unmatched.iter().position(|other| *other == issue).map(|found| unmatched.swap_remove(found)).is_some()
+        })
+}
+
 /// `file` refused with `issues`, and `refusal` for the next compile to keep.
 fn refused_with<Written>(file: &Arc<File>, issues: IssueCollection, refusal: RefusedFile) -> Made<'_, Written> {
     (file, Compilation::Refused(issues), Some(Record::Refused(refusal)))
@@ -982,7 +993,7 @@ impl IncrementalAnalysisService {
     ) -> Option<&'last RefusedFile> {
         let refusal = last.refused.get(file.name.as_ref())?;
         let holds = match refusal {
-            RefusedFile::Errors(issues) => errors.get(&file.id) == Some(issues),
+            RefusedFile::Errors(issues) => errors.get(&file.id).is_some_and(|errors| same_issues(errors, issues)),
             RefusedFile::Laws(record, _) => {
                 !file.is_standard_library
                     && !errors.contains_key(&file.id)
@@ -1193,8 +1204,13 @@ impl IncrementalAnalysisService {
             .into_par_iter()
             .map(|(file, issues, paths, kept, kept_refusal)| {
                 if let Some(kept_refusal) = kept_refusal {
-                    let (RefusedFile::Errors(issues) | RefusedFile::Laws(_, issues)) = kept_refusal;
-                    return Ok(refused_with(file, issues.clone(), kept_refusal.clone()));
+                    return Ok(match kept_refusal {
+                        RefusedFile::Errors(_) => {
+                            let issues = errors[&file.id].clone();
+                            refused_with(file, issues.clone(), RefusedFile::Errors(issues))
+                        }
+                        RefusedFile::Laws(_, issues) => refused_with(file, issues.clone(), kept_refusal.clone()),
+                    });
                 }
                 let declarations_hash = read_by_declarations.get(&file.id).copied().unwrap_or_default();
                 if let Some((bytes, record)) = kept {
@@ -3763,6 +3779,17 @@ mod tests {
         };
         assert_eq!(refused(&second), refused(&first));
         assert_eq!(checked.into_inner()[1], 0, "the second compile checks a law again");
+    }
+
+    /// A file's errors are the same refusal in any order, and not when one is missing or appears twice.
+    #[test]
+    fn a_refusal_for_errors_holds_while_the_analysis_reports_the_same_errors_in_any_order() {
+        let collection =
+            |messages: &[&str]| messages.iter().map(|message| Issue::error(*message)).collect::<IssueCollection>();
+
+        assert!(same_issues(&collection(&["a", "b", "b"]), &collection(&["b", "a", "b"])));
+        assert!(!same_issues(&collection(&["a", "b"]), &collection(&["a", "b", "b"])));
+        assert!(!same_issues(&collection(&["a", "a"]), &collection(&["a", "b"])));
     }
 
     /// Once an edit fixes the file whose errors refused it and the law that reaches it, a compile after the one that
