@@ -53,6 +53,8 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
+use mago_database::filesystem;
+use mago_database::filesystem::Filesystem;
 use mago_database::loader::Listing;
 use mago_database::loader::Manifests;
 use mago_database::loader::nearest_manifest;
@@ -2655,7 +2657,8 @@ impl Status {
         use std::os::unix::fs::MetadataExt;
 
         let nanoseconds = |seconds: i64, fraction: i64| seconds.saturating_mul(1_000_000_000).saturating_add(fraction);
-        let records_writes = *filesystems.entry(metadata.dev()).or_insert_with(|| change_time_records_writes(path));
+        let records_writes =
+            *filesystems.entry(metadata.dev()).or_insert_with(|| filesystem::of(path) == Some(Filesystem::Local));
 
         Self(
             metadata.size(),
@@ -2685,65 +2688,6 @@ impl Status {
 
 /// Whether each filesystem, by its device, records every write in a file's status change time.
 type Filesystems = HashMap<u64, bool>;
-
-/// Whether the filesystem that holds `path` records every write in a file's status change time, as `statfs` names
-/// it, so a file whose status is unchanged is unchanged, as [`records_writes`] decides. One `statfs` can't name is
-/// taken not to.
-#[cfg(target_os = "macos")]
-fn change_time_records_writes(path: &Path) -> bool {
-    filesystem_of(path).is_some_and(|filesystem| {
-        let name: Vec<u8> =
-            filesystem.f_fstypename.iter().take_while(|byte| **byte != 0).map(|byte| *byte as u8).collect();
-
-        records_writes(&name)
-    })
-}
-
-/// Whether the filesystem macOS names `name` records every write in a file's status change time: every one but FAT's
-/// `msdos` and `exfat`, which keep no status change time, and the network filesystems `nfs`, `smbfs`, `webdav` and
-/// `afpfs`, whose client caches a file's attributes, so its stat can be an old one while its bytes are new, as
-/// Watchman doesn't trust their change records. A compile reads every file there.
-#[cfg(target_os = "macos")]
-fn records_writes(name: &[u8]) -> bool {
-    !matches!(name, b"msdos" | b"exfat" | b"nfs" | b"smbfs" | b"webdav" | b"afpfs")
-}
-
-#[cfg(target_os = "linux")]
-fn change_time_records_writes(path: &Path) -> bool {
-    filesystem_of(path).is_some_and(|filesystem| records_writes(filesystem.f_type as u64))
-}
-
-/// Whether the filesystem of the Linux magic number `magic` records every write in a file's status change time: every
-/// one but FAT's `MSDOS_SUPER_MAGIC` and exFAT's `EXFAT_SUPER_MAGIC`, which keep no status change time, and the
-/// filesystems whose client caches a file's attributes, so its stat can be an old one while its bytes are new: FUSE's
-/// `FUSE_SUPER_MAGIC`, which a container's bind mount from macOS, virtiofs and sshfs are, 9p's `V9FS_MAGIC`, which
-/// WSL2 and Docker on Windows mount, `NFS_SUPER_MAGIC`, and `CIFS_SUPER_MAGIC`, `SMB2_SUPER_MAGIC` and
-/// `SMB_SUPER_MAGIC`, as Watchman doesn't trust their change records. A compile reads every file there.
-#[cfg(target_os = "linux")]
-fn records_writes(magic: u64) -> bool {
-    !matches!(magic, 0x4d44 | 0x2011_bab0 | 0x6573_5546 | 0x0102_1997 | 0x6969 | 0xff53_4d42 | 0xfe53_4d42 | 0x517b)
-}
-
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
-fn change_time_records_writes(_: &Path) -> bool {
-    false
-}
-
-/// The filesystem that holds `path`, as `statfs` gives it.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn filesystem_of(path: &Path) -> Option<libc::statfs> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
-    // SAFETY: `path` ends in a NUL byte, and `filesystem` has room for the `statfs` the call fills in.
-    if unsafe { libc::statfs(path.as_ptr(), filesystem.as_mut_ptr()) } != 0 {
-        return None;
-    }
-
-    // SAFETY: the call succeeded, so it filled `filesystem` in.
-    Some(unsafe { filesystem.assume_init() })
-}
 
 /// The hash of the settings of `configuration` that change what a compile writes: the PHP version, the sources, and the
 /// parser's and the analyzer's settings, from their debug form, which holds every field, the ones serde skips included,
@@ -3549,41 +3493,6 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
             rewrite(&path, &bytes, an_hour_ago);
             assert!(current(), "{} holds its bytes again", path.display());
         }
-    }
-
-    /// Linux's FAT and exFAT keep no status change time, and the stat of a FUSE, 9p, NFS, CIFS or SMB file can be one
-    /// the client cached while the file's bytes are new, so none of them records every write. ext4 does.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_names_fat_exfat_and_the_filesystems_whose_clients_cache_a_stat_as_recording_no_write() {
-        let fat = 0x4d44;
-        let exfat = 0x2011_bab0;
-        let fuse = 0x6573_5546;
-        let nine_p = 0x0102_1997;
-        let nfs = 0x6969;
-        let cifs = 0xff53_4d42;
-        let smb2 = 0xfe53_4d42;
-        let smb = 0x517b;
-
-        for magic in [fat, exfat, fuse, nine_p, nfs, cifs, smb2, smb] {
-            assert!(!records_writes(magic), "{magic:#x} records every write");
-        }
-        assert!(records_writes(0xef53), "ext4 records no write");
-        let directory = tempfile::tempdir().unwrap();
-        assert!(change_time_records_writes(directory.path()), "the temp folder's filesystem records every write");
-    }
-
-    /// macOS's FAT and exFAT keep no status change time, and the stat of an NFS, SMB, WebDAV or AFP file can be one the
-    /// client cached while the file's bytes are new, so none of them records every write. APFS does.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_names_fat_exfat_and_the_filesystems_whose_clients_cache_a_stat_as_recording_no_write() {
-        for name in [b"msdos".as_slice(), b"exfat", b"nfs", b"smbfs", b"webdav", b"afpfs"] {
-            assert!(!records_writes(name), "{} records every write", String::from_utf8_lossy(name));
-        }
-        assert!(records_writes(b"apfs"), "APFS records no write");
-        let directory = tempfile::tempdir().unwrap();
-        assert!(change_time_records_writes(directory.path()), "the temp folder's filesystem records every write");
     }
 
     /// Each setting that changes what a compile writes enters the record's header, the ones serde skips included, so a

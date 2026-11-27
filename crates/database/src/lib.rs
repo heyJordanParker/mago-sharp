@@ -88,6 +88,7 @@ pub mod change;
 pub mod error;
 pub mod exclusion;
 pub mod file;
+pub mod filesystem;
 #[cfg(feature = "loader")]
 pub mod loader;
 pub mod lock;

@@ -37,6 +37,8 @@ use crate::error::DatabaseError;
 use crate::exclusion::Exclusion;
 use crate::file::FileId;
 use crate::file::FileType;
+use crate::filesystem;
+use crate::filesystem::Filesystem;
 use crate::loader::DatabaseLoader;
 use crate::loader::ExcludedFolders;
 use crate::loader::Manifests;
@@ -641,21 +643,22 @@ impl Drop for DatabaseWatcher<'_> {
 /// an edit made on the Mac up to minutes later, while the edit is readable at once. Every other path has the operating
 /// system watcher, and no poll.
 ///
-/// An operating system watcher can start reporting some time after it is asked to: on a busy Mac, FSEvents starts a
-/// stream minutes late and never reports a change made before then. So, as Watchman syncs its clients, the watcher
-/// writes and deletes a cookie file, of a name no other watcher uses, in each watched folder once it started, since it
-/// reports each later change in that folder after the cookie. The cookie is waited for however late it comes, on a
-/// thread of its own, and written again at a longer interval each time while the watcher has not reported it, since a
-/// watcher can miss one written as its stream starts. So this returns at once: what the files were as it returned is
-/// walked first, and once a folder's cookie comes, a second walk of the folder gives `handler` each change made there
-/// before it. A busy FSEvents can also report a change made before the watcher started, as the `composer.lock` a
+/// An operating system watcher can start reporting some time after it is asked to: on a busy Mac, FSEvents reports a
+/// stream's changes minutes late and never reports a change made before the stream started. So, as Watchman syncs its
+/// clients, the watcher writes and deletes a cookie file, of a name no other watcher uses, in each watched folder once
+/// it started, since it reports each later change in that folder after the cookie. The cookie is waited for however
+/// late it comes, on a thread of its own, and written again at a longer interval each time while the watcher has not
+/// reported it, since a watcher can miss one written as its stream starts. So this returns once the watcher started:
+/// what the files were as it returned is walked first, and once a folder's cookie comes, a second walk of the folder
+/// gives `handler` each change made there before it. A busy FSEvents can also report a change made before the watcher started, as the `composer.lock` a
 /// project wrote just before `mago analyze --watch` ran, so `handler` gets no change the watcher reports in a folder
 /// before that folder's cookie. A folder the cookie cannot be written to, such as a read-only one, gets a warning that
 /// names it and the error.
 ///
 /// # Errors
 ///
-/// Returns the error of starting the poll's or the sync's thread.
+/// Returns the error of starting the operating system watcher, of watching one of `paths`, or of starting the poll's or
+/// the sync's thread.
 pub fn start_watcher<H>(
     handler: H,
     paths: &[(PathBuf, RecursiveMode)],
@@ -676,7 +679,7 @@ where
 
 /// An operating system watcher that stops on a thread of its own when dropped. FSEvents can take minutes to stop a
 /// stream while fseventsd is behind, and notify 8.2's FSEvents watcher can wait forever for a run loop that missed its
-/// stop, so the watch goes on while the watcher stops, as it goes on while the watcher starts.
+/// stop, so the watch goes on while the watcher stops.
 struct StopsAside(Option<Box<dyn NotifyWatcher + Send>>);
 
 impl NotifyWatcher for StopsAside {
@@ -716,9 +719,7 @@ fn unique_cookie() -> String {
 }
 
 /// What the thread that syncs the operating system watcher of [`start_watcher_of`] hears.
-enum Syncing<W> {
-    /// The watcher started, or failed to.
-    Started(Result<W, DatabaseError>),
+enum Syncing {
     /// The watcher reported the cookie of this name.
     Reported(String),
     /// The watch stopped.
@@ -755,35 +756,38 @@ where
     }
 
     let mut watching = Watching { syncing: None, polling: None };
+    if !native_paths.is_empty() {
+        watching.syncing = Some(start_synced::<W, H, P>(handler.clone(), &native_paths, cookie, Arc::clone(&polled))?);
+    }
     if !polled_paths.is_empty() {
         tracing::info!(
             "The file watcher checks the files in {} every {poll_interval:?}, since that filesystem reports a change late or not at all.",
             named.join(", ")
         );
-        let poll = Walk { folders: polled_paths, polled: Arc::clone(&polled) };
+        let poll = Walk { folders: polled_paths, polled };
         // The poll reports only what changes after this first walk, which ends before the watcher is returned.
         let seen = poll.walk();
         let (stop, stopped) = mpsc::channel();
-        let handler = handler.clone();
         spawn_logging("mago-watch-poll", move || poll.run(seen, handler, poll_interval, &stopped))?;
         watching.polling = Some(stop);
-    }
-    if !native_paths.is_empty() {
-        watching.syncing = Some(start_synced::<W, H, P>(handler, &native_paths, cookie, polled)?);
     }
 
     Ok(Box::new(watching))
 }
 
-/// Starts the operating system watcher of `paths` on a thread of its own, and a thread that writes each folder's cookie
-/// once it started, waits for each however late it comes, and then gives `handler` each change a [`Walk`] of the folder
-/// finds since this returned, as [`start_watcher`] says. Returns the sender that stops both.
+/// Starts the operating system watcher of `paths`, and a thread that writes each folder's cookie, waits for each
+/// however late it comes, and then gives `handler` each change a [`Walk`] of the folder finds since this returned, as
+/// [`start_watcher`] says. Returns the sender that stops both.
+///
+/// # Errors
+///
+/// Returns the error of starting the watcher, of watching one of `paths`, or of starting the thread.
 fn start_synced<W, H, P>(
     mut handler: H,
     paths: &[(PathBuf, RecursiveMode)],
     cookie: &str,
     polled: Arc<P>,
-) -> Result<mpsc::Sender<Syncing<W>>, DatabaseError>
+) -> Result<mpsc::Sender<Syncing>, DatabaseError>
 where
     W: NotifyWatcher + Send + 'static,
     H: EventHandler + Clone,
@@ -838,96 +842,54 @@ where
         })
         .collect();
 
-    // FSEvents can take minutes to start a stream while the Mac's fseventsd is behind, so the watcher starts on a thread
-    // of its own, and the watch goes on meanwhile.
     let starting = Instant::now();
-    let folders_to_watch = paths.to_vec();
-    let starts = syncing.clone();
-    std::thread::spawn(move || {
-        let watcher =
-            W::new(native_handler, Config::default()).map_err(DatabaseError::WatcherInit).and_then(|mut watcher| {
-                // All paths at once, as FSEvents stops and starts its stream again for each path watched on its own.
-                let mut added = watcher.paths_mut();
-                for (path, recursive_mode) in &folders_to_watch {
-                    added.add(path, *recursive_mode).map_err(DatabaseError::WatcherWatch)?;
-                }
-                added.commit().map_err(DatabaseError::WatcherWatch)?;
-
-                Ok(watcher)
-            });
-        let _ = starts.send(Syncing::Started(watcher));
-    });
+    let mut watcher = W::new(native_handler, Config::default()).map_err(DatabaseError::WatcherInit)?;
+    // All paths at once, as FSEvents stops and starts its stream again for each path watched on its own.
+    let mut added = watcher.paths_mut();
+    for (path, recursive_mode) in paths {
+        added.add(path, *recursive_mode).map_err(DatabaseError::WatcherWatch)?;
+    }
+    added.commit().map_err(DatabaseError::WatcherWatch)?;
+    let watcher = StopsAside(Some(Box::new(watcher)));
 
     spawn_logging("mago-watch-sync", move || {
-        let mut watcher = None;
         let mut unsynced: Vec<(PathBuf, RecursiveMode, String, HashMap<PathBuf, Seen>)> = Vec::new();
-        // The cookies a watcher reported before it started, as one that reports a folder's cookie as it watches it.
-        let mut reported: HashSet<String> = HashSet::new();
-        let mut sync = |folder: PathBuf, recursive_mode: RecursiveMode, seen: &HashMap<PathBuf, Seen>| {
-            let walk = Walk { folders: vec![(folder, recursive_mode)], polled: Arc::clone(&polled) };
-            report_changes(seen, &walk.walk(), &mut handler);
-        };
+        for ((folder, recursive_mode, name), seen) in folders.into_iter().zip(before) {
+            match write_cookie(&folder, &name) {
+                Ok(()) => unsynced.push((folder, recursive_mode, name, seen)),
+                Err(error) => tracing::warn!(
+                    "Could not write the file watcher's cookie in {}, so a change made there as the watch starts can be missed: {error}",
+                    folder.display()
+                ),
+            }
+        }
         // A watcher can miss a cookie written as its stream starts, so each cookie it has not reported is written again,
         // a second after the last write and twice as long each time after, up to half a minute apart.
         let (mut written, mut rewrite) = (Instant::now(), Duration::from_secs(1));
         loop {
-            let message = if watcher.is_some() && !unsynced.is_empty() {
-                match heard.recv_timeout(rewrite.saturating_sub(written.elapsed())) {
-                    Ok(message) => message,
-                    Err(RecvTimeoutError::Timeout) => {
-                        for (folder, _, name, _) in &unsynced {
-                            let _ = write_cookie(folder, name);
-                        }
-                        (written, rewrite) = (Instant::now(), (rewrite * 2).min(Duration::from_secs(30)));
-                        continue;
-                    }
-                    Err(RecvTimeoutError::Disconnected) => break,
-                }
+            if unsynced.is_empty() && !started.swap(true, Ordering::SeqCst) {
+                tracing::debug!("The file watcher reported its cookies after {:?}.", starting.elapsed());
+            }
+            let message = if unsynced.is_empty() {
+                heard.recv().map_err(|_| RecvTimeoutError::Disconnected)
             } else {
-                match heard.recv() {
-                    Ok(message) => message,
-                    Err(_) => break,
-                }
+                heard.recv_timeout(rewrite.saturating_sub(written.elapsed()))
             };
             match message {
-                Syncing::Stop => break,
-                Syncing::Started(Err(error)) => {
-                    tracing::error!(
-                        "The file watcher failed to start, so this run sees no change in {}: {error}",
-                        folders
-                            .iter()
-                            .map(|(folder, _, _)| folder.display().to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                }
-                Syncing::Started(Ok(started_watcher)) => {
-                    watcher = Some(StopsAside(Some(Box::new(started_watcher))));
-                    written = Instant::now();
-                    for ((folder, recursive_mode, name), seen) in folders.iter().cloned().zip(before.iter()) {
-                        match write_cookie(&folder, &name) {
-                            Ok(()) if reported.remove(&name) => sync(folder, recursive_mode, seen),
-                            Ok(()) => unsynced.push((folder, recursive_mode, name, seen.clone())),
-                            Err(error) => tracing::warn!(
-                                "Could not write the file watcher's cookie in {}, so a change made there as the watch starts can be missed: {error}",
-                                folder.display()
-                            ),
-                        }
-                    }
-                }
-                Syncing::Reported(name) => match unsynced.iter().position(|(_, _, cookie, _)| *cookie == name) {
-                    Some(index) => {
+                Ok(Syncing::Reported(name)) => {
+                    if let Some(index) = unsynced.iter().position(|(_, _, cookie, _)| *cookie == name) {
                         let (folder, recursive_mode, _, seen) = unsynced.remove(index);
-                        sync(folder, recursive_mode, &seen);
+                        let walk = Walk { folders: vec![(folder, recursive_mode)], polled: Arc::clone(&polled) };
+                        report_changes(&seen, &walk.walk(), &mut handler);
                     }
-                    None if watcher.is_none() => {
-                        reported.insert(name);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    for (folder, _, name, _) in &unsynced {
+                        let _ = write_cookie(folder, name);
                     }
-                    None => {}
-                },
-            }
-            if watcher.is_some() && unsynced.is_empty() && !started.swap(true, Ordering::SeqCst) {
-                tracing::debug!("The file watcher reported its cookies after {:?}.", starting.elapsed());
+                    (written, rewrite) = (Instant::now(), (rewrite * 2).min(Duration::from_secs(30)));
+                }
+                Ok(Syncing::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             }
         }
         drop(watcher);
@@ -1046,13 +1008,13 @@ where
 /// The watch [`start_watcher`] gives: the stops of its poll, when it polls, and of its operating system watcher, when
 /// it has one. Dropping it stops both: the poll at its next check, without waiting for a walk, and the operating system
 /// watcher aside.
-struct Watching<W> {
-    syncing: Option<mpsc::Sender<Syncing<W>>>,
+struct Watching {
+    syncing: Option<mpsc::Sender<Syncing>>,
     #[allow(dead_code, reason = "dropping it stops the poll")]
     polling: Option<mpsc::Sender<()>>,
 }
 
-impl<W> Drop for Watching<W> {
+impl Drop for Watching {
     fn drop(&mut self) {
         if let Some(syncing) = &self.syncing {
             let _ = syncing.send(Syncing::Stop);
@@ -1060,10 +1022,7 @@ impl<W> Drop for Watching<W> {
     }
 }
 
-impl<W> NotifyWatcher for Watching<W>
-where
-    W: NotifyWatcher + Send + 'static,
-{
+impl NotifyWatcher for Watching {
     fn new<F>(_event_handler: F, _config: Config) -> notify::Result<Self>
     where
         F: EventHandler,
@@ -1080,63 +1039,17 @@ where
     }
 
     fn kind() -> notify::WatcherKind {
-        W::kind()
+        RecommendedWatcher::kind()
     }
 }
 
 /// The name of the filesystem that holds `path` when its client caches a file's status and contents, so a change
-/// there reaches the operating system watcher late or not at all, as Watchman checks a watched folder's filesystem
-/// type: FUSE's `FUSE_SUPER_MAGIC`, which a container's bind mount from macOS, virtiofs and sshfs are, 9p's
-/// `V9FS_MAGIC`, which WSL2 and Docker on Windows mount, `NFS_SUPER_MAGIC`, and `CIFS_SUPER_MAGIC`,
-/// `SMB2_SUPER_MAGIC` and `SMB_SUPER_MAGIC`.
-#[cfg(target_os = "linux")]
+/// there reaches the operating system watcher late or not at all, as [`filesystem::of`] names it.
 fn remote_filesystem(path: &Path) -> Option<&'static str> {
-    match filesystem_of(path)?.f_type as u64 {
-        0x6573_5546 => Some("fuse"),
-        0x0102_1997 => Some("9p"),
-        0x6969 => Some("nfs"),
-        0xff53_4d42 | 0xfe53_4d42 | 0x517b => Some("cifs"),
+    match filesystem::of(path) {
+        Some(Filesystem::Remote(name)) => Some(name),
         _ => None,
     }
-}
-
-/// The name of the filesystem that holds `path` when its client caches a file's status and contents, so a change
-/// there reaches FSEvents late or not at all, as Watchman checks a watched folder's filesystem type: the network
-/// filesystems `nfs`, `smbfs`, `webdav` and `afpfs`.
-#[cfg(target_os = "macos")]
-fn remote_filesystem(path: &Path) -> Option<&'static str> {
-    let filesystem = filesystem_of(path)?;
-    let name: Vec<u8> = filesystem.f_fstypename.iter().take_while(|byte| **byte != 0).map(|byte| *byte as u8).collect();
-
-    match name.as_slice() {
-        b"nfs" => Some("nfs"),
-        b"smbfs" => Some("smbfs"),
-        b"webdav" => Some("webdav"),
-        b"afpfs" => Some("afpfs"),
-        _ => None,
-    }
-}
-
-/// No filesystem of this platform is polled.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn remote_filesystem(_: &Path) -> Option<&'static str> {
-    None
-}
-
-/// The filesystem that holds `path`, as `statfs` gives it.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn filesystem_of(path: &Path) -> Option<libc::statfs> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
-    // SAFETY: `path` ends in a NUL byte, and `filesystem` has room for the `statfs` the call fills in.
-    if unsafe { libc::statfs(path.as_ptr(), filesystem.as_mut_ptr()) } != 0 {
-        return None;
-    }
-
-    // SAFETY: the call succeeded, so it filled `filesystem` in.
-    Some(unsafe { filesystem.assume_init() })
 }
 
 /// Picks the [`FileType`] for a newly-discovered file based on which configured base path
@@ -1521,19 +1434,15 @@ mod tests {
         assert!(reported.is_empty(), "{reported:?}");
     }
 
-    /// A watcher that never finishes starting, as FSEvents takes minutes to start a stream while fseventsd is behind.
-    struct NeverStarts;
+    /// A watcher that fails to start, as one whose operating system refuses another watch.
+    struct FailsToStart;
 
-    impl NotifyWatcher for NeverStarts {
+    impl NotifyWatcher for FailsToStart {
         fn new<F>(_handler: F, _config: Config) -> notify::Result<Self>
         where
             F: EventHandler,
         {
-            // Nothing ever sends on the channel while its sender lives, so the start waits for good.
-            let (_sender, never) = mpsc::channel::<()>();
-            let _ = never.recv();
-
-            Err(notify::Error::generic("the watcher never started"))
+            Err(notify::Error::generic("the operating system refused the watch"))
         }
 
         fn watch(&mut self, _path: &Path, _recursive_mode: RecursiveMode) -> notify::Result<()> {
@@ -1549,15 +1458,21 @@ mod tests {
         }
     }
 
-    /// A watcher that never finishes starting is waited for: the watch returns at once, and polls nothing.
+    /// A watcher that fails to start fails the watch with its error, so a watch that can't see a change never runs.
     #[test]
-    fn a_watcher_that_never_starts_returns_at_once_and_polls_nothing() {
+    fn a_watcher_that_fails_to_start_fails_the_watch() {
         let (_directory, root) = project();
-        let folders = [(root.join("app"), RecursiveMode::Recursive), (root.join("vendor"), RecursiveMode::Recursive)];
+        let configuration = DatabaseConfiguration::new(&root, vec![b"app"], vec![], vec![], vec![b"php"]).into_static();
+        let database = DatabaseLoader::new(configuration).load().expect("the database should read the files");
+        let mut watcher = DatabaseWatcher::new(database);
 
-        let (_watcher, log) = start_logged::<NeverStarts>(&folders);
+        let started = watcher.watch_of::<FailsToStart>(WatchOptions::default(), TEST_COOKIE, |_| None);
 
-        assert!(!log.text().contains("checks the files"), "{}", log.text());
+        let Err(DatabaseError::WatcherInit(error)) = started else {
+            panic!("a watcher that fails to start should fail the watch, not give {started:?}");
+        };
+        assert!(error.to_string().contains("the operating system refused the watch"), "{error}");
+        assert!(!watcher.is_watching(), "the watch should not run");
     }
 
     /// A watcher that never finishes stopping, as notify's FSEvents watcher waits forever for a run loop that missed its
@@ -1716,7 +1631,7 @@ mod tests {
         let database = DatabaseLoader::new(configuration).load().expect("the database should read the files");
         let mut watcher = DatabaseWatcher::new(database);
         let options = WatchOptions { poll_interval: Some(Duration::from_millis(50)), ..WatchOptions::default() };
-        watcher.watch_of::<NeverStarts>(options, TEST_COOKIE, |_| Some("nfs")).expect("the watcher should start");
+        watcher.watch_of::<FailsToStart>(options, TEST_COOKIE, |_| Some("nfs")).expect("the watcher should start");
 
         write(&root, "app/a.php", "<?php echo 'edited';\n");
         let round = changes_within_a_minute(&mut watcher);
