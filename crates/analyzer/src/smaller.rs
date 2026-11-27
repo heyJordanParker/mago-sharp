@@ -22,14 +22,14 @@ use mago_syntax::cst::UnaryPrefixOperator;
 
 /// The value an int parameter steps towards: an int literal, or the parameter at a place, which every call that steps
 /// towards it passes on unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Bound {
     Literal(i64),
     Parameter(usize),
 }
 
 /// How a parameter's value gets smaller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Step {
     /// A list parameter's rest from a list pattern that holds an element besides the rest.
     Rest,
@@ -47,7 +47,7 @@ pub struct Fact {
 }
 
 /// An argument of a call that passes a smaller value of one of the caller's parameters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Smaller {
     /// The caller's parameter, by place.
     pub parameter: usize,

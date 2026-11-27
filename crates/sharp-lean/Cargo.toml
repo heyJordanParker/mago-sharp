@@ -21,7 +21,7 @@ mago-extension = { workspace = true }
 mago-names = { workspace = true }
 mago-reporting = { workspace = true }
 mago-sharp-bridge = { workspace = true }
-mago-span = { workspace = true }
+mago-span = { workspace = true, features = ["serde"] }
 mago-syntax = { workspace = true }
 mago-word = { workspace = true }
 serde = { workspace = true }
