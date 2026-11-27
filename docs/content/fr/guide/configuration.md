@@ -205,7 +205,9 @@ excludes = [
 | `excludes` | liste de strings | `[]` | Globs ou chemins exclus de tous les outils. |
 | `extensions` | liste de strings | `["php", "sharp"]` | Extensions des fichiers PHP et PHP# que Mago lit. |
 
-`mago lint`, `mago fmt` et `mago guard` ne lisent pas encore les fichiers PHP# : ils ignorent chaque fichier `.sharp` qu'ils trouvent et refusent celui nommé sur la ligne de commande.
+`mago lint` ne vérifie que le PHP. Il ignore chaque fichier `.sharp` qu'il trouve, et ignore avec un avertissement celui nommé sur la ligne de commande, si bien que l'exécution réussit ou échoue selon les seuls fichiers PHP. `mago analyze` vérifie le code PHP#, et les règles propres d'un projet pour ce code vont dans les [hooks d'analyse](/extensions/analyzer/overview/) d'un hôte d'extensions.
+
+`mago fmt` et `mago guard` ne lisent pas encore les fichiers PHP# : ils ignorent chaque fichier `.sharp` qu'ils trouvent et refusent celui nommé sur la ligne de commande.
 
 ### Réglages des globs
 

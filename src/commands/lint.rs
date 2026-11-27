@@ -244,8 +244,7 @@ impl LintCommand {
             stdin_input::resolve_stdin_override(self.stdin_input, &self.path, &configuration.source.workspace)?;
 
         if !self.stdin_input && self.staged {
-            let mut staged_paths = git::get_staged_file_paths(&configuration.source.workspace)?;
-            staged_paths.retain(|path| path.extension().is_none_or(|extension| extension != SHARP_EXTENSION));
+            let staged_paths = without_sharp_files(git::get_staged_file_paths(&configuration.source.workspace)?);
             if staged_paths.is_empty() {
                 tracing::info!("No staged files to lint.");
                 return Ok(ExitCode::SUCCESS.into());
@@ -257,7 +256,12 @@ impl LintCommand {
 
             orchestrator.set_source_paths(staged_paths.iter().map(|p| p.to_string_lossy().to_string()));
         } else if !self.path.is_empty() {
-            stdin_input::set_source_paths_from_paths(&mut orchestrator, &self.path);
+            let named = without_sharp_files(self.path.clone());
+            if named.is_empty() {
+                return Ok(ExitCode::SUCCESS.into());
+            }
+
+            stdin_input::set_source_paths_from_paths(&mut orchestrator, &named);
         }
         let orchestrator_init_duration = orchestrator_init_start.map(|s| s.elapsed());
 
@@ -575,4 +579,24 @@ fn wrap_and_prefix(text: &str, prefix: &str, width: usize) -> String {
     }
 
     result.trim_end().to_string()
+}
+
+/// Each of `paths` but its PHP# files, for a run that names the files it lints, with a warning for each PHP# file it
+/// leaves out, as ESLint warns about a file it was named and ignores. `mago lint` checks plain PHP, and `mago analyze`
+/// checks PHP# code, so a scan skips a `.sharp` file without a word, see [`skip_sharp_files`].
+fn without_sharp_files(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter(|path| {
+            let sharp = path.extension().is_some_and(|extension| extension == SHARP_EXTENSION);
+            if sharp {
+                tracing::warn!(
+                    "skipped {}: `mago lint` checks plain PHP, and `mago analyze` checks PHP# code.",
+                    path.display()
+                );
+            }
+
+            !sharp
+        })
+        .collect()
 }

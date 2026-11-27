@@ -213,7 +213,9 @@ excludes = [
 | `excludes` | string list | `[]` | Globs or paths excluded from every tool. |
 | `extensions` | string list | `["php", "sharp"]` | File extensions of the PHP and PHP# files Mago reads. |
 
-`mago lint`, `mago fmt` and `mago guard` do not read PHP# files yet: they skip every `.sharp` file they find and refuse one named on the command line.
+`mago lint` checks plain PHP only. It skips every `.sharp` file it finds, and skips one named on the command line with a warning, so the run passes or fails on the PHP files alone. `mago analyze` checks PHP# code, and a project's own rules for it go in an extension host's [analyzer hooks](/extensions/analyzer/overview/).
+
+`mago fmt` and `mago guard` do not read PHP# files yet: they skip every `.sharp` file they find and refuse one named on the command line.
 
 ### Patching vendor types
 
