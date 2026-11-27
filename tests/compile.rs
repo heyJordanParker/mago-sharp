@@ -580,11 +580,12 @@ fn project_with_a_host_constructing_system_files() -> tempfile::TempDir {
     directory
 }
 
-/// The standard library's `SystemFiles`, as the project installs it.
-const SYSTEM_FILES: &str = "vendor/heyjordanparker/php-sharp-composer/library/Sharp/IO/SystemFiles.sharp";
+/// The standard library's compiled `SystemFiles`, in the `.sharp` folder of the package the project installs.
+const SYSTEM_FILES: &str =
+    "vendor/heyjordanparker/php-sharp-composer/.sharp/current/library/Sharp/IO/SystemFiles.sharpc";
 
-/// A host loads the standard library's classes from the compile for the hosts, so a host that constructs one as it
-/// loads starts on a tree `mago --no-extensions compile` compiled.
+/// A host loads the standard library's classes from the `.sharp` folder of its package, so a host that constructs one
+/// as it loads starts on a tree `mago --no-extensions compile` compiled.
 #[test]
 fn a_host_that_constructs_a_standard_library_class_starts_on_a_tree_compiled_without_hosts() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -601,7 +602,7 @@ fn a_host_that_constructs_a_standard_library_class_starts_on_a_tree_compiled_wit
     )
     .unwrap();
     assert!(without_hosts.status.success(), "{}", printed(&without_hosts));
-    assert!(compiled(root, SYSTEM_FILES).is_file(), "the compile without hosts wrote {SYSTEM_FILES}");
+    assert!(compiled(root, "app/Order.sharp").is_file(), "the compile without hosts wrote app/Order.sharp");
 
     compile_succeeds(root);
 }
@@ -617,19 +618,10 @@ fn a_host_that_constructs_a_standard_library_class_starts_on_a_clean_tree_and_th
     let directory = project_with_a_host_constructing_system_files();
     let root = directory.path();
 
-    let project: String = source_hash(root.canonicalize().unwrap().as_os_str().as_encoded_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    let hosts = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache/mago/hosts").join(project);
     let written_at = || {
-        [
-            compiled(root, "app/Order.sharp"),
-            compiled(root, SYSTEM_FILES),
-            hosts.join(SYSTEM_FILES).with_extension("sharpc"),
-        ]
-        .map(|path| std::fs::metadata(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())).modified())
-        .map(Result::unwrap)
+        [compiled(root, "app/Order.sharp"), root.join(SYSTEM_FILES)]
+            .map(|path| std::fs::metadata(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())).modified())
+            .map(Result::unwrap)
     };
 
     compile_succeeds(root);
