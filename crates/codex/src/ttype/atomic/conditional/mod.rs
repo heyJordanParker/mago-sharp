@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -52,13 +53,11 @@ impl TConditional {
 }
 
 impl TType for TConditional {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        vec![
-            TypeRef::Union(self.subject.as_ref()),
-            TypeRef::Union(self.target.as_ref()),
-            TypeRef::Union(self.then.as_ref()),
-            TypeRef::Union(self.otherwise.as_ref()),
-        ]
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        visit(TypeRef::Union(self.subject.as_ref()))?;
+        visit(TypeRef::Union(self.target.as_ref()))?;
+        visit(TypeRef::Union(self.then.as_ref()))?;
+        visit(TypeRef::Union(self.otherwise.as_ref()))
     }
 
     fn needs_population(&self) -> bool {

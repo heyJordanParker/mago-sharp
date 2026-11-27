@@ -267,6 +267,8 @@ impl<'body, 'program> Body<'body, 'program> {
                 } else if let Some(family) = self.class_hint_family(name, generic) {
                     // Spec section 25: a `Class<F>` of a family `F` of classes is one of its classes.
                     self.class_value_type(&family)
+                } else if names::short_name(name) == "Class" {
+                    CLASS_VALUE.to_owned()
                 } else if is_collection(name) {
                     self.unmodeled(hint.span(), "a collection".to_owned(), issues::list_members(&LIST_MEMBERS))
                 } else {
@@ -825,10 +827,11 @@ impl<'body, 'program> Body<'body, 'program> {
         (lhs, rhs): (&str, &str),
         negated: bool,
     ) -> String {
-        // Spec section 25: two class values of one family's classes are equal when they are the same class.
-        if let (Some(left), Some(right)) = (self.class_value_family(types.0), self.class_value_family(types.1))
-            && self.reach.same_class(&left, &right)
-        {
+        // Spec section 25: two class values of one family's classes are equal when they are the same class, and two of
+        // types no family names are values of `CLASS_VALUE`, which Lean's `==` compares.
+        let families = (self.class_value_family(types.0), self.class_value_family(types.1));
+        let same_family = matches!(&families, (Some(left), Some(right)) if self.reach.same_class(left, right));
+        if same_family || (families == (None, None) && is_class_value(types.0) && is_class_value(types.1)) {
             return if negated { format!("({lhs} != {rhs})") } else { format!("({lhs} == {rhs})") };
         }
         let nullable = (types.0.is_nullable(), types.1.is_nullable());
@@ -1954,9 +1957,13 @@ impl<'body, 'program> Body<'body, 'program> {
             ("isNotEmpty", _) => format!("(!(List.isEmpty {list}))"),
             ("join", Some(separator)) => format!("(Sharp.join {} {list})", self.value(separator.value())),
             ("map" | "filter" | "any" | "all", Some(argument)) => {
-                let Some(function) = self.lambda(argument.value()) else {
+                let Some((parameters, steps, body)) = self.lambda(argument.value()) else {
                     return "default".to_owned();
                 };
+                if !steps.is_empty() {
+                    return self.monadic(&format!("List.{name}M"), (&parameters, &steps, &body), &list);
+                }
+                let function = format!("(fun {parameters} => {body})");
                 if name == "any" || name == "all" {
                     return format!("(List.{name} {list} {function})");
                 }
@@ -2017,11 +2024,18 @@ impl<'body, 'program> Body<'body, 'program> {
         }
         let map = self.value(call.object);
         if let ("filter" | "any", [argument]) = (name.as_str(), call.argument_list.arguments.as_slice()) {
-            let Some(predicate) = self.lambda(argument.value()) else {
+            let Some((parameters, steps, body)) = self.lambda(argument.value()) else {
                 return "default".to_owned();
             };
+            if !steps.is_empty() {
+                let entries = format!("(Sharp.Map.entries {map})");
+                let entry = format!("(_, {parameters})");
+                let kept = self.monadic(&format!("List.{name}M"), (&entry, &steps, &body), &entries);
 
-            return format!("(Sharp.Map.{name} {predicate} {map})");
+                return if name == "filter" { format!("(Sharp.Map.ofList {kept})") } else { kept };
+            }
+
+            return format!("(Sharp.Map.{name} (fun {parameters} => {body}) {map})");
         }
         let Some(arguments) = self.arguments(&call.argument_list, None) else {
             return "default".to_owned();
@@ -2085,9 +2099,23 @@ impl<'body, 'program> Body<'body, 'program> {
         })
     }
 
-    /// A lambda `map` or `filter` takes, as a Lean `fun`. Its body is one expression that cannot throw, so the function
-    /// is pure, as `List.map` and `List.filter` take it.
-    fn lambda(&mut self, expression: &Expression) -> Option<String> {
+    /// The name bound to `function` of a lambda over `list`, where `function` is Lean's list function of a monadic
+    /// lambda, as `List.filterM`, and the lambda takes `parameters`, binds `steps` and gives `body`. A `Map`'s `filter`
+    /// and `any` run it over the map's entries, since `ofList` of entries whose keys are distinct keeps their order.
+    fn monadic(&mut self, function: &str, (parameters, steps, body): (&str, &[String], &str), list: &str) -> String {
+        let temporary = self.fresh();
+        self.lines.push(format!("let {temporary} ← {function} (fun {parameters} => do"));
+        self.lines.extend(indented(steps, 4));
+        self.lines.push(format!("    pure {body}"));
+        self.lines.push(format!("  ) {list}"));
+
+        temporary
+    }
+
+    /// A lambda `map`, `filter`, `any` or `all` takes: its parameters' Lean names, the steps its body binds, and its
+    /// body's term. A body with no steps is a pure function, as `List.map` takes it, and one with steps, as a call of a
+    /// PHP# method or arithmetic that can overflow, runs in `M`, as `List.mapM` takes it.
+    fn lambda(&mut self, expression: &Expression) -> Option<(String, Vec<String>, String)> {
         let Expression::ArrowFunction(arrow) = expression else {
             self.unmodeled(expression.span(), "a function value that is no lambda".to_owned(), issues::LAMBDA);
             return None;
@@ -2100,13 +2128,9 @@ impl<'body, 'program> Body<'body, 'program> {
                 names::identifier(parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name))
             })
             .collect();
-        let (lines, body) = self.code_term(arrow.expression);
-        if !lines.is_empty() {
-            self.unmodeled(arrow.expression.span(), "a lambda whose body can throw".to_owned(), issues::LAMBDA);
-            return None;
-        }
+        let (steps, body) = self.code_term(arrow.expression);
 
-        Some(format!("(fun {} => {body})", parameters.join(" ")))
+        Some((parameters.join(" "), steps, body))
     }
 
     /// `object?.m(…)`, which calls `m` only when `object` is not null.
@@ -3015,6 +3039,15 @@ fn names_values(pattern: &Pattern) -> bool {
 /// `lines`, each `by` spaces further in.
 pub(crate) fn indented(lines: &[String], by: usize) -> impl Iterator<Item = String> + '_ {
     lines.iter().map(move |line| format!("{}{line}", " ".repeat(by)))
+}
+
+/// The Lean type of a class value of a type no family names, spec section 25, as `Class<Object>`: one opaque type of
+/// `Sharp/Lean/Interface.lean`, so a law holds and compares such values and knows nothing else about them.
+const CLASS_VALUE: &str = "(Interface \"Sharp.Class\")";
+
+/// Whether `r#type` is a class value and never null, spec section 25.
+fn is_class_value(r#type: &TUnion) -> bool {
+    matches!(r#type.types.as_ref(), [TAtomic::Scalar(TScalar::ClassLikeString(_))])
 }
 
 /// The `List` members a law reads, each by its name and the arguments it takes, spec section 28: [`Body::list_call`]

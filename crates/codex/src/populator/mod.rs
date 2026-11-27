@@ -308,6 +308,7 @@ fn populate_codebase_inner(
     populate_extern_signatures(codebase, symbol_references);
     codebase.populate_import_cycles();
     codebase.populate_short_names();
+    codebase.populate_interop_names();
     populate_service_ids(codebase);
 
     codebase.safe_symbols = safe_symbols;

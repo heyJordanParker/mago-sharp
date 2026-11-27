@@ -1233,17 +1233,56 @@ mod tests {
         paths
     }
 
+    /// An operating system watcher of `folder` that reports every change, cookies included, from the time it returns: it
+    /// returns once it reported a file it wrote there.
+    fn live_watcher(folder: &Path) -> (RecommendedWatcher, Receiver<notify::Result<Event>>) {
+        let (events, received) = mpsc::channel();
+        let mut watcher = RecommendedWatcher::new(events, Config::default()).expect("the watcher should start");
+        watcher.watch(folder, RecursiveMode::Recursive).expect("the folder should be watched");
+        let ready = folder.join("ready");
+        let deadline = Instant::now() + Duration::from_mins(1);
+        loop {
+            std::fs::write(&ready, "").expect("the file should be written");
+            let reported = received
+                .recv_timeout(Duration::from_millis(100))
+                .is_ok_and(|event| event.is_ok_and(|event| event.paths.contains(&ready)));
+            if reported {
+                return (watcher, received);
+            }
+            assert!(Instant::now() < deadline, "the watcher reported no write of {} within a minute", ready.display());
+        }
+    }
+
+    /// The cookies whose delete `received` reports, once `count` of them, or each within a minute.
+    fn removed_cookies(received: &Receiver<notify::Result<Event>>, count: usize) -> HashSet<PathBuf> {
+        let deadline = Instant::now() + Duration::from_mins(1);
+        let mut removed = HashSet::new();
+        while removed.len() < count
+            && let Ok(event) = received.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            let event = event.expect("the watcher should report no error");
+            if event.kind.is_remove() {
+                removed.extend(event.paths.into_iter().filter(|path| is_cookie(path)));
+            }
+        }
+
+        removed
+    }
+
     /// No handler sees a cookie: not its watcher's own, nor the one a second watcher of the same folder writes once the
-    /// first is live, and each is gone from the folder.
+    /// first is live, and each is gone from the folder once its delete is reported.
     #[test]
     fn a_cookie_never_reaches_a_handler() {
         let (_directory, root) = project();
         let app = [(root.join("app"), RecursiveMode::Recursive)];
+        let (_live, reported) = live_watcher(&root.join("app"));
         let (events, received) = mpsc::channel();
 
         let _watcher = start_watcher(events, &app, Duration::from_millis(50)).expect("the watcher should start");
         let _second = start_watcher(|_: notify::Result<Event>| {}, &app, Duration::from_millis(50))
             .expect("the second watcher should start");
+        let cookies = removed_cookies(&reported, 2);
+        assert_eq!(cookies.len(), 2, "each watcher's cookie should be deleted: {cookies:?}");
         write(&root, "app/a.php", "<?php\n\necho 1;\n");
 
         let file = root.join("app/a.php");

@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use mago_word::Word;
@@ -168,8 +169,10 @@ fn resolve_template_from_atomic(
 }
 
 impl TType for TTemplateType {
-    fn get_child_nodes(&self) -> Vec<TypeRef<'_>> {
-        vec![TypeRef::Union(&self.object), TypeRef::Union(&self.class_name), TypeRef::Union(&self.template_name)]
+    fn visit_child_nodes<'ty>(&'ty self, visit: &mut dyn FnMut(TypeRef<'ty>) -> ControlFlow<()>) -> ControlFlow<()> {
+        visit(TypeRef::Union(&self.object))?;
+        visit(TypeRef::Union(&self.class_name))?;
+        visit(TypeRef::Union(&self.template_name))
     }
 
     fn needs_population(&self) -> bool {
