@@ -401,6 +401,8 @@ final class AnalyzerCodeModuleGenerator
         'missing-readonly-marker',
         'invalid-json-key',
         'method-name-case',
+        'test-class-super-call',
+        'test-method-parameter',
     ];
 
     /**
