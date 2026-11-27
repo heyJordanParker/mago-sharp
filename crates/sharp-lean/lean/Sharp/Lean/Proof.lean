@@ -290,8 +290,10 @@ fact in its scope reaches once, and every other one as `simp` rewrites, then run
 that names a definition, as an invariant of the case a move starts from, reads what it computes as the claim does. A claim over values the law writes out,
 as `Money.total([new Money(1, "EUR")])`, needs each recursion unfolded until it ends, so the steps then run with the
 recursive definitions as `simp` rewrites too. A claim over an enum or a sealed interface the law takes, as
-`retry.backoff()[index]` over a `Retry`, reads what each case computes, so the steps then run on each case of each enum, as a body's `match` on each
-case would, and each case they leave open is reported on its own, with the case it is. -/
+`retry.backoff()[index]` over a `Retry`, reads what each case computes, so the steps run on each case of each enum
+first, as a body's `match` on each case would, since `simp` on the whole claim walks every case of each definition
+that tests the value. When a case stays open, the steps run on the whole claim, and when that fails too, each case
+they left open is reported on its own, with the case it is. -/
 syntax "sharp_prove " num " [" ident,* "]" : tactic
 
 elab_rules : tactic
@@ -305,15 +307,24 @@ elab_rules : tactic
       auto ((definitions.filter (!recursive.contains ·)) ++ laws)
     let ended : TacticM Unit := auto (definitions ++ laws)
     let proven : TacticM Outcome := withinCaseBudget <| firstClosing (once :: if recursive.isEmpty then [] else [ended])
-    let whole ← proven
-    if whole == .closed then return
     if enums.isEmpty then
-      report index conditions.getElems whole
+      let whole ← proven
+      unless whole == .closed do report index conditions.getElems whole
       return
+    let start ← saveState
+    let mut unproven := #[]
     for (case, split) in ← enumCases enums do
       setGoals [case]
       let outcome ← proven
-      unless outcome == .closed do report index conditions.getElems outcome split
+      unless outcome == .closed do unproven := unproven.push (case, outcome, split)
+    if unproven.isEmpty then return
+    let cases ← saveState
+    start.restore
+    if (← proven) == .closed then return
+    cases.restore
+    for (case, outcome, split) in unproven do
+      setGoals [case]
+      report index conditions.getElems outcome split
 
 /-- Closes the case `index` of a body with the automatic steps and the laws of the facts in scope: on the claim as the
 facts state it, else with each definition the claim calls unfolded once, else with those definitions as `simp` rewrites,

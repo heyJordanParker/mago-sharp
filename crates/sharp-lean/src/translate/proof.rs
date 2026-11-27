@@ -10,6 +10,7 @@ use mago_analyzer::smaller::Step;
 use mago_database::file::FileId;
 use mago_names::binding::Binding;
 use mago_sharp_bridge::CheckedProgram;
+use mago_sharp_bridge::DeclarationKind;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -19,6 +20,7 @@ use mago_syntax::cst::Block;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Law as LawNode;
 use mago_syntax::cst::LawProof;
 use mago_syntax::cst::Pattern;
@@ -28,6 +30,7 @@ use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_word::Word;
+use mago_word::word;
 
 use crate::issues;
 use crate::reach::Reach;
@@ -52,6 +55,10 @@ pub(crate) struct Proof {
     /// Each step that closes one of its cases, `sharp_prove` or `sharp_close` with its index and hypotheses, as the
     /// theorem writes it, so the law checker's fixed steps can close a law with a body in each one's place.
     pub(crate) closes: Vec<String>,
+    /// `cases` on each parameter of the law whose type is an enum, each followed by `<;>`, which the law checker's fixed
+    /// steps follow, so they run on each case of each enum: a definition that tests the value case by case then reads
+    /// one case, where on the value alone `simp` walks every branch. Empty for a law that takes no enum.
+    pub(crate) split: String,
     /// The law's claim as PHP# writes it, which a case's goal prints as when it holds a part PHP# writes no other way.
     pub(crate) claim: String,
     /// Each case the proof closes, in the order of its index, from 1.
@@ -248,6 +255,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         }
 
         self.proof.claim = self.source(self.law.claim.span());
+        self.proof.split = self.enum_split();
         let applied = std::iter::once(self.statement.clone()).chain(parameters.iter().cloned()).collect::<Vec<_>>();
         let theorem = |lines: &[String]| {
             let header =
@@ -625,6 +633,29 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
             .collect();
 
         Some((self.parameter_written(place), format!("{}({})", self.place, arguments.join(", "))))
+    }
+
+    /// The split [`Proof::split`] holds: `cases «a» <;> ` for each parameter of the law whose declared type is an enum.
+    fn enum_split(&self) -> String {
+        let types = self.checked.types();
+        let resolved = self.checked.names();
+        let mut split = String::new();
+        for parameter in self.law.parameter_list.parameters.iter() {
+            let Some(Hint::Identifier(identifier)) = &parameter.hint else {
+                continue;
+            };
+            if resolved.is_type_parameter(identifier)
+                || !matches!(types.class_declaration(word(resolved.get(identifier))).kind, DeclarationKind::Enum { .. })
+            {
+                continue;
+            }
+            let name = parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name);
+            split.push_str("cases ");
+            split.push_str(&names::identifier(name));
+            split.push_str(" <;> ");
+        }
+
+        split
     }
 
     fn parameter_written(&self, place: usize) -> String {

@@ -350,6 +350,30 @@ fn a_law_the_fixed_steps_leave_unproven_goes_on_to_lean_s_search() {
     assert!(!compiled(root, "app/Shared/Purse.sharp").exists());
 }
 
+/// A law over an enum value closes with the fixed steps on each case of the enum, as a `match` on the value reads one
+/// case in each, so it ends in the one runner, before Lean's search.
+#[cfg(unix)]
+#[test]
+fn a_law_over_an_enum_value_proves_with_the_fixed_steps_on_each_case() {
+    let directory = lawful_project(&[(
+        "app/Auth/Level.sharp",
+        "namespace App.Auth;\n\npublic enum Level\n{\n    case Low;\n    case Mid;\n    case High;\n\n    public int rank() => match (this) {\n        Level.Low => 1,\n        Level.Mid => 2,\n        Level.High => 3,\n    };\n\n    law rankIsPositive(Level a) => a.rank() > 0;\n}\n",
+    )]);
+    let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
+
+    let output = process::output(command(root, "never").env("XDG_CACHE_HOME", counting_cache(lake.path()))).unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let (_, _, steps, _) = runner_request(lake.path())
+        .theorems
+        .into_iter()
+        .find(|(statement, ..)| statement == "«App».«Auth».«Level».«rankIsPositive»")
+        .expect("the law's theorem");
+    assert!(steps.contains("cases «a» <;> "), "{steps}");
+    assert!(compiled(root, "app/Auth/Level.sharp").exists());
+}
+
 #[test]
 fn compile_refuses_an_unproven_law_every_time_and_never_leaves_a_current_compiled_file() {
     let broken =
