@@ -842,14 +842,10 @@ fn check_interop_name<A>(
     };
     let mut others: Vec<String> = context
         .codebase
-        .function_likes
+        .interop_namesakes(attribute.name, name)
         .iter()
-        .filter(|(_, other)| other.method_metadata.is_some() && other.span != method.span)
-        .filter(|(_, other)| {
-            interop_name(other, mark)
-                .and_then(|(other_name, _)| other_name)
-                .is_some_and(|other_name| other_name.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
-        })
+        .filter_map(|key| context.codebase.function_likes.get(key).map(|other| (key, other)))
+        .filter(|(_, other)| other.span != method.span)
         .map(|((class, _), other)| display_member(context, *class, other.original_name))
         .collect();
     if others.is_empty() {
