@@ -27,6 +27,17 @@ const BOX: &str = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Lib;\n\nfinal 
 /// A PHP file the linter reports for its missing `declare(strict_types=1);` and the formatter rewrites.
 const MESSY: &str = "<?php\n\nnamespace Lib;\n\nfunction  one( ): int {return 1;}\n";
 
+/// A plain PHP file no linter rule reports.
+const CLEAN: &str = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Lib;\n\nfunction one(): int\n{\n    return 1;\n}\n";
+
+/// A plain PHP file that breaks one linter rule at the error level, `no-eval`, so `mago lint` fails on it.
+const EVALUATES: &str =
+    "<?php\n\ndeclare(strict_types=1);\n\nnamespace Lib;\n\nfunction one(): void\n{\n    eval('1;');\n}\n";
+
+/// What `mago lint` prints for the workspace's PHP# file when the command line names it.
+const LINT_SKIPS_REPORT: &str =
+    "skipped src/Demo/Report.sharp: `mago lint` checks plain PHP, and `mago analyze` checks PHP# code.";
+
 fn valid_report() -> String {
     REPORT.replace("let label = \"one\";", "let label = 1;")
 }
@@ -1354,8 +1365,10 @@ fn lint_and_format_skip_a_staged_sharp_file() {
 
     let (output, _) = run_in_messy_workspace(&directory, "lint", &["--staged", "--reporting-format", "emacs"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}{stderr}");
     assert!(stdout.lines().any(|line| line.starts_with("src/Lib/messy.php:1:1:warning - strict-types:")), "{stdout}");
+    assert!(stderr.contains(LINT_SKIPS_REPORT), "{stderr}");
 
     let (output, _) = run_in_messy_workspace(&directory, "fmt", &["--staged"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1407,13 +1420,48 @@ fn lint_format_and_guard_never_read_a_discovered_sharp_file() {
     }
 }
 
+/// A `mago lint` run that names a PHP# file lints the plain PHP files it names, warns that it skipped the PHP# one, and
+/// exits by the PHP files alone, as ESLint warns about a file it was named and ignores.
 #[test]
-fn lint_format_and_guard_refuse_a_sharp_file_named_on_the_command_line() {
+fn lint_skips_a_named_sharp_file_with_a_warning_and_exits_by_the_php_files() {
+    let directory = workspace(REPORT);
+    std::fs::write(directory.path().join("src/Lib/clean.php"), CLEAN).unwrap();
+    std::fs::write(directory.path().join("src/Lib/evaluates.php"), EVALUATES).unwrap();
+
+    for (named, succeeds, issue) in [
+        (&["--reporting-format", "emacs", "src/Demo/Report.sharp", "src/Lib/clean.php"][..], true, None),
+        (
+            &["--reporting-format", "emacs", "src/Demo/Report.sharp", "src/Lib/evaluates.php"][..],
+            false,
+            Some("src/Lib/evaluates.php:9:5:error - no-eval:"),
+        ),
+        (&["--reporting-format", "emacs", "src/Demo/Report.sharp"][..], true, None),
+        (&["--fix", "src/Demo/Report.sharp"][..], true, None),
+    ] {
+        let output = run(directory.path(), "lint", named);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(if succeeds { 0 } else { 1 }), "{named:?}: {stdout}{stderr}");
+        assert!(stderr.contains(LINT_SKIPS_REPORT), "{named:?}: {stderr}");
+        assert!(!stderr.contains("does not support PHP# files"), "{named:?}: {stderr}");
+        assert_eq!(
+            stdout.lines().filter(|line| line.starts_with("src/")).collect::<Vec<_>>().len(),
+            usize::from(issue.is_some()),
+            "{named:?}: {stdout}"
+        );
+        if let Some(issue) = issue {
+            assert!(stdout.lines().any(|line| line.starts_with(issue)), "{named:?}: {stdout}");
+        }
+        assert_eq!(report(directory.path()), REPORT, "{named:?} changed the PHP# file");
+    }
+}
+
+#[test]
+fn format_and_guard_refuse_a_sharp_file_named_on_the_command_line() {
     let directory = workspace(REPORT);
 
     for (command, arguments, message) in [
-        ("lint", &["src/Demo/Report.sharp"][..], "`mago lint` does not support PHP# files yet"),
-        ("lint", &["--fix", "src/Demo/Report.sharp"][..], "`mago lint` does not support PHP# files yet"),
         ("fmt", &["src/Demo/Report.sharp"][..], "`mago format` does not support PHP# files yet"),
         ("guard", &["src/Demo/Report.sharp"][..], "`mago guard` does not support PHP# files yet"),
     ] {
