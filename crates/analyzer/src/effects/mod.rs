@@ -352,6 +352,21 @@ struct Origin {
     via: Option<(usize, Item)>,
 }
 
+/// A constructor below a `required` one that adds an effect to it, as [`Effects::widened_constructors`] finds it.
+struct WidenedConstructor<'effects> {
+    /// The constructor's class and member, as messages name them.
+    member: (Word, Word),
+    /// The `required` constructor's class and member, as messages name them.
+    required: (Word, Word),
+    /// The effects of the `required` constructor.
+    allowed: Vec<Word>,
+    /// The imports and the scope of the constructor's file, which name the classes of a message about it.
+    imports: &'effects WordMap<Word>,
+    scope: &'effects NamespaceScope,
+    /// The first call that leads to the effect the constructor adds.
+    impurity: Impurity,
+}
+
 /// The solved effects and changes of every PHP# body.
 #[derive(Debug)]
 pub struct Effects {
@@ -390,12 +405,16 @@ impl Effects {
 
         // A call to a method that can be overridden runs any override, so it reaches every override's body. A call
         // that leaves out an argument runs the default of the override it reaches at that place, and a parameter an
-        // override adds after the method's own is one every call through the method leaves out.
+        // override adds after the method's own is one every call through the method leaves out. A constructor
+        // overrides none: `new Saved()`, `: super()` and `: this()` each run the one constructor they name.
         let mut overrides: HashMap<Body, Vec<usize>> = HashMap::default();
         for (position, summary) in summaries.iter().enumerate() {
             let (Body::Method(class, method) | Body::Default(class, method, _)) = summary.body else {
                 continue;
             };
+            if method.as_bytes() == b"__construct" {
+                continue;
+            }
             let place = |parameter: Word| {
                 codebase
                     .get_method(class, method)
@@ -654,6 +673,7 @@ impl Effects {
         issues.extend(check::laws_must_be_pure(self, codebase));
         issues.extend(check::function_values_must_fit_their_types(self, codebase));
         issues.extend(check::implementations_must_fit_their_declarations(self, codebase));
+        issues.extend(check::required_constructors_add_no_effect(self, codebase));
         issues.extend(check::readonly_values_call_readonly_methods(self, codebase));
         issues.extend(check::values_have_no_effects(self, codebase));
         issues.extend(check::attributes_have_no_effects(self, codebase));
@@ -821,6 +841,51 @@ impl Effects {
                         &*self.scopes[position],
                         impurity,
                     ))
+                })
+            },
+        )
+    }
+
+    /// Each PHP# constructor below a `required` one that has an effect that one doesn't have, spec section 29, as a
+    /// [`WidenedConstructor`]. A `required` constructor that may have every effect, through plain PHP whose `extern`
+    /// line says `uses any`, takes any constructor below it.
+    fn widened_constructors<'effects>(
+        &'effects self,
+        codebase: &'effects CodebaseMetadata,
+    ) -> impl Iterator<Item = WidenedConstructor<'effects>> + 'effects {
+        let constructor = word(b"__construct");
+        self.bodies.iter().enumerate().filter(|(position, body)| self.index.get(body) == Some(position)).filter_map(
+            move |(position, body)| {
+                let Body::Method(class, method) = *body else {
+                    return None;
+                };
+                let metadata = codebase.get_class_like(class)?;
+                if !metadata.flags.is_sharp() || method != metadata.method_key(constructor) {
+                    return None;
+                }
+                let required = std::iter::successors(metadata.direct_parent_class, |parent| {
+                    codebase.get_class_like(*parent)?.direct_parent_class
+                })
+                .find_map(|parent| {
+                    let declaring = codebase.class_key(codebase.get_declaring_method_class(parent, constructor)?);
+                    let declared = codebase.get_class_like(declaring)?.method_key(constructor);
+
+                    codebase
+                        .get_method(declaring, declared)
+                        .is_some_and(|metadata| metadata.flags.is_required())
+                        .then_some(Body::Method(declaring, declared))
+                })?;
+                let required_position = *self.index.get(&required)?;
+                let allowed = self.effects_of(&[required_position])?;
+                let impurity = self.effect_outside(codebase, *body, &allowed)?;
+
+                Some(WidenedConstructor {
+                    member: self.names[position],
+                    required: self.names[required_position],
+                    allowed,
+                    imports: &self.imports[position],
+                    scope: &self.scopes[position],
+                    impurity,
                 })
             },
         )

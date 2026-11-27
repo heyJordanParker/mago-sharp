@@ -4324,6 +4324,52 @@ fn a_law_reaching_a_lambda_that_can_throw_is_refused() {
     );
 }
 
+/// Spec section 25: a class value of a type no family names, as `Class<Object>` and `Class<Any?>`, is a value a law
+/// holds and compares, so a law over a reflection type that holds one, as `Parameter`, reads its fields and compares two
+/// class values.
+#[test]
+fn a_law_over_a_type_with_a_class_value_field_translates() {
+    let directory = library_project(&[(
+        "app/Shared/Shape.sharp",
+        "namespace App.Shared;\n\nimport Sharp.Parameter;\n\npublic static class Shape\n{\n    law namedAsItself(Parameter parameter) => parameter.name == parameter.name;\n\n    law sameType(Parameter a) => a.type == a.type;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Shape.sharp").exists());
+}
+
+/// A law that reaches one construct the translation does not model in two places of another file is refused once, on
+/// the law.
+#[test]
+fn a_refused_law_construct_prints_once() {
+    let directory = library_project(&[
+        (
+            "app/Shared/Box.sharp",
+            "namespace App.Shared;\n\npublic class Box\n{\n    public Box(public string label { get; }, public Function<int(int)> first { get; }, public Function<int(int)> second { get; }) { }\n}\n",
+        ),
+        (
+            "app/Shared/Shape.sharp",
+            "namespace App.Shared;\n\npublic static class Shape\n{\n    law labelled(Box box) => box.label == box.label;\n}\n",
+        ),
+    ]);
+
+    let output = compile_without_lean(directory.path());
+
+    let refusals: Vec<String> =
+        issue_lines(&output).into_iter().filter(|line| line.contains("unmodeled-construct")).collect();
+    assert_eq!(
+        refusals,
+        [
+            "app/Shared/Shape.sharp:5:5:error - unmodeled-construct: Law labelled reaches a function type in Box. Pass a lambda only to a List's `map` or `filter`, with a body that cannot throw, and call a PHP# method in place of any other function value."
+        ],
+        "{}",
+        printed(&output)
+    );
+}
+
 #[test]
 fn a_law_reaching_a_loop_is_refused() {
     assert_unmodeled(
