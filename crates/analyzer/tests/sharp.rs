@@ -1162,22 +1162,22 @@ fn a_member_a_marked_class_inherits_and_a_test_folder_class_are_not_too_wide() {
     );
 }
 
-/// Spec section 5: `[DynamicallyAccessed]` marks an attribute class, so that the members and classes carrying the
-/// attribute count as used. On a class that is no attribute class, as the struct `DomainRecord`, it would mark nothing,
-/// so it is a compile error that names the fix. On an attribute class it compiles, and a struct that carries that
-/// attribute has no too-wide member.
+/// Spec section 5: `[DynamicallyAccessed]` on an attribute class says its framework reads the attribute, so the members
+/// and classes that carry it count as used. On a class that is no attribute class it marks a base class, whose
+/// framework creates each class that extends it and calls its methods, so a subclass in another namespace has no
+/// too-wide method, and the mark on the base class compiles.
 #[test]
-fn the_dynamically_accessed_mark_goes_on_an_attribute_class_only() {
+fn the_dynamically_accessed_mark_on_a_base_class_reaches_its_subclasses() {
     let marker = (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
         include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
     );
-    let domain_record = "namespace App.Shop;\n\n[DynamicallyAccessed]\npublic struct DomainRecord\n{\n    public DomainRecord(public string value { get; }) { }\n}\n";
+    let base = "namespace App.Shop;\n\n[DynamicallyAccessed]\npublic abstract class DomainRecord\n{\n}\n";
+    let order = "namespace App.Web;\n\nimport App.Shop.DomainRecord;\n\npublic final class Order : DomainRecord\n{\n    public string total() => \"0\";\n}\n";
+    assert_eq!(refusals(("src/App/Shop/DomainRecord.sharp", base), &[marker]), Vec::<String>::new());
     assert_eq!(
-        refusals(("src/App/Shop/DomainRecord.sharp", domain_record), &[marker]),
-        [
-            "3:2 invalid-attribute-target `[DynamicallyAccessed]` marks an attribute class, and `DomainRecord` is not one. Mark the attribute that `DomainRecord` carries. | "
-        ]
+        too_wide(&[marker, ("src/App/Shop/DomainRecord.sharp", base), ("src/App/Web/Order.sharp", order)]),
+        Vec::<String>::new()
     );
 
     let record =
@@ -1187,6 +1187,135 @@ fn the_dynamically_accessed_mark_goes_on_an_attribute_class_only() {
     assert_eq!(
         too_wide(&[marker, ("src/App/Shop/Record.sharp", record), ("src/App/Web/Carried.sharp", carried)]),
         Vec::<String>::new()
+    );
+}
+
+/// PHPUnit's base class of a test and its attributes of a test method, as a project's `vendor` folder holds them.
+const PHPUNIT: [(&str, &str); 3] = [
+    (
+        "vendor/phpunit/phpunit/src/Framework/TestCase.php",
+        "<?php\n\nnamespace PHPUnit\\Framework;\n\nabstract class TestCase\n{\n}\n",
+    ),
+    (
+        "vendor/phpunit/phpunit/src/Framework/Attributes/Test.php",
+        "<?php\n\nnamespace PHPUnit\\Framework\\Attributes;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD)]\nfinal class Test\n{\n}\n",
+    ),
+    (
+        "vendor/phpunit/phpunit/src/Framework/Attributes/DataProvider.php",
+        "<?php\n\nnamespace PHPUnit\\Framework\\Attributes;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD | \\Attribute::IS_REPEATABLE)]\nfinal class DataProvider\n{\n    public function __construct(public string $methodName)\n    {\n    }\n}\n",
+    ),
+];
+
+/// Eloquent's `Model`, the base class of a model, and its `Attribute` of an accessor, as a project's `vendor` folder
+/// holds them.
+const ELOQUENT: [(&str, &str); 2] = [
+    (
+        "vendor/laravel/framework/src/Illuminate/Database/Eloquent/Model.php",
+        "<?php\n\nnamespace Illuminate\\Database\\Eloquent;\n\nabstract class Model\n{\n}\n",
+    ),
+    (
+        "vendor/laravel/framework/src/Illuminate/Database/Eloquent/Casts/Attribute.php",
+        "<?php\n\nnamespace Illuminate\\Database\\Eloquent\\Casts;\n\nfinal class Attribute\n{\n    public static function make(?\\Closure $get = null): self\n    {\n        return new self();\n    }\n}\n",
+    ),
+];
+
+/// Spec section 5: in a test folder, an `autoload-dev` one, the test runner calls each method marked PHPUnit's `Test`
+/// and each method a `DataProvider` of one names, which the checker never sees, so neither is too wide with no
+/// declaration of the project's. A public method of a test class with neither is still too wide.
+#[test]
+fn a_test_method_marked_test_is_reached_by_the_runner() {
+    let test = "namespace App.Shop;\n\nimport PHPUnit.Framework.Attributes.DataProvider;\nimport PHPUnit.Framework.Attributes.Test;\nimport PHPUnit.Framework.TestCase;\n\npublic final class OrderTest : TestCase\n{\n    [Test]\n    [DataProvider(nameof(OrderTest.rows))]\n    public void testItLists(int count) { }\n\n    public static List<List<int>> rows() => [[1]];\n\n    public void helper() { }\n}\n";
+    let mut files = PHPUNIT.to_vec();
+    files.push(("tests/Shop/OrderTest.sharp", test));
+
+    assert_eq!(
+        too_wide(&files),
+        [
+            "tests/Shop/OrderTest.sharp 15:17 `OrderTest.helper` is public, and nothing outside `OrderTest` uses it. | Declare it `private`, or, when a framework reaches it by name or by reflection, put an attribute whose class is marked `[DynamicallyAccessed]` on its class."
+        ]
+    );
+}
+
+/// Spec section 5: `[DynamicallyAccessed]` on a base class that is no attribute class, as on the `extern` line of
+/// Eloquent's `Model`, says its framework creates each class that extends it and calls its public and protected
+/// methods, which the checker never sees. So a model's relation and accessor need no other use, and without the mark
+/// the model and its relation are too wide.
+#[test]
+fn a_marked_base_class_reaches_public_and_protected_methods_of_its_subclasses() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let marked = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Model;\n\n[DynamicallyAccessed]\nextern Model uses none;\n";
+    let unmarked = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Model;\n\nextern Model uses none;\n";
+    let offer = "namespace App.Store;\n\nimport Illuminate.Database.Eloquent.Casts.Attribute;\nimport Illuminate.Database.Eloquent.Model;\n\npublic final class CartOffer : Model\n{\n    public string offer() => \"offer\";\n\n    protected Attribute label() => Attribute.make(get: (string value) => value.trim());\n}\n";
+    let files = |stubs: &'static str| {
+        let mut files = ELOQUENT.to_vec();
+        files.extend([marker, ("src/App/Stubs/Stubs.sharp", stubs), ("src/App/Store/CartOffer.sharp", offer)]);
+        files
+    };
+
+    assert_eq!(too_wide(&files(marked)), Vec::<String>::new());
+    assert_eq!(
+        too_wide(&files(unmarked)),
+        [
+            "src/App/Store/CartOffer.sharp 6:20 `CartOffer` is public, and nothing outside `App.Store` uses it. | Declare it `internal`, or, when a framework reaches it by name or by reflection, put an attribute whose class is marked `[DynamicallyAccessed]` on it.",
+            "src/App/Store/CartOffer.sharp 8:19 `CartOffer.offer` is public, and nothing outside `CartOffer` uses it. | Declare it `private`, or, when a framework reaches it by name or by reflection, put an attribute whose class is marked `[DynamicallyAccessed]` on its class."
+        ]
+    );
+}
+
+/// Spec section 5: each reach the checker can't see is a use from outside any namespace, so `internal`, written or by
+/// default, on a class or a member one reaches is too narrow, an error at its declaration, where the engine would
+/// throw when it runs. Each reach names who reaches: the test runner, the framework of a marked attribute or of a
+/// marked base class, plain PHP calling an `[Export]` method and the engine running `main`. A private method of a
+/// marked base's subclass that no code uses is the framework's, which calls it from the base class, so it is refused
+/// with `protected`.
+#[test]
+fn an_internal_class_or_member_a_framework_reaches_is_too_narrow() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let export = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Interop/Export.sharp",
+        include_str!("../../../../composer/library/Sharp/Interop/Export.sharp"),
+    );
+    let listener = "<?php\n\nnamespace Symfony\\Component\\EventDispatcher\\Attribute;\n\n#[\\Attribute(\\Attribute::TARGET_CLASS | \\Attribute::TARGET_METHOD)]\nclass AsEventListener\n{\n}\n";
+    let stubs = "namespace App.Stubs;\n\nimport Illuminate.Database.Eloquent.Model;\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\n[DynamicallyAccessed]\nextern AsEventListener uses none;\n\n[DynamicallyAccessed]\nextern Model uses none;\n";
+    let order_test =
+        "namespace App.Shop;\n\nimport PHPUnit.Framework.TestCase;\n\nfinal class OrderTest : TestCase\n{\n}\n";
+    let cart_test = "namespace App.Shop;\n\nimport PHPUnit.Framework.Attributes.Test;\nimport PHPUnit.Framework.TestCase;\n\npublic final class CartTest : TestCase\n{\n    [Test]\n    internal void testTotals() { }\n}\n";
+    let hooks = "namespace App.Payments;\n\nimport Symfony.Component.EventDispatcher.Attribute.AsEventListener;\n\npublic class Hooks\n{\n    [AsEventListener]\n    internal void paid() { }\n}\n";
+    let offer = "namespace App.Store;\n\nimport Illuminate.Database.Eloquent.Casts.Attribute;\nimport Illuminate.Database.Eloquent.Model;\n\npublic final class CartOffer : Model\n{\n    internal string offer() => \"offer\";\n\n    private Attribute label() => Attribute.make(get: (string value) => value.trim());\n}\n";
+    let overrides = "namespace App.Hooks;\n\nimport Sharp.Interop.Export;\n\npublic static class Overrides\n{\n    [Export(\"app_title\")]\n    internal static string title(string text) => text;\n}\n";
+    let import = "namespace App.Console;\n\npublic class Import\n{\n    internal int main() => 0;\n}\n";
+    let mut files = PHPUNIT.to_vec();
+    files.extend(ELOQUENT);
+    files.extend([
+        marker,
+        export,
+        ("vendor/symfony/event-dispatcher/Attribute/AsEventListener.php", listener),
+        ("src/App/Stubs/Stubs.sharp", stubs),
+        ("tests/Shop/OrderTest.sharp", order_test),
+        ("tests/Shop/CartTest.sharp", cart_test),
+        ("src/App/Payments/Hooks.sharp", hooks),
+        ("src/App/Store/CartOffer.sharp", offer),
+        ("src/App/Hooks/Overrides.sharp", overrides),
+        ("src/App/Console/Import.sharp", import),
+    ]);
+
+    assert_eq!(
+        too_wide(&files),
+        [
+            "tests/Shop/OrderTest.sharp 5:13 `OrderTest` is internal, and its test runner reaches it from outside `App.Shop`, so it throws when it runs. | Declare it public.",
+            "tests/Shop/CartTest.sharp 9:19 `CartTest.testTotals` is internal, and its test runner reaches it from outside `App.Shop`, so it throws when it runs. | Declare it public.",
+            "src/App/Payments/Hooks.sharp 8:19 `Hooks.paid` is internal, and the framework that reads `AsEventListener` reaches it from outside `App.Payments`, so it throws when it runs. | Declare it public.",
+            "src/App/Store/CartOffer.sharp 8:21 `CartOffer.offer` is internal, and the framework that `Model` declares reaches it from outside `App.Store`, so it throws when it runs. | Declare it public.",
+            "src/App/Store/CartOffer.sharp 10:23 `CartOffer.label` is private, and the framework that `Model` declares reaches it from outside `CartOffer`, so it throws when it runs. | Declare it protected.",
+            "src/App/Hooks/Overrides.sharp 8:28 `Overrides.title` is internal, and plain PHP's call of its `[Export]` function reaches it from outside `App.Hooks`, so it throws when it runs. | Declare it public.",
+            "src/App/Console/Import.sharp 5:18 `Import.main` is internal, and the engine that runs the program reaches it from outside `App.Console`, so it throws when it runs. | Declare it public."
+        ]
     );
 }
 

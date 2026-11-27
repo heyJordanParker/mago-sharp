@@ -52,6 +52,12 @@ use crate::utils::names::sharp_class_like_name;
 use crate::visibility::is_within_namespace;
 use crate::visibility::namespace_of;
 
+/// PHPUnit's attribute of a test method, which its test runner calls.
+const PHPUNIT_TEST: &str = "PHPUnit\\Framework\\Attributes\\Test";
+
+/// PHPUnit's attribute that names the method whose rows a test method runs with, which its test runner calls.
+const PHPUNIT_DATA_PROVIDER: &str = "PHPUnit\\Framework\\Attributes\\DataProvider";
+
 /// Represents a checkable member (property or method) with its metadata.
 #[derive(Clone)]
 struct CheckableMember {
@@ -113,6 +119,9 @@ fn collect_checkable_members(
     }
 
     let is_final = class_like_metadata.flags.is_final() || class_like_metadata.kind.is_enum();
+    // The framework of a marked base class reaches each method of its subclasses, and too-wide refuses a private one
+    // nothing uses, spec section 5.
+    let framework_reached = marked_base(codebase, class_like_metadata).is_some();
     let mut checkable_members = Vec::new();
 
     for (property_name, property) in &class_like_metadata.properties {
@@ -170,7 +179,7 @@ fn collect_checkable_members(
         }
     }
 
-    for method_name in &class_like_metadata.methods {
+    for method_name in class_like_metadata.methods.iter().filter(|_| !framework_reached) {
         if let Some(declaring_method_id) = class_like_metadata.declaring_method_ids.get(method_name)
             && declaring_method_id.get_class_name() != class_name
         {
@@ -623,7 +632,8 @@ pub fn too_wide_members(
     references: &SymbolReferences,
     test_files: &[FileId],
 ) -> IssueCollection {
-    let uses_on = uses_on(codebase, references, test_files);
+    let reaches = unseen_reaches(codebase, test_files);
+    let uses_on = uses_on(codebase, references, &reaches);
     let namespace_types = namespace_types(codebase, &uses_on);
     // The same uses by the member and each class-like the class the code names it on is an instance of, as
     // `CodebaseMetadata::is_instance_of` decides.
@@ -719,6 +729,96 @@ pub fn too_wide_members(
             );
         }
     }
+    issues.extend(too_narrow_reaches(codebase, &reaches, &member_uses));
+
+    issues
+}
+
+/// Refuses each class or member a reach the checker can't see reaches, as [`unseen_reaches`] gives them, where the
+/// reach throws when it runs, spec section 5: each reach is a use from outside any namespace, so `internal` on its
+/// class or member, written or by default, is too narrow, an error at its declaration, and the engine's check stays. A
+/// member of an `internal` class reaches no further than its class, so the class is the one refused. A private method
+/// of a marked base's subclass that no code uses is one its framework calls from the base class's code, as Eloquent
+/// calls an accessor, so it is refused too, and `protected` is enough.
+fn too_narrow_reaches(
+    codebase: &CodebaseMetadata,
+    reaches: &[Reach],
+    member_uses: &HashMap<(Word, Word), Vec<&[Option<Word>]>>,
+) -> IssueCollection {
+    let mut issues = IssueCollection::default();
+    let mut refused = HashSet::<Span>::default();
+    let project_class = |name: Word| {
+        codebase.get_class_like(name).filter(|class| class.flags.is_user_defined() && class.flags.is_project())
+    };
+    for reach in reaches {
+        let Some(class) = project_class(reach.on) else {
+            continue;
+        };
+        let class_label = sharp_class_like_name(codebase, &WordMap::default(), class.name);
+        let (label, span) = if class.flags.is_internal_reach() {
+            (class_label, class.name_span.unwrap_or(class.span))
+        } else if let Some(method) = codebase.function_likes.get(&(reach.on, reach.member))
+            && method.flags.is_internal_reach()
+        {
+            (display_sharp_member(&class_label, method.original_name), method.name_span.unwrap_or(method.span))
+        } else if let Some(property) = class.properties.get(&reach.member)
+            && property.flags.is_internal_reach()
+            && let Some(span) = property.name_span.or(property.span)
+        {
+            (display_sharp_member(&class_label, reach.member), span)
+        } else if let Some(constant) = class.constants.get(&reach.member)
+            && constant.flags.is_internal_reach()
+        {
+            (display_sharp_member(&class_label, reach.member), constant.span)
+        } else {
+            continue;
+        };
+        if !refused.insert(span) {
+            continue;
+        }
+        let namespace = String::from_utf8_lossy(namespace_of(class.original_name.as_bytes())).replace('\\', ".");
+        issues.push(
+            Issue::error(format!(
+                "`{label}` is internal, and {} reaches it from outside `{namespace}`, so it throws when it runs.",
+                reach.by.subject(codebase)
+            ))
+            .with_code(IssueCode::InternalAccess)
+            .with_annotation(Annotation::primary(span).with_message("Declared `internal` here."))
+            .with_help("Declare it public."),
+        );
+    }
+
+    for (class_name, class) in &codebase.class_likes {
+        let Some(base) = marked_base(codebase, class).filter(|_| project_class(*class_name).is_some()) else {
+            continue;
+        };
+        let class_key = codebase.class_key(*class_name);
+        let class_label = sharp_class_like_name(codebase, &WordMap::default(), *class_name);
+        for name in &class.methods {
+            let Some(method) = codebase.function_likes.get(&(*class_name, *name)) else {
+                continue;
+            };
+            if method.span == class.span
+                || name.as_bytes().starts_with(b"__")
+                || name.as_bytes().starts_with(b"#")
+                || !method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_private())
+                || member_uses.get(&(*name, class_key)).is_some_and(|uses| uses.iter().any(|uses| !uses.is_empty()))
+            {
+                continue;
+            }
+            let span = method.name_span.unwrap_or(method.span);
+            issues.push(
+                Issue::error(format!(
+                    "`{}` is private, and {} reaches it from outside `{class_label}`, so it throws when it runs.",
+                    display_sharp_member(&class_label, method.original_name),
+                    ReachedBy::BaseClass(base).subject(codebase)
+                ))
+                .with_code(IssueCode::InvalidMethodAccess)
+                .with_annotation(Annotation::primary(span).with_message("Declared `private` here."))
+                .with_help("Declare it protected."),
+            );
+        }
+    }
 
     issues
 }
@@ -738,17 +838,17 @@ pub fn types_only_their_namespace_uses(
     references: &SymbolReferences,
     test_files: &[FileId],
 ) -> HashSet<Word> {
-    namespace_types(codebase, &uses_on(codebase, references, test_files))
+    namespace_types(codebase, &uses_on(codebase, references, &unseen_reaches(codebase, test_files)))
 }
 
 /// The code each use of a member is in, the class or function, `None` for code outside both, by the member and the
 /// class the code names it on, an empty member for a use of the class itself. A member must be visible to each class
 /// that overrides or implements it, so each override uses the member it replaces from the class that declares the
-/// override. Each reach the checker can't see is a use from outside, as [`unseen_reaches`] records it.
+/// override. Each of `reaches`, which the checker can't see, is a use from outside, as [`unseen_reaches`] gives them.
 fn uses_on(
     codebase: &CodebaseMetadata,
     references: &SymbolReferences,
-    test_files: &[FileId],
+    reaches: &[Reach],
 ) -> HashMap<(Word, Word), Vec<Option<Word>>> {
     let mut uses_on = HashMap::<(Word, Word), Vec<Option<Word>>>::default();
     references.for_each_reference(|origin, (class, member), _| {
@@ -775,58 +875,146 @@ fn uses_on(
             }
         }
     }
-    for (member, on) in unseen_reaches(codebase, test_files) {
-        uses_on.entry((member, on)).or_default().push(None);
+    for reach in reaches {
+        uses_on.entry((reach.member, reach.on)).or_default().push(None);
     }
 
     uses_on
 }
 
-/// Each reach of spec section 5 the checker can't see, as the member and the class it is on, an empty member for the
-/// class itself, each a use from outside any namespace:
+/// Who reaches a class or a member where the checker can't see it, spec section 5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReachedBy {
+    /// The test runner, which creates a test class and calls its test methods, as PHPUnit does.
+    TestRunner,
+    /// The framework that reads the marked attribute class, as a router reads `Route`.
+    Attribute(Word),
+    /// The framework that declares the marked base class, as Eloquent declares `Model`.
+    BaseClass(Word),
+    /// Plain PHP, which calls the global function an `[Export]` method declares, section 23.
+    Export,
+    /// The engine, which calls a program's `main`, section 27.
+    Engine,
+}
+
+impl ReachedBy {
+    /// Who reaches, as the error that names the reach writes it.
+    fn subject(self, codebase: &CodebaseMetadata) -> String {
+        let short = |class: Word| {
+            let name = sharp_class_like_name(codebase, &WordMap::default(), class);
+            name.rsplit('.').next().unwrap_or(&name).to_owned()
+        };
+        match self {
+            Self::TestRunner => "its test runner".to_owned(),
+            Self::Attribute(attribute) => format!("the framework that reads `{}`", short(attribute)),
+            Self::BaseClass(base) => format!("the framework that `{}` declares", short(base)),
+            Self::Export => "plain PHP's call of its `[Export]` function".to_owned(),
+            Self::Engine => "the engine that runs the program".to_owned(),
+        }
+    }
+}
+
+/// A reach of spec section 5 the checker can't see: the member, an empty one for the class itself, the class it is on,
+/// and who reaches it.
+#[derive(Debug, Clone, Copy)]
+struct Reach {
+    member: Word,
+    on: Word,
+    by: ReachedBy,
+}
+
+/// Each reach of spec section 5 the checker can't see, each a use from outside any namespace:
 ///
 /// - a class that carries a marked attribute, whose framework reaches the class and every member it has, the ones it
 ///   inherits included, each on the class that declares it, so that class is reached as a type too
+/// - a class that extends a marked base class, directly or not, as an Eloquent model extends `Model`: the class and
+///   each public and protected method it declares
 /// - a member that carries a marked attribute, an `[Export]` method, which plain PHP calls through the global function
 ///   it declares, section 23, and a program's `main`, which the engine calls, section 27: the member and its class
 /// - a class in one of `test_files`, the files of an `autoload-dev` folder, which its test runner creates, as PHPUnit
-///   creates a test class
-fn unseen_reaches(codebase: &CodebaseMetadata, test_files: &[FileId]) -> Vec<(Word, Word)> {
+///   creates a test class, each of its methods marked [`PHPUNIT_TEST`], and each method a [`PHPUNIT_DATA_PROVIDER`] of
+///   one of them names
+fn unseen_reaches(codebase: &CodebaseMetadata, test_files: &[FileId]) -> Vec<Reach> {
     let test_files: HashSet<FileId> = test_files.iter().copied().collect();
+    let (test, provider) = (codebase.class_key(word(PHPUNIT_TEST)), codebase.class_key(word(PHPUNIT_DATA_PROVIDER)));
     let mut reaches = Vec::new();
     for (class_name, class) in &codebase.class_likes {
-        if is_dynamically_accessed(codebase, &class.attributes) {
-            reaches.push((empty_word(), *class_name));
-            reaches.extend(
-                class.declaring_method_ids.iter().map(|(method, declared)| (*method, declared.get_class_name())),
-            );
-            reaches.extend(class.declaring_property_ids.iter().map(|(property, declaring)| (*property, *declaring)));
-            reaches.extend(class.constants.keys().map(|constant| (*constant, *class_name)));
+        let on = |member: Word, by: ReachedBy| Reach { member, on: *class_name, by };
+        if let Some(attribute) = marked_attribute(codebase, &class.attributes) {
+            let by = ReachedBy::Attribute(attribute);
+            reaches.push(on(empty_word(), by));
+            reaches.extend(class.declaring_method_ids.iter().map(|(method, declared)| Reach {
+                member: *method,
+                on: declared.get_class_name(),
+                by,
+            }));
+            reaches.extend(class.declaring_property_ids.iter().map(|(property, declaring)| Reach {
+                member: *property,
+                on: *declaring,
+                by,
+            }));
+            reaches.extend(class.constants.keys().map(|constant| on(*constant, by)));
             continue;
         }
-        if test_files.contains(&class.span.file_id) {
-            reaches.push((empty_word(), *class_name));
-        }
-        let mut members: Vec<Word> = class
-            .properties
+        let methods: Vec<(Word, &FunctionLikeMetadata)> = class
+            .methods
             .iter()
-            .filter_map(|(name, property)| is_dynamically_accessed(codebase, &property.attributes).then_some(*name))
+            .filter_map(|name| Some((*name, codebase.function_likes.get(&(*class_name, *name))?)))
             .collect();
-        members.extend(
-            class.constants.iter().filter_map(|(name, constant)| {
-                is_dynamically_accessed(codebase, &constant.attributes).then_some(*name)
-            }),
-        );
-        members.extend(class.methods.iter().copied().filter(|name| {
-            codebase.function_likes.get(&(*class_name, *name)).is_some_and(|method| {
-                method.has_attribute(codebase, word(EXPORT))
-                    || is_program_entry(class, method)
-                    || is_dynamically_accessed(codebase, &method.attributes)
-            })
+        let mut members: Vec<(Word, ReachedBy)> = Vec::new();
+        if test_files.contains(&class.span.file_id) {
+            reaches.push(on(empty_word(), ReachedBy::TestRunner));
+            for (name, method) in &methods {
+                if method.attributes.iter().any(|attribute| codebase.class_key(attribute.name) == test) {
+                    members.push((*name, ReachedBy::TestRunner));
+                }
+                members.extend(
+                    method
+                        .attributes
+                        .iter()
+                        .filter(|attribute| codebase.class_key(attribute.name) == provider)
+                        .filter_map(|attribute| attribute.text_argument(0, b"methodName"))
+                        .map(|provided| (word(provided.to_ascii_lowercase()), ReachedBy::TestRunner)),
+                );
+            }
+        }
+        if let Some(base) = marked_base(codebase, class) {
+            let by = ReachedBy::BaseClass(base);
+            reaches.push(on(empty_word(), by));
+            members.extend(
+                methods
+                    .iter()
+                    .filter(|(name, method)| {
+                        class
+                            .declaring_method_ids
+                            .get(name)
+                            .is_none_or(|declaring| declaring.get_class_name() == *class_name)
+                            && method.method_metadata.as_ref().is_some_and(|metadata| !metadata.visibility.is_private())
+                    })
+                    .map(|(name, _)| (*name, by)),
+            );
+        }
+        members.extend(class.properties.iter().filter_map(|(name, property)| {
+            marked_attribute(codebase, &property.attributes).map(|attribute| (*name, ReachedBy::Attribute(attribute)))
         }));
-        if !members.is_empty() {
-            reaches.push((empty_word(), *class_name));
-            reaches.extend(members.into_iter().map(|member| (member, *class_name)));
+        members.extend(class.constants.iter().filter_map(|(name, constant)| {
+            marked_attribute(codebase, &constant.attributes).map(|attribute| (*name, ReachedBy::Attribute(attribute)))
+        }));
+        for (name, method) in &methods {
+            let by = if method.has_attribute(codebase, word(EXPORT)) {
+                ReachedBy::Export
+            } else if is_program_entry(class, method) {
+                ReachedBy::Engine
+            } else if let Some(attribute) = marked_attribute(codebase, &method.attributes) {
+                ReachedBy::Attribute(attribute)
+            } else {
+                continue;
+            };
+            members.push((*name, by));
+        }
+        for (member, by) in members {
+            reaches.push(on(empty_word(), by));
+            reaches.push(on(member, by));
         }
     }
 
@@ -879,7 +1067,7 @@ pub fn unused_classes(
     references: &SymbolReferences,
     test_files: &[FileId],
 ) -> IssueCollection {
-    let mut used: HashSet<Word> = unseen_reaches(codebase, test_files).into_iter().map(|reach| reach.1).collect();
+    let mut used: HashSet<Word> = unseen_reaches(codebase, test_files).into_iter().map(|reach| reach.on).collect();
     references.for_each_reference(|origin, (class, _), _| {
         let from_inside = match origin {
             ReferenceOrigin::Symbol((symbol, _)) => {
@@ -995,15 +1183,30 @@ fn public_members(
     members
 }
 
-/// Whether one of `attributes` is of a class marked [`DYNAMICALLY_ACCESSED`], as a router's `[Route]`, whose framework
-/// reaches the member it marks, or each public member of the class it marks, by reflection, which the checker never
-/// sees. Any other attribute, as `[Deprecated]`, says nothing about who uses the member.
-fn is_dynamically_accessed(codebase: &CodebaseMetadata, attributes: &[AttributeMetadata]) -> bool {
+/// The class of the first of `attributes` whose class is marked [`DYNAMICALLY_ACCESSED`], as a router's `[Route]`,
+/// whose framework reaches the member it marks, or each public member of the class it marks, by reflection, which the
+/// checker never sees. Any other attribute, as `[Deprecated]`, says nothing about who uses the member.
+fn marked_attribute(codebase: &CodebaseMetadata, attributes: &[AttributeMetadata]) -> Option<Word> {
+    attributes.iter().find_map(|attribute| {
+        codebase.get_class_like(attribute.name).filter(|class| is_marked(codebase, class)).map(|class| class.name)
+    })
+}
+
+/// The class marked [`DYNAMICALLY_ACCESSED`] that `class` extends, directly or not, whose framework creates `class` and
+/// calls its methods, as Eloquent's `Model` does for each model. A marked attribute class is no such base, since its
+/// mark says the framework reads the attribute.
+fn marked_base(codebase: &CodebaseMetadata, class: &ClassLikeMetadata) -> Option<Word> {
+    class
+        .all_parent_classes
+        .iter()
+        .filter_map(|parent| codebase.get_class_like(*parent))
+        .find(|parent| parent.attribute_flags.is_none() && is_marked(codebase, parent))
+        .map(|parent| parent.name)
+}
+
+/// Whether `class` carries [`DYNAMICALLY_ACCESSED`], on its `extern` line or on its PHP# declaration.
+fn is_marked(codebase: &CodebaseMetadata, class: &ClassLikeMetadata) -> bool {
     let mark = codebase.class_key(word(DYNAMICALLY_ACCESSED));
 
-    attributes.iter().any(|attribute| {
-        codebase
-            .get_class_like(attribute.name)
-            .is_some_and(|class| class.attributes.iter().any(|marked| codebase.class_key(marked.name) == mark))
-    })
+    class.attributes.iter().any(|marked| codebase.class_key(marked.name) == mark)
 }
