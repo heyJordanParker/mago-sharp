@@ -620,7 +620,9 @@ fn a_host_that_constructs_a_standard_library_class_starts_on_a_clean_tree_and_th
 
     let written_at = || {
         [compiled(root, "app/Order.sharp"), root.join(SYSTEM_FILES)]
-            .map(|path| std::fs::metadata(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())).modified())
+            .map(|path| {
+                std::fs::metadata(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display())).modified()
+            })
             .map(Result::unwrap)
     };
 

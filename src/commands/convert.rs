@@ -2578,10 +2578,10 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         }
     }
 
-    /// A project holds the standard library in `vendor/`, where the analysis loads its PHP# files as a package's. The
-    /// proof builds the project's database as `mago compile` does, so those files are the project's and its compile
-    /// lowers a converted call of `mb_strtoupper`, `text.uppercase()`, with the library's inline form, as `mago
-    /// compile` lowers it.
+    /// A project holds the standard library in `vendor/`, where the analysis loads its PHP# files as built-in files,
+    /// beside the compiled files and codex of its package's `.sharp` folder. The proof builds the project's database as
+    /// `mago compile` does, so its compile lowers a converted call of `mb_strtoupper`, `text.uppercase()`, with the
+    /// library's inline form, as `mago compile` lowers it.
     #[test]
     fn the_proof_lowers_with_the_standard_library_mago_compile_lowers_with() {
         let directory = tempfile::tempdir().unwrap();
@@ -2599,6 +2599,7 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         let library = Path::new(env!("CARGO_MANIFEST_DIR")).join("../composer");
         let package = root.join("vendor/heyjordanparker/php-sharp-composer");
         copy_tree(&library.join("library"), &package.join("library"));
+        copy_tree(&library.join(".sharp"), &package.join(".sharp"));
         for file in ["composer.json", "native.php"] {
             std::fs::copy(library.join(file), package.join(file)).unwrap();
         }
@@ -2627,7 +2628,7 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             .server
             .database()
             .files()
-            .filter(|file| file.is_standard_library && file.file_type == FileType::Host)
+            .filter(|file| file.is_standard_library && file.file_type == FileType::Builtin)
             .map(|file| display(&file.name))
             .collect();
         drop(session);
