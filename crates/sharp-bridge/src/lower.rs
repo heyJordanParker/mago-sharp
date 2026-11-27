@@ -5233,6 +5233,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         Some(AccessorPlace::Extern(target, object, self.types.extern_property_key(target)?))
     }
 
+    /// Whether `place` is an `extern` property, spec section 14.3, or an element of one at any depth: plain PHP's
+    /// `__get` gives the property's value, so a write into it changes a copy, which `__set` stores, as
+    /// [`Self::with_place`] holds it.
+    fn under_extern(&self, place: &Expression) -> bool {
+        let mut root = place.unparenthesized();
+        while let Expression::ArrayAccess(access) = root {
+            root = access.array.unparenthesized();
+        }
+
+        matches!(self.accessor_place(root), Some(AccessorPlace::Extern(..)))
+    }
+
     /// What `build` lowers on `place`, which it reads and then writes, with an `extern` property's object run once, as
     /// [`Self::with_held_receiver`] holds it, since PHP takes a method call's object before its arguments.
     fn holding_place(&mut self, line: u32, place: AccessorPlace, build: impl FnOnce(&mut Self) -> u32) -> u32 {
@@ -6654,9 +6666,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 {
                     return self.renumbered_first(access.array, |this| this.unchecked_expression(line, expression));
                 }
+                // A `Map` an `extern` property holds, or one of its elements holds, crosses in as the `Map` it declares,
+                // which the write changes through a hidden copy that `__set` stores, as `Self::with_place` holds it.
                 if let Expression::ArrayAccess(access) = assignment.lhs
                     && self.types.holds_map(access.array)
-                    && self.types.plain_place_type(access.array).is_none()
+                    && (self.types.plain_place_type(access.array).is_none() || self.under_extern(access.array))
                 {
                     return self.map_write(line, assignment, access);
                 }
