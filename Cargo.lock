@@ -1633,6 +1633,7 @@ dependencies = [
  "foldhash",
  "glob",
  "globset",
+ "libc",
  "memchr",
  "notify",
  "rayon",
@@ -1671,6 +1672,7 @@ name = "mago-engine"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "libc",
  "sharp",
 ]
 

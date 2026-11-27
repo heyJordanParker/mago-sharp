@@ -482,6 +482,17 @@ final class PropertyBehavior {}
 final class AcceptsAnyEffect {}
 
 /**
+ * Marks an engine function that gives the result of the PHP function `$function`, as `size` gives `count`'s for a
+ * `Map` or a `Set`, so the converter turns PHP's `$function` into the standard library member whose body is one call
+ * of the engine function.
+ */
+#[\Attribute(\Attribute::TARGET_FUNCTION)]
+final class RunsAs
+{
+    public function __construct(public string $function) {}
+}
+
+/**
  * Marks the standard library method whose call starts a listener of its first type argument, as `Events.on` does, so
  * the checker refuses a type argument no event can be.
  */
@@ -495,6 +506,14 @@ final class StartsListener {}
  */
 #[\Attribute(\Attribute::TARGET_METHOD)]
 final class CreatesAttributes {}
+
+/**
+ * Marks a standard library property whose value is a member's name from the code, as the `name` of `Method`,
+ * `Property`, `Field`, `Parameter`, `Constant` and `EnumCase` is, so the checker holds a comparison of it with a string
+ * fixed at compile time to no selection from data: no enum can declare a member's name.
+ */
+#[\Attribute(\Attribute::TARGET_PROPERTY | \Attribute::TARGET_PARAMETER)]
+final class NamesMember {}
 
 /**
  * Marks a standard library method that runs the initial value of a property, as `Property.defaultValue()` and
@@ -748,12 +767,33 @@ function enumBackingType(string $type): ?string {}
 function makeGenericType(string $type, array $arguments): string {}
 
 /**
- * The cases of the enum the class value `$type` names, in the order they are declared, none for a class value that
- * names no enum. The standard library's `Class<T>.enumCases()` makes an `EnumCase` of each.
+ * An object of the class the class value `$case` names, the standard library's `EnumCase`, for each case of the enum the
+ * class value `$type` names, in the order they are declared, none for a class value that names no enum, which the
+ * standard library's `Class<T>.enumCases()` gives.
  *
- * @return list<\UnitEnum>
+ * @template T
+ *
+ * @param class-string<T> $case
+ *
+ * @return list<T>
  */
-function enumCases(string $type): array {}
+function enumCases(string $type, string $case): array {}
+
+/**
+ * A new object of each attribute of the class the class value `$attribute` names, or of a class that extends or
+ * implements it, on the declaration `$kind` of the class value `$type`: "class", the method `$name` for "method", its
+ * parameter at `$position` for "parameter", the property or field `$name` for "property", and the constant or enum
+ * case `$name` for "constant". Each member's `attributes<T>()` of the standard library gives them.
+ *
+ * @template T
+ *
+ * @param class-string<T> $attribute
+ *
+ * @return list<T>
+ *
+ * @throws \Error
+ */
+function attributes(string $type, string $kind, string $name, int $position, string $attribute): array {}
 
 /**
  * The constants of the class the class value `$type` names, its own first and then those it inherits, in the order they
@@ -1248,6 +1288,7 @@ function maxBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $selector, #[Ta
 /**
  * @return int how many entries the table holds, read in constant time.
  */
+#[RunsAs('count')]
 function size(\Sharp\Map|\Sharp\Set $table): int {}
 
 /**

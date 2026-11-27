@@ -345,6 +345,17 @@ pub(crate) fn intersect_atomic_with_atomic<A>(
 where
     A: Arena,
 {
+    // Under PHP#'s rules a `List` is never a `Map`, spec section 12, so a value plain PHP's `array<V>` gives, a `List<V>`
+    // or a `Map<int|string, V>`, tested `is Map<int|string, V>` is the `Map` alone, and tested `is List<V>` the `List`.
+    let is_map =
+        |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::Keyed(keyed)) if keyed.parameters.is_some());
+    let is_list = |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(_)));
+    if context.dialect.is_sharp()
+        && ((is_list(first_type) && is_map(second_type)) || (is_map(first_type) && is_list(second_type)))
+    {
+        return None;
+    }
+
     // Under PHP#'s rules a type parameter holds only itself, spec section 11, so a value narrowed to one has its type, as
     // an `Event` tested `as T` is a `T`, and not the `Event` an unbounded `T` would take under PHP's rules.
     let mut atomic_comparison_results = ComparisonResult::for_dialect(context.dialect);

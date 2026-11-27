@@ -111,7 +111,7 @@ Reduction is enabled only for hosts advertising at least one reducer, so ordinar
 
 Both methods may throw. A collection or reduction failure is logged as a worker-reduction warning; it does not replace the completed lint or analysis result.
 
-Both `collect()` and `reduce()` use the host's `request-timeout-ms`. A method that runs past it is interrupted, and the reduction fails with that warning.
+Both `collect()` and `reduce()` use the host's `request-timeout-ms` of CPU time, and ten times as much wall time. A method that passes either with no progress is interrupted, and the reduction fails with that warning.
 
 ## Design guidance
 

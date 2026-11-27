@@ -2,12 +2,15 @@
 //!
 //! `mago move` moves a PHP# class, or a whole namespace, into another namespace. It moves each class's file into the
 //! folder of the namespace, rewrites the file's `namespace` line, and rewrites every file that names a moved class: a
-//! PHP# `import` line, a plain PHP `use` line, a fully qualified name and a PHPDoc type. A name the code reached through
-//! its own namespace gets an `import` or a `use`. A moved namespace takes each PHP# file of its folder, its modules
+//! PHP# `import` line, a plain PHP `use` line, a fully qualified name and a PHPDoc type. A bare name keeps naming what
+//! it named: wherever the moved tree would resolve it to another class-like, it gets an `import` or a `use` of the one
+//! it named, and the move refuses before writing anything when the file can't take that import. A moved namespace
+//! takes each PHP# file of its folder, its modules
 //! included, and each module `imports` line and `module :` that names it is rewritten. A folder the move empties is
 //! deleted. A moved
 //! class's name inside a string is only printed, since a string may mean anything.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -23,7 +26,10 @@ use mago_database::DatabaseReader;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use mago_database::file::File;
+use mago_names::resolver::ChangingMembers;
+use mago_names::resolver::ExternNamespaces;
 use mago_names::resolver::NameResolver;
+use mago_names::resolver::NamespaceClasses;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Identifier;
@@ -48,7 +54,9 @@ use crate::utils::write_by_rename;
     long_about = "Move a PHP# class, or every class of a namespace, into another namespace.\n\n\
                   Moves each class's file into the namespace's folder, rewrites its `namespace` line, and rewrites \
                   every file that names a moved class: PHP# `import` lines, plain PHP `use` lines, fully qualified \
-                  names and PHPDoc types. Code that reached a class through its own namespace gets an import.\n\n\
+                  names and PHPDoc types. A bare name keeps naming what it named: where the move would make it \
+                  name another class, the file gets an import of the one it named, and the move refuses, changing \
+                  no file, when the file already declares or imports another class of that name.\n\n\
                   A moved namespace takes every PHP# file of its folder, its `Module.sharp` included, and every \
                   module `imports` line and `module :` that names it is rewritten. A folder the move empties is \
                   deleted.\n\n\
@@ -101,8 +109,13 @@ impl MoveCommand {
     pub fn execute(self, configuration: Configuration, color_choice: ColorChoice) -> Result<ExitCode, Error> {
         let orchestrator = create_orchestrator(&configuration, color_choice, false, false, false);
         let database = orchestrator.load_database(&configuration.source.workspace, false, None, None)?;
-        let sources: Vec<Source> =
-            database.files().filter(|file| file.file_type.is_host()).map(|file| read(&configuration, file)).collect();
+        let files: Vec<Arc<File>> = database.files().filter(|file| file.file_type.is_host()).collect();
+        // A class's name never depends on how names resolve, so a first read finds every class, which the second
+        // resolves each file's names against, as the analyzer scans twice.
+        let scanned: Vec<Source> =
+            files.iter().map(|file| read(&configuration, Arc::clone(file), &NamespaceClasses::default())).collect();
+        let before = namespace_classes(&scanned, |class| class.to_owned());
+        let sources: Vec<Source> = files.into_iter().map(|file| read(&configuration, file, &before)).collect();
 
         let name = full_name(&self.name);
         let target = full_name(&self.target);
@@ -118,9 +131,13 @@ impl MoveCommand {
 
         let declared: BTreeSet<String> =
             sources.iter().flat_map(|source| source.classes.iter().map(|class| class.to_ascii_lowercase())).collect();
+        let after = namespace_classes(&sources, |class| {
+            moved.get(&class.to_ascii_lowercase()).map_or_else(|| class.to_owned(), |(_, new)| new.clone())
+        });
         let workspace = &configuration.source.workspace;
         let mut planned: Vec<(PathBuf, Option<PathBuf>, String)> = Vec::new();
         let mut mentions: Vec<String> = Vec::new();
+        let mut clashes: Vec<String> = Vec::new();
         for source in &sources {
             let Some(path) = source.file.path.clone() else {
                 continue;
@@ -135,7 +152,13 @@ impl MoveCommand {
             let namespace =
                 if moves { Some(target.as_str()) } else { source.namespace.as_ref().map(|(name, _)| name.as_str()) };
             let contents = String::from_utf8_lossy(&source.file.contents).into_owned();
-            let edits = edits(source, namespace, &declared, &moved, renamed);
+            let unimported = apply(&contents, &edits(source, namespace, &declared, &moved, renamed, &BTreeMap::new()));
+            let moved_file =
+                File::ephemeral(Cow::Owned(source.file.name.to_vec()), Cow::Owned(unimported.into_bytes()));
+            let rebound = read(&configuration, Arc::new(moved_file), &after);
+            let needed = rebinding_imports(source, &rebound, &declared, &moved)?;
+            clashes.extend(import_clashes(source, &rebound, &needed, &relative(workspace, &path)));
+            let edits = edits(source, namespace, &declared, &moved, renamed, &needed);
             let rewritten = apply(&contents, &edits);
             let destination = if moves { Some(destination(&path, source, &target)?) } else { None };
             if let Some(destination) = &destination
@@ -152,6 +175,15 @@ impl MoveCommand {
             if destination.is_some() || rewritten != contents {
                 planned.push((path, destination, rewritten));
             }
+        }
+
+        if !clashes.is_empty() {
+            return Err(Error::InvalidArgument(format!(
+                "Can't move `{}` into `{}`, so no file changed:\n{}",
+                dotted(&name),
+                dotted(&target),
+                clashes.join("\n")
+            )));
         }
 
         let mut left: BTreeSet<PathBuf> = BTreeSet::new();
@@ -181,12 +213,18 @@ impl MoveCommand {
     }
 }
 
-/// Reads `file`: its namespace, the classes it declares, its imports, the names its code writes, its strings and its
-/// comments.
-fn read(configuration: &Configuration, file: Arc<File>) -> Source {
+/// Reads `file`: its namespace, the classes it declares, its imports, the names its code writes, each resolved as the
+/// analyzer resolves it, where a class of `namespace_classes` in the file's namespace wins over the standard library's
+/// class of its name (spec section 23), its strings and its comments.
+fn read(configuration: &Configuration, file: Arc<File>, namespace_classes: &NamespaceClasses) -> Source {
     let arena = LocalArena::new();
     let program = parse_file_with_settings(&arena, &file, configuration.parser.to_settings());
-    let resolved = NameResolver::new(&arena).resolve(program);
+    let resolved = NameResolver::new(&arena).resolve_in(
+        program,
+        namespace_classes,
+        &ChangingMembers::default(),
+        &ExternNamespaces::default(),
+    );
     let full_names: BTreeMap<u32, (u32, String, bool)> = resolved
         .iter()
         .map(|(start, end, name, imported)| (start, (end, String::from_utf8_lossy(name).into_owned(), imported)))
@@ -368,14 +406,115 @@ fn moved_classes(sources: &[Source], name: &str, target: &str) -> Result<Moved, 
     Ok(moved)
 }
 
+/// The class-likes of `sources` that win over the standard library's class of their name in their namespace, spec
+/// section 23, each by the full name `named` gives it: its name before the move, or after it.
+fn namespace_classes(sources: &[Source], named: impl Fn(&str) -> String) -> NamespaceClasses {
+    NamespaceClasses::new(
+        sources.iter().flat_map(|source| source.classes.iter().map(|class| (named(class), source.is_sharp))),
+    )
+}
+
+/// The imports that keep each bare name of `source` naming what it named before the move, by the full name each
+/// imports, with the first name that needs it: a name `rebound`, `source` with the move's other edits made and read
+/// against the moved classes, resolves to another class-like than the one it named before, as it lands in the moved
+/// tree. A name named a class-like when the project declares it, or when it resolved to anything else than the class of
+/// its namespace it would name by its text alone, as the standard library's class through spec section 23's default
+/// names. A bare name stays only where it still names the same class-like, as rust-analyzer's `find_path` writes one.
+fn rebinding_imports(
+    source: &Source,
+    rebound: &Source,
+    declared: &BTreeSet<String>,
+    moved: &Moved,
+) -> Result<BTreeMap<String, Span>, Error> {
+    if source.names.len() != rebound.names.len() {
+        return Err(Error::InvalidArgument(format!(
+            "`mago move` read {} names in `{}` before the move and {} after it, so it can't tell what each names.",
+            source.names.len(),
+            String::from_utf8_lossy(&source.file.name),
+            rebound.names.len()
+        )));
+    }
+
+    let contents = source.file.contents.as_ref();
+    let namespace = source.namespace.as_ref().map_or("", |(namespace, _)| namespace.as_str());
+    let mut needed = BTreeMap::new();
+    for ((span, before, _), (_, after, _)) in source.names.iter().zip(&rebound.names) {
+        let written = String::from_utf8_lossy(&contents[span.start.offset as usize..span.end.offset as usize]);
+        if written.contains(['\\', '.']) {
+            continue;
+        }
+
+        let by_text = if namespace.is_empty() { written.to_string() } else { format!("{namespace}\\{written}") };
+        if !declared.contains(&before.to_ascii_lowercase()) && before.eq_ignore_ascii_case(&by_text) {
+            continue;
+        }
+
+        let class = moved.get(&before.to_ascii_lowercase()).map_or_else(|| before.clone(), |(_, new)| new.clone());
+        if !after.eq_ignore_ascii_case(&class) {
+            needed.entry(class).or_insert(*span);
+        }
+    }
+
+    Ok(needed)
+}
+
+/// A line for each import of `needed` that `rebound`, `source` with the move's other edits made, can't take, spec
+/// section 23: one whose name it already imports from another class-like, or names a class-like it declares, or that
+/// another import of `needed` takes too. Each names the file as `shown`, the line, and the name.
+fn import_clashes(source: &Source, rebound: &Source, needed: &BTreeMap<String, Span>, shown: &str) -> Vec<String> {
+    let short = |class: &str| class.rsplit('\\').next().unwrap_or(class).to_owned();
+    let rebound_contents = rebound.file.contents.as_ref();
+    let rebound_text = |span: Span| {
+        String::from_utf8_lossy(&rebound_contents[span.start.offset as usize..span.end.offset as usize]).into_owned()
+    };
+    let imported: Vec<(String, String)> = rebound
+        .imports
+        .iter()
+        .flat_map(|import| import.items.iter())
+        .map(|(item, name, full)| {
+            let alias = rebound_text(*item)[rebound_text(*name).len()..].trim().to_owned();
+            let bound = alias.strip_prefix("as").map_or_else(|| short(full), |alias| alias.trim().to_owned());
+            (bound, full.clone())
+        })
+        .collect();
+
+    let mut clashes = Vec::new();
+    for (class, span) in needed {
+        let name = short(class);
+        let line = source.file.line_number(span.start.offset) + 1;
+        let import = if source.is_sharp { format!("import {};", dotted(class)) } else { format!("use {class};") };
+        let taken = if rebound.classes.iter().any(|declared| short(declared).eq_ignore_ascii_case(&name)) {
+            Some(format!("the file declares a class `{name}`"))
+        } else if imported
+            .iter()
+            .any(|(bound, full)| bound.eq_ignore_ascii_case(&name) && !full.eq_ignore_ascii_case(class))
+            || needed.keys().any(|other| other != class && short(other).eq_ignore_ascii_case(&name))
+        {
+            Some(format!("the file already imports another `{name}`"))
+        } else {
+            None
+        };
+        if let Some(taken) = taken {
+            clashes.push(format!(
+                "{shown}:{line}: `{name}` names `{}`, and keeping it needs `{import}`, but {taken}.",
+                dotted(class)
+            ));
+        }
+    }
+
+    clashes
+}
+
 /// The edits that keep `source` naming each class it names once the classes of `moved` move, with `namespace` its
-/// namespace after the move and `declared` the lowercase full name of each class of the project.
+/// namespace after the move, `declared` the lowercase full name of each class of the project, and `needed` the imports
+/// that keep its bare names naming what they named, as [`rebinding_imports`] gives them.
 fn edits(
     source: &Source,
     namespace: Option<&str>,
     declared: &BTreeSet<String>,
     moved: &Moved,
     renamed: Option<(&str, &str)>,
+    needed: &BTreeMap<String, Span>,
 ) -> Vec<(u32, u32, String)> {
     let new_name = |class: &str| moved.get(&class.to_ascii_lowercase()).map(|(_, new)| new.clone());
     let in_namespace = |class: &str| class.rsplit_once('\\').map_or("", |(of, _)| of) == namespace.unwrap_or_default();
@@ -447,28 +586,21 @@ fn edits(
         }
     }
 
-    let mut added: BTreeSet<String> = BTreeSet::new();
-    for (span, full, imported) in &source.names {
-        if !declared.contains(&full.to_ascii_lowercase()) {
-            continue;
-        }
-
-        let class = new_name(full).unwrap_or_else(|| full.clone());
-        if text(*span).contains('\\') {
-            if new_name(full).is_some() {
-                edits.push((span.start.offset, span.end.offset, format!("\\{class}")));
-            }
-        } else if !imported && !in_namespace(&class) {
-            added.insert(class);
+    for (span, full, _) in &source.names {
+        if declared.contains(&full.to_ascii_lowercase())
+            && text(*span).contains('\\')
+            && let Some(class) = new_name(full)
+        {
+            edits.push((span.start.offset, span.end.offset, format!("\\{class}")));
         }
     }
 
-    if !added.is_empty()
+    if !needed.is_empty()
         && let Some(end) = kept_end.into_iter().chain(source.namespace_end).max()
     {
         let keyword = if source.is_sharp { "import" } else { "use" };
         let first = if kept_end.is_none() { "\n" } else { "" };
-        let lines: Vec<String> = added.iter().map(|class| format!("\n{keyword} {};", written(class))).collect();
+        let lines: Vec<String> = needed.keys().map(|class| format!("\n{keyword} {};", written(class))).collect();
         edits.push((end, end, format!("{first}{}", lines.concat())));
     }
 

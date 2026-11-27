@@ -7,6 +7,8 @@ use std::process::Output;
 use std::process::Stdio;
 
 use mago_database::process;
+use mago_sharp_bridge::unit::GENERATION_LOCK;
+use mago_sharp_bridge::unit::GENERATION_PREFIX;
 use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::header;
 use mago_sharp_bridge::unit::inputs_changed;
@@ -62,13 +64,13 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
     assert_eq!(
         files_under(&root.join(".sharp")),
         [
-            Path::new("app/Order.sharpc"),
             Path::new("autoload.php"),
             Path::new("compiled.bin"),
+            Path::new("current/app/Order.sharpc"),
+            Path::new("current/generation.lock"),
+            Path::new("current/listeners.php"),
+            Path::new("current/vendor/acme/money/src/Money.sharpc"),
             Path::new("inputs.json"),
-            Path::new("listeners.php"),
-            Path::new("preload.php"),
-            Path::new("vendor/acme/money/src/Money.sharpc"),
             Path::new("write.lock")
         ]
     );
@@ -81,85 +83,18 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
     assert!(printed(&output).contains("Compiled 2 PHP# files into .sharp/."), "{}", printed(&output));
 }
 
-/// Spec section 27: `.sharp/preload.php`, which `opcache.preload` names, requires the workspace's Composer autoloader,
-/// through the `.sharp/autoload.php` a program loads too, and then each accepted source that declares a type, the
-/// package's too, in path order. A refused source, one that declares no type, as a module's file, and a test in an
-/// `autoload-dev` folder stay out, so production never preloads a test.
+/// Spec section 27: `.sharp/autoload.php`, which a program loads before it builds its class, requires the workspace's
+/// Composer autoloader.
 #[test]
-fn compile_writes_a_preload_script_that_requires_the_autoloader_and_every_accepted_type() {
+fn compile_writes_an_autoload_script_that_requires_the_composer_autoloader() {
     let directory = project(ORDER, MONEY);
     let root = directory.path();
-    write(root, "app/Broken.sharp", &BROKEN_ORDER.replace("class Order", "class Broken"));
-    write(root, "app/Module.sharp", "module\n{\n}\n");
-    write(
-        root,
-        "composer.json",
-        "{\"type\": \"library\", \"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}, \"autoload-dev\": {\"psr-4\": {\"Tests\\\\\": \"tests/\"}}}\n",
-    );
-    write(root, "tests/Shop/CheckoutTest.sharp", "namespace Tests.Shop;\n\npublic class CheckoutTest\n{\n}\n");
-    write(
-        root,
-        "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\", \"tests\"]\nincludes = [\"vendor\"]\n",
-    );
-
-    let output = compile(root);
-
-    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
-    assert!(compiled(root, "tests/Shop/CheckoutTest.sharp").exists());
-    assert_eq!(
-        read(root, ".sharp/preload.php"),
-        "<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/autoload.php';\nrequire_once __DIR__ . '/../app/Order.sharp';\nrequire_once __DIR__ . '/../vendor/acme/money/src/Money.sharp';\n"
-    );
-    assert_eq!(
-        read(root, ".sharp/autoload.php"),
-        "<?php\n\n// mago compile writes this file, the project's Composer autoloader. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/../vendor/autoload.php';\n"
-    );
-}
-
-/// Spec section 27: PHP declares an anonymous class only when its code runs, so `.sharp/preload.php` loads each type
-/// an anonymous class names, PHP's own left out, in a file the preload loads: a file Composer's autoloader loads up
-/// front, as `illuminate/reflection`'s `helpers.php`, and the file of a type a preloaded type extends. Opcache would
-/// warn that it can't preload the class otherwise. A file the preload never loads keeps what its anonymous class names
-/// unloaded.
-#[test]
-fn compile_writes_a_preload_script_that_loads_what_the_anonymous_classes_it_loads_name() {
-    let directory = project("namespace App;\n\nimport Acme.Model.Base;\n\npublic class Order : Base\n{\n}\n", MONEY);
-    let root = directory.path();
-    write(
-        root,
-        "vendor/composer/autoload_psr4.php",
-        "<?php\n\n$vendorDir = dirname(__DIR__);\n\nreturn array(\n    'Acme\\\\Model\\\\' => array($vendorDir . '/acme/model/src'),\n);\n",
-    );
-    write(
-        root,
-        "vendor/composer/autoload_files.php",
-        "<?php\n\n$vendorDir = dirname(__DIR__);\n\nreturn array(\n    'a1' => $vendorDir . '/acme/model/helpers.php',\n);\n",
-    );
-    write(
-        root,
-        "vendor/acme/model/helpers.php",
-        "<?php\n\nfunction lazy(): object\n{\n    return new class implements Stringable\n    {\n        use Acme\\Model\\Reflects;\n\n        public function __toString(): string\n        {\n            return '';\n        }\n    };\n}\n",
-    );
-    write(root, "vendor/acme/model/src/Reflects.php", "<?php\n\nnamespace Acme\\Model;\n\ntrait Reflects\n{\n}\n");
-    write(
-        root,
-        "vendor/acme/model/src/Base.php",
-        "<?php\n\nnamespace Acme\\Model;\n\nclass Base\n{\n    public function contract(): Contract\n    {\n        return new class implements Contract {};\n    }\n\n    public function unused(): Unused\n    {\n        return new Unused();\n    }\n}\n",
-    );
-    write(root, "vendor/acme/model/src/Contract.php", "<?php\n\nnamespace Acme\\Model;\n\ninterface Contract\n{\n}\n");
-    write(
-        root,
-        "vendor/acme/model/src/Unused.php",
-        "<?php\n\nnamespace Acme\\Model;\n\nclass Unused\n{\n    public function shown(): Shown\n    {\n        return new class extends Shown {};\n    }\n}\n",
-    );
-    write(root, "vendor/acme/model/src/Shown.php", "<?php\n\nnamespace Acme\\Model;\n\nclass Shown\n{\n}\n");
 
     compile_succeeds(root);
 
     assert_eq!(
-        read(root, ".sharp/preload.php"),
-        "<?php\n\n// mago compile writes this file. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/autoload.php';\nrequire_once __DIR__ . '/../app/Order.sharp';\nrequire_once __DIR__ . '/../vendor/acme/money/src/Money.sharp';\ninterface_exists('Acme\\\\Model\\\\Contract');\ntrait_exists('Acme\\\\Model\\\\Reflects');\n"
+        read(root, ".sharp/autoload.php"),
+        "<?php\n\n// mago compile writes this file, the project's Composer autoloader. It rewrites it on every compile.\n\nrequire_once __DIR__ . '/../vendor/autoload.php';\n"
     );
 }
 
@@ -905,6 +840,55 @@ fn a_compile_error_in_a_file_no_host_reaches_reports_that_file_and_every_host_ru
     assert_eq!(analyzed.status.code(), Some(1), "{}", printed(&analyzed));
     assert!(printed(&analyzed).contains("app/Broken.sharp"), "{}", printed(&analyzed));
     assert!(!printed(&analyzed).contains("extension host"), "{}", printed(&analyzed));
+    assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\n");
+}
+
+/// The `extern` lines of a file nothing names apply to every file, as an analysis of the whole project applies them, so
+/// a rule a host asks as it loads that calls a Composer `files` helper an `extern` line declares compiles before the
+/// hosts start, and the first compile with the host passes.
+#[test]
+fn a_host_starts_on_a_rule_that_calls_an_extern_declared_helper_on_the_first_compile() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the extern helper host test") {
+        return;
+    }
+    let host = HOST_ASKING_A_RULE_AS_IT_LOADS.replace(
+        "spl_autoload_register(",
+        "require dirname(__DIR__) . '/vendor/acme/framework/helpers.php';\n\nspl_autoload_register(",
+    );
+    let rule = "namespace App.Rules;\n\nimport Framework;\n\npublic class Naming\n{\n    public static string message() => Framework.config(\"app.name\") as string ?? \"none\";\n}\n";
+    let directory = library_project(&[
+        ("app/Rules/Naming.sharp", rule),
+        (
+            "app/Stubs/Framework.sharp",
+            "namespace App.Stubs;\n\nimport Framework;\n\nextern namespace Framework for config;\n\nextern Framework.config uses Environment;\n",
+        ),
+        ("tools/host.php", &host),
+    ]);
+    let root = directory.path();
+    let maps = "<?php\n\n$vendorDir = dirname(__DIR__);\n$baseDir = dirname($vendorDir);\n\nreturn array(\n";
+    write(
+        root,
+        "vendor/acme/framework/helpers.php",
+        "<?php\n\nfunction config(string $key): mixed\n{\n    return $key === 'app.name' ? 'first' : null;\n}\n",
+    );
+    write(root, "vendor/composer/autoload_psr4.php", &format!("{maps});\n"));
+    write(
+        root,
+        "vendor/composer/autoload_files.php",
+        &format!("{maps}    'framework' => $vendorDir . '/acme/framework/helpers.php',\n);\n"),
+    );
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.rules]\nfile = \"tools/host.php\"\n",
+    );
+    let cache = tempfile::tempdir().unwrap();
+
+    let compiled = process::output(command(root, "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
+
+    assert!(!printed(&compiled).contains("isn't compiled for the extension hosts yet"), "{}", printed(&compiled));
+    assert!(compiled.status.success(), "{}", printed(&compiled));
     assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\n");
 }
 
@@ -1661,8 +1645,8 @@ fn lint_logs_a_slow_host_linter_rule_before_a_quick_one_at_the_debug_level() {
     assert!(!printed(&info).contains("Host rule"), "{}", printed(&info));
 }
 
-/// An extension host that loads `App\Word`, the class of `app/Word.sharp`, and appends its process id and the word the
-/// compiled file holds to `host.log` as each analysis starts. The `php` the tests run is plain PHP, which never declares
+/// An extension host that loads `App\Word`, the class of `app/Word.sharp`, and appends its process id, the id of the
+/// `mago` process that started it and the word the compiled file holds to `host.log` as each analysis starts. The `php` the tests run is plain PHP, which never declares
 /// a PHP# class, so the worker fails to load it, which counts as loading it.
 const HOST_LOGGING_ITS_PROCESS: &str = r#"<?php
 
@@ -1695,7 +1679,7 @@ final class LogsItsProcess implements Plugin, BeforeAnalysisHook
         class_exists('App\Word');
         $compiled = (string) @file_get_contents(getenv('SHARP_COMPILED') . '/app/Word.sharpc');
         $word = str_contains($compiled, 'second') ? 'second' : (str_contains($compiled, 'first') ? 'first' : 'nothing');
-        file_put_contents('host.log', MAGO_TEST_WORKER . " {$word}\n", FILE_APPEND);
+        file_put_contents('host.log', MAGO_TEST_WORKER . ' ' . posix_getppid() . " {$word}\n", FILE_APPEND);
     }
 }
 
@@ -1738,7 +1722,7 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     let seen = watch.stop();
 
     let hosts = log();
-    let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.split_once(' ')).collect();
+    let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.rsplit_once(' ')).collect();
     let failure = format!("{hosts}\n{seen}");
     assert!(rechecked && runs.len() >= 2, "{failure}");
     assert_eq!(runs[0].1, "first", "{failure}");
@@ -2085,12 +2069,17 @@ fn a_watch_starts_the_hosts_again_when_another_run_compiled_an_edit_while_it_wai
     let seen = watch.stop();
 
     let hosts = log();
-    let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.split_once(' ')).collect();
+    let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.rsplit_once(' ')).collect();
     let failure = format!("{hosts}\n{seen}");
     assert!(idle, "the watch never waited for a change: {failure}");
     let terminal = terminal.unwrap();
     assert!(terminal.status.success(), "{}", printed(&terminal));
     assert!(restarted, "{failure}");
+    assert_eq!(
+        runs.iter().filter(|(_, word)| *word == "first").count(),
+        1,
+        "the watch's start ran one host: {failure}"
+    );
     assert_eq!(runs[0].1, "first", "{failure}");
     assert_eq!(runs[1].1, "second", "the terminal's run: {failure}");
     assert_eq!(runs[2].1, "second", "{failure}");
@@ -2750,10 +2739,10 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
         [
             Path::new("autoload.php"),
             Path::new("compiled.bin"),
+            Path::new("current/generation.lock"),
+            Path::new("current/listeners.php"),
+            Path::new("current/vendor/acme/money/src/Money.sharpc"),
             Path::new("inputs.json"),
-            Path::new("listeners.php"),
-            Path::new("preload.php"),
-            Path::new("vendor/acme/money/src/Money.sharpc"),
             Path::new("write.lock")
         ]
     );
@@ -2830,12 +2819,12 @@ fn compile_reports_a_link_to_a_file_outside_the_project_and_writes_no_compiled_f
     assert_eq!(
         files_under(&root.join(".sharp")),
         [
-            Path::new("app/Order.sharpc"),
             Path::new("autoload.php"),
             Path::new("compiled.bin"),
+            Path::new("current/app/Order.sharpc"),
+            Path::new("current/generation.lock"),
+            Path::new("current/listeners.php"),
             Path::new("inputs.json"),
-            Path::new("listeners.php"),
-            Path::new("preload.php"),
             Path::new("write.lock")
         ]
     );
@@ -2857,7 +2846,38 @@ fn compile_replaces_a_compiled_file_by_rename_so_no_reader_sees_a_partial_file()
     std::io::Read::read_to_end(&mut open, &mut still_open).unwrap();
     assert_eq!(still_open, before, "the old compiled file stays whole for a reader that opened it");
     assert_ne!(std::fs::read(compiled(root, "app/Order.sharp")).unwrap(), before);
-    assert_eq!(files_under(&root.join(".sharp/app")), [Path::new("Order.sharpc")], "no temporary file is left");
+    assert_eq!(files_under(&root.join(".sharp/current/app")), [Path::new("Order.sharpc")], "no temporary file is left");
+}
+
+/// A compile writes a new generation of `.sharp` and switches `.sharp/current` to it: each compiled file that didn't
+/// change is a hard link to the last generation's, and only a changed one is written. A generation whose lock file a
+/// process holds shared stays, and the first compile after its lock is let go deletes it.
+#[cfg(unix)]
+#[test]
+fn compile_links_each_unchanged_file_into_a_new_generation_and_deletes_the_old_one_once_no_process_holds_it() {
+    use std::os::unix::fs::MetadataExt;
+
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    compile_succeeds(root);
+    let old = std::fs::canonicalize(root.join(".sharp/current")).unwrap();
+    let inode = |path: &Path| std::fs::metadata(path).unwrap().ino();
+    let money = inode(&old.join("vendor/acme/money/src/Money.sharpc"));
+    let order = inode(&old.join("app/Order.sharpc"));
+    let held = std::fs::File::open(old.join(GENERATION_LOCK)).unwrap();
+    held.lock_shared().unwrap();
+
+    write(root, "app/Order.sharp", &ORDER.replace("extra + 1", "extra + 2"));
+    compile_succeeds(root);
+
+    assert_ne!(std::fs::canonicalize(root.join(".sharp/current")).unwrap(), old, "the compile switched the link");
+    assert_eq!(inode(&compiled(root, MONEY_PATH)), money, "the unchanged file is the last generation's");
+    assert_ne!(inode(&compiled(root, "app/Order.sharp")), order, "the changed file is written anew");
+    assert!(old.is_dir(), "a generation a process holds stays");
+
+    drop(held);
+    compile_succeeds(root);
+    assert!(!old.exists(), "the compile after the lock is let go deletes the old generation");
 }
 
 /// A PHP# project's tree holds only what its authors wrote: the compile writes every file of its own in the `.sharp`
@@ -2935,7 +2955,7 @@ fn compile_writes_files_with_the_mode_of_a_new_file() {
 
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     let source = mode(&root.join("app/Order.sharp"));
-    for written in [compiled(root, "app/Order.sharp"), root.join(".sharp/listeners.php")] {
+    for written in [compiled(root, "app/Order.sharp"), root.join(".sharp/current/listeners.php")] {
         assert_eq!(mode(&written), source, "{}", written.display());
     }
 }
@@ -3510,7 +3530,7 @@ fn compile_names_the_path_below_the_sharp_folder_it_cannot_open() {
     let directory = project(ORDER, MONEY);
     let root = std::fs::canonicalize(directory.path()).unwrap();
     compile_succeeds(&root);
-    let app = root.join(".sharp/app");
+    let app = root.join(".sharp/current/app");
     std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o000)).unwrap();
     if std::fs::read_dir(&app).is_ok() {
         std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3531,8 +3551,8 @@ fn compile_names_the_path_below_the_sharp_folder_it_cannot_open() {
     );
 }
 
-/// A folder of `.sharp` the compile can't create is named as the folder, not as the compiled file it would hold. Root
-/// writes into a folder of mode 555, so the test has nothing to show there.
+/// A folder of `.sharp` the compile can't create, here the folder of its new generation, is named as the folder, not as
+/// a compiled file it would hold. Root writes into a folder of mode 555, so the test has nothing to show there.
 #[cfg(unix)]
 #[test]
 fn compile_names_the_folder_of_the_sharp_folder_it_cannot_create() {
@@ -3541,11 +3561,11 @@ fn compile_names_the_folder_of_the_sharp_folder_it_cannot_create() {
     let directory = project(ORDER, MONEY);
     let root = std::fs::canonicalize(directory.path()).unwrap();
     compile_succeeds(&root);
+    write(&root, "app/Order.sharp", &ORDER.replace("extra + 1", "extra + 2"));
     let compiled = root.join(".sharp");
-    let app = compiled.join("app");
-    std::fs::remove_dir_all(&app).unwrap();
     std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o555)).unwrap();
-    if std::fs::create_dir(&app).is_ok() {
+    if std::fs::create_dir(compiled.join("probe")).is_ok() {
+        std::fs::remove_dir(compiled.join("probe")).unwrap();
         std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o755)).unwrap();
         return;
     }
@@ -3555,8 +3575,7 @@ fn compile_names_the_folder_of_the_sharp_folder_it_cannot_create() {
 
     assert!(!output.status.success(), "{}", printed(&output));
     assert!(
-        printed(&output)
-            .contains(&format!("can't create the folder `{}`: Permission denied (os error 13)", app.display())),
+        printed(&output).contains(&format!("can't create the folder `{}", compiled.join(GENERATION_PREFIX).display())),
         "{}",
         printed(&output)
     );
@@ -3611,7 +3630,7 @@ fn compile_writes_every_listener_of_an_accepted_file_in_order() {
         "app/Receipts.sharp",
     ];
     assert_eq!(
-        read(root, ".sharp/listeners.php"),
+        read(root, ".sharp/current/listeners.php"),
         listener_table(
             root,
             &every_file,
@@ -3624,7 +3643,7 @@ fn compile_writes_every_listener_of_an_accepted_file_in_order() {
     let output = compile(root);
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert_eq!(
-        read(root, ".sharp/listeners.php"),
+        read(root, ".sharp/current/listeners.php"),
         listener_table(root, &every_file, "        ['App\\Receipts', 'deliver', ['App\\OrderPaid'], true],\n", "null")
     );
 
@@ -3633,7 +3652,7 @@ fn compile_writes_every_listener_of_an_accepted_file_in_order() {
     write(root, "app/Shop/Cart.sharp", "namespace App.Shop;\n\npublic class Cart\n{\n}\n");
     compile_succeeds(root);
     assert_eq!(
-        read(root, ".sharp/listeners.php"),
+        read(root, ".sharp/current/listeners.php"),
         listener_table(
             root,
             &[
@@ -3668,7 +3687,7 @@ fn compile_writes_a_generic_event_s_listener_with_its_type_arguments() {
     let root = directory.path();
 
     compile_succeeds(root);
-    let table = read(root, ".sharp/listeners.php");
+    let table = read(root, ".sharp/current/listeners.php");
     assert!(
         table.contains(
             "        ['App\\Audit', 'deliver', ['App.Saved<App.Order>'], true],\n        ['App\\Audit', 'record', ['App\\EntityEvent'], true],\n"
@@ -3710,18 +3729,18 @@ fn compile_names_the_app_module_that_binds_the_dispatcher() {
     release_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
 
     compile_succeeds(root);
-    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => 'app\\\\shop',\n"));
+    assert!(read(root, ".sharp/current/listeners.php").contains("    'dispatcher' => 'app\\\\shop',\n"));
 
     write(root, "app/Module.sharp", &dispatcher_module("App"));
     let output = compile(root);
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(printed(&output).contains("Only `app/Module.sharp` binds `Dispatcher`"), "{}", printed(&output));
-    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => 'app',\n"));
+    assert!(read(root, ".sharp/current/listeners.php").contains("    'dispatcher' => 'app',\n"));
 
     std::fs::remove_file(root.join("app/Shop/Module.sharp")).unwrap();
     std::fs::remove_file(root.join("app/Module.sharp")).unwrap();
     compile_succeeds(root);
-    assert!(read(root, ".sharp/listeners.php").contains("    'dispatcher' => null,\n"));
+    assert!(read(root, ".sharp/current/listeners.php").contains("    'dispatcher' => null,\n"));
 }
 
 /// Spec section 32: a class's services come from the modules of its namespace and of each namespace above it, wherever
@@ -3737,7 +3756,7 @@ fn compile_records_each_module_under_the_namespace_it_serves() {
     let root = directory.path();
 
     compile_succeeds(root);
-    let table = read(root, ".sharp/listeners.php");
+    let table = read(root, ".sharp/current/listeners.php");
     assert!(
         table.ends_with(
             "    'modules' => [\n        'app' => ['app/Module.sharp'],\n        'app\\\\shop' => ['app/Shop/Module.sharp'],\n        'app\\\\shop Production' => ['app/Shop/Module.Production.sharp'],\n    ],\n];\n"
@@ -3759,7 +3778,7 @@ fn compile_records_a_module_of_the_standard_library_s_package_under_its_own_name
     write(root, "src/App/Module.sharp", "namespace App;\n\nmodule\n{\n}\n");
 
     compile_succeeds(root);
-    let table = read(root, ".sharp/listeners.php");
+    let table = read(root, ".sharp/current/listeners.php");
     assert!(table.ends_with("    'modules' => [\n        'app' => ['src/App/Module.sharp'],\n    ],\n];\n"), "{table}");
 }
 
@@ -3833,11 +3852,11 @@ fn compile_lists_the_files_whose_extern_lines_give_a_declaration_attributes() {
 
     compile_succeeds(root);
     assert!(
-        read(root, ".sharp/listeners.php").contains(
+        read(root, ".sharp/current/listeners.php").contains(
             "    'attributes' => [\n        'lib\\\\mailer' => ['app/Stubs/First.sharp'],\n        'lib\\\\mailer::sendlater' => ['app/Stubs/First.sharp'],\n        'lib\\\\sentat()' => ['app/Stubs/First.sharp'],\n    ],\n    'effects' => [\n"
         ),
         "{}",
-        read(root, ".sharp/listeners.php")
+        read(root, ".sharp/current/listeners.php")
     );
 }
 
@@ -3861,11 +3880,11 @@ fn compile_lists_the_effects_each_extern_line_declares_for_a_class_and_a_method(
 
     compile_succeeds(root);
     assert!(
-        read(root, ".sharp/listeners.php").ends_with(
+        read(root, ".sharp/current/listeners.php").ends_with(
             "    'effects' => [\n        'lib\\\\mailer' => [],\n        'lib\\\\mailer::count' => null,\n        'lib\\\\mailer::send' => ['App.Mail.Smtp'],\n    ],\n    'tags' => [\n    ],\n    'modules' => [\n    ],\n];\n"
         ),
         "{}",
-        read(root, ".sharp/listeners.php")
+        read(root, ".sharp/current/listeners.php")
     );
 }
 
@@ -3886,10 +3905,10 @@ fn compile_lists_the_install_folder_of_each_package_under_the_vendor_dir() {
     compile_succeeds(root);
 
     assert!(
-        read(root, ".sharp/listeners.php")
+        read(root, ".sharp/current/listeners.php")
             .contains("    'dispatcher' => null,\n    'packages' => [\n        'libs/acme/money/',\n        'libs/phpunit/phpunit/',\n    ],\n    'attributes' => [\n"),
         "{}",
-        read(root, ".sharp/listeners.php")
+        read(root, ".sharp/current/listeners.php")
     );
 }
 
@@ -3904,11 +3923,11 @@ fn compile_lists_a_machine_that_stores_as_its_value_with_each_case_under_its_val
     compile_succeeds(root);
 
     assert!(
-        read(root, ".sharp/listeners.php").ends_with(
+        read(root, ".sharp/current/listeners.php").ends_with(
             "    'tags' => [\n        'App\\\\Shop\\\\JourneyStatus' => ['', ['completed' => 'App\\\\Shop\\\\JourneyStatus\\\\Completed', 'open' => 'App\\\\Shop\\\\JourneyStatus\\\\Open']],\n    ],\n    'modules' => [\n    ],\n];\n"
         ),
         "{}",
-        read(root, ".sharp/listeners.php")
+        read(root, ".sharp/current/listeners.php")
     );
 }
 
@@ -4038,7 +4057,11 @@ fn compile_quotes_each_input_path_of_the_listener_table() {
 
     compile_succeeds(root);
     let input = input_row(root, "it's\\here/*.sharp").replace("it's\\here", "it\\'s\\\\here");
-    assert!(read(root, ".sharp/listeners.php").contains(&input), "{}", read(root, ".sharp/listeners.php"));
+    assert!(
+        read(root, ".sharp/current/listeners.php").contains(&input),
+        "{}",
+        read(root, ".sharp/current/listeners.php")
+    );
 }
 
 /// The folders in `cache`'s `mago/lean/`: the library builds and any staging folder, without `build.lock`.
@@ -4386,7 +4409,7 @@ fn a_test_in_an_autoload_dev_folder_and_production_code_of_a_required_package_co
         "project",
         &[(
             "tests/OptInTest.sharp",
-            "namespace Tests;\n\nimport PHPUnit.Framework.TestCase;\n\ninternal class OptInTest : TestCase\n{\n}\n",
+            "namespace Tests;\n\nimport PHPUnit.Framework.TestCase;\n\npublic class OptInTest : TestCase\n{\n}\n",
         )],
     );
     let required = dev_package_project(
@@ -4440,11 +4463,11 @@ fn compile_deletes_the_lean_package_once_no_law_remains() {
     assert_eq!(
         files_under(&root.join(".sharp")),
         [
-            Path::new("app/Order.sharpc"),
             Path::new("autoload.php"),
             Path::new("compiled.bin"),
-            Path::new("listeners.php"),
-            Path::new("preload.php"),
+            Path::new("current/app/Order.sharpc"),
+            Path::new("current/generation.lock"),
+            Path::new("current/listeners.php"),
             Path::new("write.lock")
         ]
     );
@@ -4891,13 +4914,13 @@ fn a_transaction_s_body_emits_and_reaches_the_database_and_sending_mail_in_it_is
     );
 }
 
-/// The compiled file the engine reads for the source `name` of the project at `root`: the one under the `.sharp` folder
-/// of the nearest folder above the source that holds one.
+/// The compiled file the engine reads for the source `name` of the project at `root`: the one under the current
+/// generation of the `.sharp` folder of the nearest folder above the source that holds one.
 fn compiled_as_the_engine_finds_it(root: &Path, name: &str) -> PathBuf {
     let source = root.join(name);
     let folder = source.ancestors().skip(1).find(|folder| folder.join(".sharp").is_dir()).unwrap();
 
-    folder.join(".sharp").join(source.strip_prefix(folder).unwrap()).with_extension("sharpc")
+    folder.join(".sharp/current").join(source.strip_prefix(folder).unwrap()).with_extension("sharpc")
 }
 
 /// The standard library resolves its names when PHP# releases it, so a plain PHP class a package declares in `Sharp`
@@ -4930,7 +4953,7 @@ fn a_plain_php_sharp_value_error_leaves_the_standard_library_throwing_php_s_valu
 fn a_standard_library_compiled_file_of_another_release_is_refused() {
     let directory = library_project(&[("app/Order.sharp", ORDER)]);
     let root = directory.path();
-    let int = root.join("vendor/heyjordanparker/php-sharp-composer/.sharp/library/Sharp/Int.sharpc");
+    let int = root.join("vendor/heyjordanparker/php-sharp-composer/.sharp/current/library/Sharp/Int.sharpc");
     let mut bytes = std::fs::read(&int).unwrap();
     bytes[24..40].copy_from_slice(&release_checker("0.0.1"));
     std::fs::write(&int, bytes).unwrap();

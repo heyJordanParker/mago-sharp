@@ -155,20 +155,37 @@ pub(crate) fn check_machine_properties<A>(
             }
             _ => None,
         });
-        let refused_at = match initial_value {
-            Some(value) if !calls_entry_point(context, machine, value) => value.span(),
-            None if property.flags.is_promoted_property() => name_span,
-            _ => continue,
-        };
         let entry_point = example_entry_point(graph);
-        report(
-            context,
-            refused_at,
-            format!(
-                "`{shown}` holds the machine `{machine_name}`, so its initial value is an entry point of `{machine_name}`, as `{machine_name}.{entry_point}()`."
+        match initial_value {
+            Some(value) if !calls_entry_point(context, machine, value) => report(
+                context,
+                value.span(),
+                format!(
+                    "`{shown}` holds the machine `{machine_name}`, so its initial value is an entry point of `{machine_name}`, as `{machine_name}.{entry_point}()`."
+                ),
+                "Start it with an entry point.".to_owned(),
             ),
-            "Start it with an entry point.".to_owned(),
-        );
+            // A caller's value is any case, whatever the parameter's default.
+            None if property.flags.is_promoted_property() => {
+                let access = if property.flags.is_internal_reach() {
+                    "internal".to_owned()
+                } else {
+                    property.read_visibility.to_string()
+                };
+                report(
+                    context,
+                    name_span,
+                    format!(
+                        "`{shown}` holds the machine `{machine_name}`, so it can't be a constructor parameter: a caller could pass any case of `{machine_name}`."
+                    ),
+                    format!(
+                        "Declare it in the class body: `{access} {machine_name} {} {{ get; private set; }} = {machine_name}.{entry_point}();`",
+                        BytesDisplay(property_name)
+                    ),
+                );
+            }
+            _ => {}
+        }
     }
 }
 

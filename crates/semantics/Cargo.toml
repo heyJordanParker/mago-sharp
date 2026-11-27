@@ -8,15 +8,20 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-# Every integration test is a module of tests/main.rs, so the crate links one test binary for them.
+# Every integration test is a module of tests/main.rs, so the crate links one test binary for them. It takes the
+# crate's name, so `cargo test --workspace --test semantics` builds it alone, with the workspace's features.
 autotests = false
 
 [[test]]
-name = "main"
+name = "semantics"
 path = "tests/main.rs"
 
 [lints]
 workspace = true
+
+[lib]
+# No unit test lives in src, so no lib test binary builds. A unit test added there removes this line.
+test = false
 
 [dependencies]
 mago-bytes = { workspace = true }

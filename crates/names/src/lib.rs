@@ -78,6 +78,14 @@ pub const ENCODED_AS_JSON: &str = "Sharp\\Internal\\EncodedAsJson";
 /// `Behavior<T>`'s `get` and `set`.
 pub const ACCEPTS_ANY_EFFECT: &str = "Sharp\\Internal\\AcceptsAnyEffect";
 
+/// The mark of an engine function that gives the result of the PHP function its argument names, as `size` gives
+/// `count`'s.
+///
+/// The converter lists a standard library member whose body is one call of the engine function under that PHP
+/// function, as it lists a member whose body calls the PHP function itself, so it keeps no table of its own
+/// (decision 4).
+pub const RUNS_AS: &str = "Sharp\\Internal\\RunsAs";
+
 /// The attribute the standard library marks the method with whose call starts a listener of its first type argument,
 /// as `Events.on`.
 pub const STARTS_LISTENER: &str = "Sharp\\Internal\\StartsListener";
@@ -87,6 +95,12 @@ pub const STARTS_LISTENER: &str = "Sharp\\Internal\\StartsListener";
 /// A call whose type argument is a PHP# class is pure, spec section 1: every PHP# attribute's constructor and initial
 /// values have no effects.
 pub const CREATES_ATTRIBUTES: &str = "Sharp\\Internal\\CreatesAttributes";
+
+/// The mark of a property whose value is a member's name from the code, as `Method.name`.
+///
+/// A comparison of it with a string fixed at compile time selects no value from data, spec section 24, since no enum
+/// can declare a member's name, so the checker reads the mark and copies no library class list.
+pub const NAMES_MEMBER: &str = "Sharp\\Internal\\NamesMember";
 
 /// The mark of a method that runs the initial value of a property, as `Property.defaultValue()`.
 ///

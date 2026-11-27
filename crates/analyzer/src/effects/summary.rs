@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use foldhash::HashMap;
+use foldhash::HashSet;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -10,6 +11,7 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::r#extern::ExternMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
+use mago_codex::misc::GenericParent;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
@@ -40,7 +42,6 @@ use mago_syntax::cst::Emit;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForOf;
 use mago_syntax::cst::FunctionLikeParameterList;
-use mago_syntax::cst::Hint;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Is;
 use mago_syntax::cst::LawProof;
@@ -49,7 +50,6 @@ use mago_syntax::cst::LocalTarget;
 use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PropertyAccess;
-use mago_syntax::cst::TypeArgumentList;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPostfix;
 use mago_syntax::cst::UnaryPrefix;
@@ -64,6 +64,7 @@ use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::effects::AttributeArgument;
 use crate::effects::Body;
 use crate::effects::Call;
 use crate::effects::Changed;
@@ -73,6 +74,8 @@ use crate::effects::FunctionValue;
 use crate::effects::Roots;
 use crate::effects::Runs;
 use crate::effects::member_of_effect_class;
+use crate::effects::sharp_attributes;
+use crate::external::Listing;
 use crate::resolver::static_property::StaticProperty;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_holder;
@@ -105,7 +108,9 @@ pub(crate) fn record<'ast, 'arena, A>(
 
     let function_values = std::mem::take(&mut artifacts.function_values);
     let readonly_calls = std::mem::take(&mut artifacts.readonly_calls);
-    let (mut summary, mut lambdas) = summarize(context, artifacts, class, body, member, parameters, initializer, code);
+    let (mut summary, mut lambdas, listings) =
+        summarize(context, artifacts, class, body, member, parameters, initializer, code);
+    artifacts.listings.extend(listings);
     summary.function_values = function_values;
     summary.readonly_calls = readonly_calls;
     // Code that reaches an object of an abstract effect class, the real one or a fake, has that effect, whatever its
@@ -148,12 +153,14 @@ pub(crate) fn record_behaviors<A>(
                 span: *span,
                 receiver: Roots::from([Changed::This]),
                 arguments: vec![Roots::from([value])],
+                type_arguments: Vec::new(),
             })
             .collect();
         artifacts.effect_summaries.push(EffectSummary {
             body: Body::Accessor(class.name, property, word(accessor)),
             member,
             effects: Vec::new(),
+            attribute_reads: Vec::new(),
             calls,
             changes: Vec::new(),
             function_values: Vec::new(),
@@ -191,6 +198,7 @@ pub(crate) fn record_parse<A>(
             body,
             member: word(member),
             effects,
+            attribute_reads: Vec::new(),
             calls: Vec::new(),
             changes: Vec::new(),
             function_values: Vec::new(),
@@ -206,7 +214,13 @@ pub(crate) fn record_parse<A>(
             let class_name = codebase.get_class_like(object).map_or(object, |metadata| metadata.original_name);
             summary.effects.push((Effect::Class(effect), span, (class_name, word(member))));
         } else {
-            summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
+            summary.calls.push(Call {
+                callee,
+                span,
+                receiver: Roots::new(),
+                arguments: Vec::new(),
+                type_arguments: Vec::new(),
+            });
         }
     };
     let parse = Body::Method(class.name, class.method_key(word("parse")));
@@ -251,10 +265,7 @@ pub(crate) fn record_parse<A>(
     for field in codebase.struct_parse_fields(class.name) {
         if !field.is_parameter {
             let property = word([b"$".as_slice(), field.name].concat());
-            let Some(declaring) = class.declaring_property_ids.get(&property) else {
-                unreachable!("a property field is one of its class's properties, each of which has a declaring class");
-            };
-            let set = Body::Accessor(codebase.class_key(*declaring), property, word(b"set"));
+            let set = Body::Accessor(codebase.class_key(field.declaring), property, word(b"set"));
             reach(&mut parsing, class.name, set, field.name);
         }
         parsed_classes(codebase, field.r#type, &mut nested);
@@ -409,7 +420,8 @@ fn function_value_runs(codebase: &CodebaseMetadata, function: Word) -> Runs {
     plain_php_runs(declaration, callee, callee)
 }
 
-/// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
+/// The summary of `body`, a body of the class `class`, the summaries of the lambdas written in it, and the sets of the
+/// program they read whole.
 #[allow(clippy::too_many_arguments)]
 fn summarize<'ast, 'arena, A>(
     context: &Context<'_, 'arena, A>,
@@ -420,7 +432,7 @@ fn summarize<'ast, 'arena, A>(
     parameters: Vec<Span>,
     initializer: Option<&'ast ConstructorInitializer<'arena>>,
     code: FunctionLikeBody<'ast, 'arena>,
-) -> (EffectSummary, Vec<EffectSummary>)
+) -> (EffectSummary, Vec<EffectSummary>, HashSet<Listing>)
 where
     A: Arena,
 {
@@ -430,6 +442,7 @@ where
         body,
         member,
         effects: Vec::new(),
+        attribute_reads: Vec::new(),
         calls: Vec::new(),
         changes: Vec::new(),
         function_values: Vec::new(),
@@ -480,6 +493,7 @@ where
         },
         summary: empty_summary(),
         lambda_summaries: Vec::new(),
+        listings: HashSet::default(),
     };
 
     // A local takes the roots of every value assigned to it anywhere in the body, so the walk repeats until no
@@ -516,7 +530,24 @@ where
         }
     }
 
-    (recorder.summary, recorder.lambda_summaries)
+    (recorder.summary, recorder.lambda_summaries, recorder.listings)
+}
+
+/// Every PHP# property that declares an initial value, as its class and its name, which a read of an initial value can
+/// run, spec section 29. PHP takes only a constant expression for a property, so a plain PHP one runs no code.
+pub(crate) fn initial_values(codebase: &CodebaseMetadata) -> Vec<(Word, Word)> {
+    codebase
+        .class_likes
+        .values()
+        .filter(|class_like| class_like.flags.is_sharp())
+        .flat_map(|class_like| {
+            class_like
+                .properties
+                .iter()
+                .filter(|(_, metadata)| metadata.flags.has_default())
+                .map(|(property, _)| (class_like.name, *property))
+        })
+        .collect()
 }
 
 /// The state of one body's walk.
@@ -549,6 +580,8 @@ where
     summary: EffectSummary,
     /// The summary of each lambda written in the body, once, which a function value of the lambda runs.
     lambda_summaries: Vec<EffectSummary>,
+    /// The sets of the program the body's summary read whole, so a watch analyzes the file again when one changes.
+    listings: HashSet<Listing>,
 }
 
 impl<'ctx, 'ast, 'arena, A> Recorder<'_, 'ctx, 'ast, 'arena, A>
@@ -727,6 +760,7 @@ where
                             span,
                             receiver: receiver.clone(),
                             arguments: arguments.clone(),
+                            type_arguments: Vec::new(),
                         });
                     }
                 }
@@ -817,7 +851,13 @@ where
 
         let receiver = self.roots(object);
         for callee in self.accessors(object, property, b"get") {
-            self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments: Vec::new() });
+            self.summary.calls.push(Call {
+                callee,
+                span,
+                receiver: receiver.clone(),
+                arguments: Vec::new(),
+                type_arguments: Vec::new(),
+            });
         }
 
         if let Expression::ConstantAccess(class) = object.unparenthesized()
@@ -844,7 +884,13 @@ where
         for (name, static_property) in &declaring.properties {
             if static_property.flags.is_static() && static_property.flags.has_runtime_initial_value() {
                 let callee = Body::InitialValue(declaring.name, *name);
-                self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
+                self.summary.calls.push(Call {
+                    callee,
+                    span,
+                    receiver: Roots::new(),
+                    arguments: Vec::new(),
+                    type_arguments: Vec::new(),
+                });
             }
         }
     }
@@ -863,6 +909,7 @@ where
                 span,
                 receiver: Roots::from([Changed::This]),
                 arguments: Vec::new(),
+                type_arguments: Vec::new(),
             });
         }
         self.use_statics(self.class, name.name.value(), span);
@@ -955,8 +1002,9 @@ where
         }
 
         let parameters = parameters.parameters.iter().map(|parameter| parameter.variable.span).collect();
-        let (summary, lambdas) =
+        let (summary, lambdas, listings) =
             summarize(self.context, self.artifacts, self.class, body, empty_word(), parameters, None, code);
+        self.listings.extend(listings);
         self.lambda_summaries.push(summary);
         for lambda in lambdas {
             if !self.lambda_summaries.iter().any(|summary| summary.body == lambda.body) {
@@ -967,15 +1015,11 @@ where
 
     fn call(&mut self, call: &'ast CallExpression<'arena>) {
         let span = call.span();
-        let (receiver, arguments, function, type_arguments) = match call {
-            CallExpression::Function(call) => (None, &call.argument_list, Some(call.function), None),
-            CallExpression::NullSafeFunction(call) => (None, &call.argument_list, Some(call.function), None),
-            CallExpression::Method(call) => {
-                (Some(call.object), &call.argument_list, None, call.type_arguments.as_ref())
-            }
-            CallExpression::NullSafeMethod(call) => {
-                (Some(call.object), &call.argument_list, None, call.type_arguments.as_ref())
-            }
+        let (receiver, arguments, function) = match call {
+            CallExpression::Function(call) => (None, &call.argument_list, Some(call.function)),
+            CallExpression::NullSafeFunction(call) => (None, &call.argument_list, Some(call.function)),
+            CallExpression::Method(call) => (Some(call.object), &call.argument_list, None),
+            CallExpression::NullSafeMethod(call) => (Some(call.object), &call.argument_list, None),
             CallExpression::StaticMethod(_) => unreachable!("the parser reads PHP's `::` in PHP# as an error"),
         };
 
@@ -999,17 +1043,15 @@ where
             }
         }
 
-        self.call_targets(span, receiver, arguments, type_arguments);
+        self.call_targets(span, receiver, arguments);
     }
 
-    /// Records the functions and methods the analysis resolved the call at `span` to, with `receiver`, `arguments` and
-    /// the `type_arguments` the call writes.
+    /// Records the functions and methods the analysis resolved the call at `span` to, with `receiver` and `arguments`.
     fn call_targets(
         &mut self,
         span: Span,
         receiver: Option<&'ast Expression<'arena>>,
         arguments: &'ast ArgumentList<'arena>,
-        type_arguments: Option<&'ast TypeArgumentList<'arena>>,
     ) {
         let artifacts = self.artifacts;
         let Some(targets) = artifacts.call_targets.get(&(span.start.offset, span.end.offset)) else {
@@ -1027,10 +1069,18 @@ where
                     callee: FunctionLikeIdentifier::Method(declaring_class, method_name),
                     class: named_class,
                 } => {
-                    if type_arguments
-                        .is_some_and(|written| self.creates_attributes(declaring_class, method_name, written))
-                        || self.runs_initial_values(declaring_class, method_name, span)
-                    {
+                    // A read of attributes has the effects of the class its type argument names, spec section 1: none
+                    // for a PHP# attribute class, and those each call gives for the body's own type parameter.
+                    match self.attributes_read(declaring_class, method_name, span) {
+                        Some(AttributeArgument::Class(class)) if sharp_attributes(self.codebase(), class) => continue,
+                        Some(AttributeArgument::Parameter(index)) => {
+                            let cause = self.member_cause(declaring_class, method_name, named_class);
+                            self.summary.attribute_reads.push((index, span, cause));
+                            continue;
+                        }
+                        Some(AttributeArgument::Class(_) | AttributeArgument::Other) | None => {}
+                    }
+                    if self.runs_initial_values(declaring_class, method_name, span) {
                         continue;
                     }
                     let class = named_class.unwrap_or(declaring_class);
@@ -1051,36 +1101,69 @@ where
         }
     }
 
-    /// Whether the call of `method` of `class` with the type arguments `written` creates only attributes PHP# code
-    /// writes, which have no effects, spec section 1: the standard library marks the method `CreatesAttributes`, as
-    /// `Class<T>.attributes<TAttribute>()`, and its one type argument names a PHP# class-like that no plain PHP class
-    /// extends or implements, since the attributes it reads are of the class or of one that extends or implements it,
-    /// and whose constructor, each one's own or inherited, PHP# declares.
-    fn creates_attributes(&self, class: Word, method: Word, written: &TypeArgumentList<'arena>) -> bool {
+    /// What the call at `span` of `method` of `class` reads, when the standard library marks the method
+    /// `CreatesAttributes`, as `Class<T>.attributes<TAttribute>()`: the attributes of the class its own type argument
+    /// names, the last the checker inferred, after an extension block's, as [`Self::attribute_argument`] gives it. The
+    /// summary decides what the read does from every descendant of a class it names, so it records that set. None for
+    /// any other method.
+    fn attributes_read(&mut self, class: Word, method: Word, span: Span) -> Option<AttributeArgument> {
         let codebase = self.codebase();
-        let marked = codebase
+        if !codebase
             .get_method(class, method)
-            .is_some_and(|method| method.has_attribute(codebase, word(CREATES_ATTRIBUTES)));
-        let [Hint::Identifier(attribute)] = written.arguments.as_slice() else {
-            return false;
-        };
-        if !marked || self.context.resolved_names.is_type_parameter(attribute) {
-            return false;
+            .is_some_and(|method| method.has_attribute(codebase, word(CREATES_ATTRIBUTES)))
+        {
+            return None;
         }
-        let attribute = self.context.resolved_names.get(attribute);
-        let is_sharp = |class: &[u8]| codebase.get_class_like(word(class)).is_some_and(|class| class.flags.is_sharp());
-        let written_in_sharp = |class: &[u8]| {
-            is_sharp(class)
-                && codebase
-                    .get_declaring_method_class(word(class), word("__construct"))
-                    .is_none_or(|constructor| is_sharp(constructor.as_bytes()))
-        };
 
-        written_in_sharp(attribute)
-            && codebase
-                .get_all_descendants(word(attribute))
-                .iter()
-                .all(|descendant| written_in_sharp(descendant.as_bytes()))
+        let argument = self.attribute_arguments(span).last().copied().unwrap_or(AttributeArgument::Other);
+        if let AttributeArgument::Class(attribute_class) = argument {
+            self.listings.insert(Listing::Descendants(attribute_class));
+        }
+
+        Some(argument)
+    }
+
+    /// The type arguments the checker inferred for the call at `span`, by the callee's own type parameter index, each as
+    /// [`Self::attribute_argument`] gives it, which [`super::through`] substitutes for a read of attributes.
+    fn attribute_arguments(&self, span: Span) -> Vec<AttributeArgument> {
+        self.artifacts
+            .inferred_type_arguments
+            .get(&(span.start.offset, span.end.offset))
+            .map(|arguments| arguments.iter().map(|argument| self.attribute_argument(argument)).collect())
+            .unwrap_or_default()
+    }
+
+    /// What `argument` is to a read of the attributes of the class it names, spec sections 1 and 25: the class-like it
+    /// names, which [`sharp_attributes`] decides where a read takes it, a type parameter of the body's own method, which
+    /// each of its calls gives, or any other type, which may have every effect.
+    fn attribute_argument(&self, argument: &TUnion) -> AttributeArgument {
+        let codebase = self.codebase();
+        if let [TAtomic::GenericParameter(parameter)] = &*argument.types
+            && let GenericParent::FunctionLike((class, method)) = &parameter.defining_entity
+            && let Body::Method(own_class, own_method) = self.summary.body
+            && codebase.class_key(*class) == own_class
+            && codebase.method_key(own_class, *method) == own_method
+            && let Some(index) = codebase
+                .get_method(own_class, own_method)
+                .and_then(|metadata| metadata.template_types.get_index_of(&parameter.parameter_name))
+        {
+            return AttributeArgument::Parameter(index as u32);
+        }
+
+        argument
+            .get_single_named_object()
+            .map_or(AttributeArgument::Other, |named| AttributeArgument::Class(named.name))
+    }
+
+    /// The callee of a call of `method` of `declaring_class`, through `named_class` when the call names another, as
+    /// messages name it: the class's full name and the member, as `ClassMembers` and `attributes`.
+    fn member_cause(&self, declaring_class: Word, method: Word, named_class: Option<Word>) -> (Word, Word) {
+        let codebase = self.codebase();
+        let class = named_class.unwrap_or(declaring_class);
+        let class_name = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
+        let member = codebase.get_method(declaring_class, method).map_or(method, |metadata| metadata.original_name);
+
+        (class_name, member)
     }
 
     /// Records the call at `span` of `method` of `class` as calls of the code it runs, when the standard library marks
@@ -1096,18 +1179,19 @@ where
         {
             return false;
         }
-        let mut callees = Vec::new();
-        for class_like in codebase.class_likes.values().filter(|class_like| class_like.flags.is_sharp()) {
-            for (property, metadata) in &class_like.properties {
-                if metadata.flags.has_default() {
-                    callees.push(Body::InitialValue(class_like.name, *property));
-                }
-            }
-        }
+        let mut callees: Vec<Body> =
+            initial_values(codebase).into_iter().map(|(class, property)| Body::InitialValue(class, property)).collect();
+        self.listings.insert(Listing::InitialValues);
 
         callees.sort_unstable();
         for callee in callees {
-            self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
+            self.summary.calls.push(Call {
+                callee,
+                span,
+                receiver: Roots::new(),
+                arguments: Vec::new(),
+                type_arguments: Vec::new(),
+            });
         }
 
         true
@@ -1214,7 +1298,13 @@ where
             let class = self.codebase().class_key(*class);
             let callee = Body::Method(class, self.codebase().method_key(class, *method));
             let arguments = operands.iter().map(|operand| self.roots(operand)).collect();
-            self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
+            self.summary.calls.push(Call {
+                callee,
+                span,
+                receiver: Roots::new(),
+                arguments,
+                type_arguments: Vec::new(),
+            });
         }
     }
 
@@ -1232,8 +1322,7 @@ where
             return;
         };
 
-        let class_name = codebase.get_class_like(class).map_or(class, |metadata| metadata.original_name);
-        let cause = (class_name, metadata.original_name);
+        let cause = self.member_cause(declaring_class, method_name, Some(class));
         let receiver_roots = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
         // An extension's member takes its receiver as its first parameter, as its method value does, and the call's
         // arguments fill the parameters after it.
@@ -1272,6 +1361,7 @@ where
                 span,
                 receiver: receiver_roots,
                 arguments: roots,
+                type_arguments: self.attribute_arguments(span),
             });
 
             return;
@@ -1337,7 +1427,13 @@ where
         for (parameter, given) in parameters.iter().zip(given) {
             if !given && parameter.flags.has_default() {
                 let callee = Body::Default(class, method, parameter.get_name().0);
-                self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: Vec::new() });
+                self.summary.calls.push(Call {
+                    callee,
+                    span,
+                    receiver: Roots::new(),
+                    arguments: Vec::new(),
+                    type_arguments: Vec::new(),
+                });
             }
         }
     }
@@ -1398,7 +1494,7 @@ where
 
     /// Records `: super(…)`: the call of the base class's constructor the analysis resolved at its span.
     fn constructor_initializer(&mut self, initializer: &'ast ConstructorInitializer<'arena>) {
-        self.call_targets(initializer.span(), None, &initializer.argument_list, None);
+        self.call_targets(initializer.span(), None, &initializer.argument_list);
     }
 
     /// Records a `new`: a constructor PHP# declares runs its body on a fresh object, and one plain PHP declares has the
@@ -1443,7 +1539,13 @@ where
             let arguments = instantiation.argument_list.as_ref();
             self.left_out_defaults(declaring.name, constructor, &metadata.parameters, arguments, span);
             let callee = Body::Method(declaring.name, constructor);
-            self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments: roots });
+            self.summary.calls.push(Call {
+                callee,
+                span,
+                receiver: Roots::new(),
+                arguments: roots,
+                type_arguments: Vec::new(),
+            });
         } else if !is_prelude_stub(class.name) {
             // `new` takes the line of the class it creates, as `new ValueError(…)` takes `ValueError`'s, and only plain
             // PHP takes an `extern` line, so a PHP# class takes its nearest plain PHP parent's.
@@ -1537,11 +1639,23 @@ where
                     let arguments = std::iter::once(receiver.clone())
                         .chain(std::iter::repeat_n(elements.clone(), others))
                         .collect();
-                    self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
+                    self.summary.calls.push(Call {
+                        callee,
+                        span,
+                        receiver: Roots::new(),
+                        arguments,
+                        type_arguments: Vec::new(),
+                    });
                 }
                 Runs::Body(callee) => {
                     let arguments = vec![elements.clone(); metadata.parameters.len()];
-                    self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments });
+                    self.summary.calls.push(Call {
+                        callee,
+                        span,
+                        receiver: receiver.clone(),
+                        arguments,
+                        type_arguments: Vec::new(),
+                    });
                 }
                 Runs::Declared { callee, effects } => {
                     for effect in effects {

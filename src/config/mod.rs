@@ -985,6 +985,7 @@ ini = { memory_limit = "2G" }
                 name: "php".to_owned(),
                 file: directory.join("vendor/acme/host.php"),
                 deadline: std::time::Duration::from_millis(1234),
+                backstop: std::time::Duration::from_millis(12340),
                 environment: [("APP_ENV".to_owned(), "test".to_owned())].into(),
                 ini: [("memory_limit".to_owned(), "2G".to_owned())].into(),
             }

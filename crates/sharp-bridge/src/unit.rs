@@ -34,6 +34,19 @@ pub const SHARP_UNIT_MAGIC: [u8; 8] = *b"SHARPC\0\0";
 /// The folder at the workspace root, and at each package root, that holds every compiled file.
 pub const COMPILED_FOLDER: &str = ".sharp";
 
+/// The link in [`COMPILED_FOLDER`] that names the generation every reader reads the compiled files of.
+///
+/// Each compile writes a generation anew beside it and switches the link to it, so a running process keeps the one it
+/// started on.
+pub const CURRENT_GENERATION: &str = "current";
+
+/// The first part of the name of each generation's folder in [`COMPILED_FOLDER`].
+pub const GENERATION_PREFIX: &str = "generation-";
+
+/// The file in a generation's folder that each process reading the generation holds a shared `flock` on, so no compile
+/// deletes the generation while it runs.
+pub const GENERATION_LOCK: &str = "generation.lock";
+
 /// The last segment of an input that stands for the `.sharp` files of its folder, as in `app/Shop/*.sharp`.
 ///
 /// Its stamp is the listing of the names of the regular files whose name ends in `.sharp` after at least one other
@@ -622,8 +635,8 @@ fn source_listing(folder: &Path) -> Result<Vec<u8>, DatabaseError> {
 
 /// Where the compiled file of `source` lives, or none when `source` is a link to a file outside `root`.
 ///
-/// The compiled file sits in the `.sharp` folder at the canonical `root`, at the real path of `source` relative to
-/// `root`, with `.sharp` replaced by `.sharpc`. A source gone since the run read it, as one deleted or moved while the
+/// The compiled file sits in the current generation of the `.sharp` folder at the canonical `root`, through its
+/// [`CURRENT_GENERATION`] link, at the real path of `source` relative to `root`, with `.sharp` replaced by `.sharpc`. A source gone since the run read it, as one deleted or moved while the
 /// run analyzed it, has no real path, so its compiled file sits at its own path, a stale input the next run picks up.
 ///
 /// # Errors
@@ -645,7 +658,9 @@ pub fn compiled_path(root: &Path, source: &Path) -> Result<Option<PathBuf>, Data
 /// walk of its load does, takes the compiled file's path from that real path.
 #[must_use]
 pub fn compiled_path_of_real(root: &Path, real: &Path) -> Option<PathBuf> {
-    real.strip_prefix(root).ok().map(|relative| root.join(COMPILED_FOLDER).join(relative).with_extension("sharpc"))
+    real.strip_prefix(root)
+        .ok()
+        .map(|relative| root.join(COMPILED_FOLDER).join(CURRENT_GENERATION).join(relative).with_extension("sharpc"))
 }
 
 /// Returns `true` when the compiled file `bytes` cannot stand for the code whose key is `key` any more.

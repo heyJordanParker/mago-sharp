@@ -1,0 +1,19 @@
+namespace App;
+
+// A lambda that changes its own parameter copies it into a `let` local first, as a method does, and an arrow function
+// becomes a lambda with a body in braces for it (spec sections 2 and 14.2).
+internal final class Steps
+{
+    internal int next(int start)
+    {
+        const step = (int count) => { let changedCount = count; changedCount += 1; return changedCount; };
+        const grow = (int count) => {
+            let changedCount = count;
+            changedCount *= 2;
+
+            return changedCount;
+        };
+
+        return grow(step(start));
+    }
+}

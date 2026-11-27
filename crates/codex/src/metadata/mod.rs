@@ -87,6 +87,8 @@ pub struct CodebaseEntryKeys {
     /// Class-like FQCN atoms (also used for symbol removal).
     pub class_like_names: Vec<Word>,
     pub class_like_aliases: Vec<(Word, Word, Span)>,
+    /// The modules the file declares, as its scan gave them, before population gives each binding its service id.
+    pub modules: Vec<ModuleMetadata>,
     /// Function-like `(scope, name)` tuples.
     pub function_like_keys: Vec<(Word, Word)>,
     /// Constant FQN atoms.
@@ -1339,13 +1341,18 @@ impl CodebaseMetadata {
 
     /// The fields of a PHP# struct's or class's stored form, which its `parse` reads and `Json.encode` writes, spec
     /// section 10: its main constructor's parameters in order, then each other stored property, whatever its write
-    /// visibility, so a `private set` one and a machine's are kept. A computed property stores nothing. A parameter
-    /// that declares its property is that property's one field. A property the main constructor sets on every path may
-    /// be left out, and is read once, by the parameter, when a parameter reads its key. Any other property a
-    /// parameter's key names is a second field of that key, which the struct check refuses.
+    /// visibility, so a `private set` one and a machine's are kept: its own, then each one a PHP# ancestor declares,
+    /// nearest first, as `fields()` orders them, a private one included, and none a plain PHP ancestor declares. Each
+    /// names the class that declares it, whose scope reads and writes it. A computed property stores nothing. A
+    /// parameter that declares its property is that property's one field. A property the main constructor sets on
+    /// every path, itself or through a parent's constructor its `: super(…)` runs, as a parent's promoted property, may
+    /// be left out, and is read once, by the parameter, when a parameter reads its key. Any other
+    /// property a parameter's key or another class's property names is a second field of that key, which the struct
+    /// check refuses.
     #[must_use]
     pub fn struct_parse_fields(&self, class: Word) -> Vec<ParsedField<'_>> {
         let constructor = self.get_declaring_method(class, word("__construct"));
+        let main_class = self.get_declaring_method_class(class, word("__construct"));
         let parameters: Vec<ParsedField<'_>> = constructor
             .into_iter()
             .flat_map(|constructor| {
@@ -1362,44 +1369,62 @@ impl CodebaseMetadata {
                         r#type: &r#type.type_union,
                         has_default: parameter.flags.has_default(),
                         is_parameter: true,
+                        declaring: main_class.unwrap_or(class),
                         span: Some(parameter.name_span),
                     })
                 })
             })
             .collect();
-        let set_by_constructor = constructor
-            .and_then(|constructor| constructor.method_metadata.as_ref())
-            .map(|constructor| &constructor.assigned_properties);
-        let properties = self.get_class_like(class).into_iter().flat_map(|metadata| {
-            metadata
-                .struct_properties()
-                .into_iter()
-                .filter(|property| !property.flags.is_promoted_property())
-                .filter_map(|property| {
-                    let r#type = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?;
-                    let name = property.name.0.as_bytes();
-                    let name = name.strip_prefix(b"$").unwrap_or(name);
-                    let set_by_constructor =
-                        set_by_constructor.is_some_and(|assigned| assigned.contains(&property.name.0));
-                    if set_by_constructor && parameters.iter().any(|parameter| parameter.key == name) {
-                        return None;
-                    }
-                    let (key, omits_null) = field_key(&property.attributes, name);
+        let Some(metadata) = self.get_class_like(class) else {
+            return parameters;
+        };
+        let assigned: WordSet = constructor
+            .into_iter()
+            .chain(
+                metadata.all_parent_classes.iter().filter_map(|parent| self.get_method(*parent, word("__construct"))),
+            )
+            .filter_map(|constructor| constructor.method_metadata.as_ref())
+            .flat_map(|constructor| constructor.assigned_properties.iter().copied())
+            .collect();
+        let ancestors = std::iter::successors(Some(metadata), |metadata| {
+            metadata.direct_parent_class.and_then(|parent| self.get_class_like(parent))
+        })
+        .take(metadata.all_parent_classes.len() + 1)
+        .enumerate()
+        .filter(|(depth, ancestor)| *depth == 0 || ancestor.flags.is_sharp())
+        .map(|(_, ancestor)| ancestor);
+        let mut properties = Vec::new();
+        for ancestor in ancestors {
+            for property in ancestor.struct_properties() {
+                if property.flags.is_promoted_property() && main_class == Some(ancestor.name) {
+                    continue;
+                }
+                let name = property.name.0.as_bytes();
+                let name = name.strip_prefix(b"$").unwrap_or(name);
+                let Some(r#type) = property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())
+                else {
+                    continue;
+                };
+                let set_by_constructor = property.flags.is_promoted_property() || assigned.contains(&property.name.0);
+                if set_by_constructor && parameters.iter().any(|parameter| parameter.key == name) {
+                    continue;
+                }
+                let (key, omits_null) = field_key(&property.attributes, name);
 
-                    Some(ParsedField {
-                        name,
-                        key,
-                        omits_null,
-                        r#type: &r#type.type_union,
-                        has_default: property.flags.has_default() || set_by_constructor,
-                        is_parameter: false,
-                        span: property.name_span,
-                    })
-                })
-                .collect::<Vec<_>>()
-        });
+                properties.push(ParsedField {
+                    name,
+                    key,
+                    omits_null,
+                    r#type: &r#type.type_union,
+                    has_default: property.flags.has_default() || set_by_constructor,
+                    is_parameter: false,
+                    declaring: ancestor.name,
+                    span: property.name_span,
+                });
+            }
+        }
 
-        parameters.iter().copied().chain(properties).collect()
+        parameters.into_iter().chain(properties).collect()
     }
 
     /// Retrieves magic `@property*` metadata, potentially from an inherited tag.
@@ -1899,15 +1924,15 @@ impl CodebaseMetadata {
     ///
     /// # Returns
     /// Returns the logical names of files whose top-level code references an invalidated symbol,
-    /// and whether `read` names one. Returns `None` if the cascade was too large to compute.
+    /// and whether `read` names one.
     pub fn mark_safe_symbols(
         &mut self,
         diff: &CodebaseDiff,
         references: &SymbolReferences,
         read: &HashSet<SymbolIdentifier>,
-    ) -> Option<(WordSet, bool)> {
+    ) -> (WordSet, bool) {
         let (invalid_symbols, partially_invalid, invalid_files, read_invalid) =
-            references.get_invalid_symbols(self, diff, read)?;
+            references.get_invalid_symbols(self, diff, read);
 
         // Mark all symbols in 'keep' set as safe (unless invalidated by cascade)
         for keep_symbol in diff.get_keep() {
@@ -1924,7 +1949,7 @@ impl CodebaseMetadata {
             }
         }
 
-        Some((invalid_files, read_invalid))
+        (invalid_files, read_invalid)
     }
 
     /// Drops each PHP# module whose name a plain PHP class holds in any case, with its members, as [`Self::extend`]
@@ -2474,7 +2499,14 @@ impl CodebaseMetadata {
         file_ids.sort_unstable();
         file_ids.dedup();
 
-        CodebaseEntryKeys { class_like_names, class_like_aliases, function_like_keys, constant_names, file_ids }
+        CodebaseEntryKeys {
+            class_like_names,
+            class_like_aliases,
+            modules: self.modules.clone(),
+            function_like_keys,
+            constant_names,
+            file_ids,
+        }
     }
 
     /// Removes entries whose keys match the given [`CodebaseEntryKeys`].

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use mago_extension::HostFile;
+use mago_extension::backstop;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -76,14 +77,17 @@ impl ExtensionHostConfiguration {
         Ok(())
     }
 
-    /// The host `name` as mago runs it: its file resolved from the configuration's directory, its deadline, its
-    /// environment and its PHP settings.
+    /// The host `name` as mago runs it: its file resolved from the configuration's directory, its deadline of CPU time
+    /// and the backstop of wall time it gives, its environment and its PHP settings.
     #[must_use]
     pub fn host_file(&self, name: &str) -> HostFile {
+        let deadline = Duration::from_millis(self.request_timeout_ms);
+
         HostFile {
             name: name.to_owned(),
             file: self.base_directory.join(&self.file),
-            deadline: Duration::from_millis(self.request_timeout_ms),
+            deadline,
+            backstop: backstop(deadline),
             environment: self.environment.clone(),
             ini: self.ini.clone(),
         }

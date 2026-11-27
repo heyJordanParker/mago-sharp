@@ -19,6 +19,7 @@ use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 use mago_word::word;
 
+use crate::effects::summary::initial_values;
 use crate::external::ExternalAnalysisSession;
 use crate::external::ExternalAnalyzerError;
 use crate::external::error::protocol;
@@ -308,6 +309,9 @@ pub enum Listing {
     Namespace(Word),
     /// The methods a search across classes finds, with the fields it projects, by the search as the worker wrote it.
     Methods(Word),
+    /// The initial values a read of a property's initial value can run, spec section 29: every PHP# property that
+    /// declares one.
+    InitialValues,
 }
 
 impl FileReads {
@@ -409,6 +413,15 @@ impl Listing {
                 let failed = metadata::write_found_methods(search.as_bytes(), &mut found, codebase, session).is_err();
                 failed.hash(&mut hasher);
                 hash_values(&mut hasher, &found.finish());
+            }
+            Self::InitialValues => {
+                let mut properties = initial_values(codebase);
+                properties.sort_unstable_by(|left, right| {
+                    (left.0.as_bytes(), left.1.as_bytes()).cmp(&(right.0.as_bytes(), right.1.as_bytes()))
+                });
+                for (class, property) in properties {
+                    (class.as_bytes(), property.as_bytes()).hash(&mut hasher);
+                }
             }
         }
 

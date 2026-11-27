@@ -231,10 +231,7 @@ impl Server {
     /// # Errors
     ///
     /// Returns [`ServerError`] when a worker cannot answer whether it loaded one, or cannot start again.
-    pub fn reload_classes(
-        &mut self,
-        classes: impl IntoIterator<Item = Word>,
-    ) -> Result<Option<Vec<FileId>>, ServerError> {
+    pub fn reload_classes(&mut self, classes: impl IntoIterator<Item = Word>) -> Result<Vec<FileId>, ServerError> {
         Ok(self.service.reload_classes(&classes.into_iter().collect())?)
     }
 

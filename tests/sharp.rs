@@ -27,6 +27,17 @@ const BOX: &str = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Lib;\n\nfinal 
 /// A PHP file the linter reports for its missing `declare(strict_types=1);` and the formatter rewrites.
 const MESSY: &str = "<?php\n\nnamespace Lib;\n\nfunction  one( ): int {return 1;}\n";
 
+/// A plain PHP file no linter rule reports.
+const CLEAN: &str = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Lib;\n\nfunction one(): int\n{\n    return 1;\n}\n";
+
+/// A plain PHP file that breaks one linter rule at the error level, `no-eval`, so `mago lint` fails on it.
+const EVALUATES: &str =
+    "<?php\n\ndeclare(strict_types=1);\n\nnamespace Lib;\n\nfunction one(): void\n{\n    eval('1;');\n}\n";
+
+/// What `mago lint` prints for the workspace's PHP# file when the command line names it.
+const LINT_SKIPS_REPORT: &str =
+    "skipped src/Demo/Report.sharp: `mago lint` checks plain PHP, and `mago analyze` checks PHP# code.";
+
 fn valid_report() -> String {
     REPORT.replace("let label = \"one\";", "let label = 1;")
 }
@@ -706,10 +717,10 @@ fn compile_accepts_a_project_call_of_an_extern_method_its_library_package_compil
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert!(output.status.success(), "{printed}");
-    assert!(root.join(".sharp/src/App/Page.sharpc").is_file(), "{printed}");
+    assert!(root.join(".sharp/current/src/App/Page.sharpc").is_file(), "{printed}");
     let package = root.join("vendor/heyjordanparker/php-sharp-composer");
-    assert!(package.join(".sharp/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
-    assert!(!root.join(".sharp/vendor").exists(), "{printed}");
+    assert!(package.join(".sharp/current/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
+    assert!(!root.join(".sharp/current/vendor").exists(), "{printed}");
 }
 
 /// A project file runs the vendored library's one-call method as its body, from the inline form the library's codex
@@ -724,7 +735,7 @@ fn compile_inlines_a_vendored_library_form_into_a_project_caller() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert!(output.status.success(), "{printed}");
-    let page = std::fs::read(directory.path().join(".sharp/src/App/Page.sharpc")).unwrap();
+    let page = std::fs::read(directory.path().join(".sharp/current/src/App/Page.sharpc")).unwrap();
     assert!(page.windows(b"mb_ucfirst".len()).any(|window| window == b"mb_ucfirst"), "the form is inlined");
 }
 
@@ -754,11 +765,11 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
     assert!(printed.contains("Compiled 70 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
-    assert!(root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
-    assert!(root.join(".sharp/library/Sharp/System/Environment.sharpc").is_file(), "{printed}");
-    let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
+    assert!(root.join(".sharp/current/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
+    assert!(root.join(".sharp/current/library/Sharp/System/Environment.sharpc").is_file(), "{printed}");
+    let title = std::fs::read(root.join(".sharp/current/example/App/Title.sharpc")).unwrap();
     assert!(title.windows(b"mb_ucfirst".len()).any(|window| window == b"mb_ucfirst"), "the form is inlined");
-    assert!(!root.join(".sharp/example/App/Native.sharpc").exists(), "{printed}");
+    assert!(!root.join(".sharp/current/example/App/Native.sharpc").exists(), "{printed}");
     assert!(printed.contains("native-body-outside-library"), "{printed}");
 }
 
@@ -774,7 +785,7 @@ fn compile_refuses_extern_under_library_sharp_without_the_composer_json_of_the_l
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(!root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").exists(), "{printed}");
+    assert!(!root.join(".sharp/current/library/Sharp/Text/StringMembers.sharpc").exists(), "{printed}");
     assert!(printed.contains("native-body-outside-library"), "{printed}");
 }
 
@@ -1157,7 +1168,7 @@ fn compile_accepts_a_struct_that_renames_an_import_to_keep_the_short_name_free()
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert!(output.status.success(), "{printed}");
-    assert!(root.join(".sharp/src/App/Entry.sharpc").is_file(), "{printed}");
+    assert!(root.join(".sharp/current/src/App/Entry.sharpc").is_file(), "{printed}");
 }
 
 /// A PHP# attribute class keeps the targets its `[Attribute(Attribute.TARGET_METHOD)]` reads, so the attribute on a
@@ -1375,8 +1386,10 @@ fn lint_and_format_skip_a_staged_sharp_file() {
 
     let (output, _) = run_in_messy_workspace(&directory, "lint", &["--staged", "--reporting-format", "emacs"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}{stderr}");
     assert!(stdout.lines().any(|line| line.starts_with("src/Lib/messy.php:1:1:warning - strict-types:")), "{stdout}");
+    assert!(stderr.contains(LINT_SKIPS_REPORT), "{stderr}");
 
     let (output, _) = run_in_messy_workspace(&directory, "fmt", &["--staged"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1428,13 +1441,48 @@ fn lint_format_and_guard_never_read_a_discovered_sharp_file() {
     }
 }
 
+/// A `mago lint` run that names a PHP# file lints the plain PHP files it names, warns that it skipped the PHP# one, and
+/// exits by the PHP files alone, as ESLint warns about a file it was named and ignores.
 #[test]
-fn lint_format_and_guard_refuse_a_sharp_file_named_on_the_command_line() {
+fn lint_skips_a_named_sharp_file_with_a_warning_and_exits_by_the_php_files() {
+    let directory = workspace(REPORT);
+    std::fs::write(directory.path().join("src/Lib/clean.php"), CLEAN).unwrap();
+    std::fs::write(directory.path().join("src/Lib/evaluates.php"), EVALUATES).unwrap();
+
+    for (named, succeeds, issue) in [
+        (&["--reporting-format", "emacs", "src/Demo/Report.sharp", "src/Lib/clean.php"][..], true, None),
+        (
+            &["--reporting-format", "emacs", "src/Demo/Report.sharp", "src/Lib/evaluates.php"][..],
+            false,
+            Some("src/Lib/evaluates.php:9:5:error - no-eval:"),
+        ),
+        (&["--reporting-format", "emacs", "src/Demo/Report.sharp"][..], true, None),
+        (&["--fix", "src/Demo/Report.sharp"][..], true, None),
+    ] {
+        let output = run(directory.path(), "lint", named);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(if succeeds { 0 } else { 1 }), "{named:?}: {stdout}{stderr}");
+        assert!(stderr.contains(LINT_SKIPS_REPORT), "{named:?}: {stderr}");
+        assert!(!stderr.contains("does not support PHP# files"), "{named:?}: {stderr}");
+        assert_eq!(
+            stdout.lines().filter(|line| line.starts_with("src/")).collect::<Vec<_>>().len(),
+            usize::from(issue.is_some()),
+            "{named:?}: {stdout}"
+        );
+        if let Some(issue) = issue {
+            assert!(stdout.lines().any(|line| line.starts_with(issue)), "{named:?}: {stdout}");
+        }
+        assert_eq!(report(directory.path()), REPORT, "{named:?} changed the PHP# file");
+    }
+}
+
+#[test]
+fn format_and_guard_refuse_a_sharp_file_named_on_the_command_line() {
     let directory = workspace(REPORT);
 
     for (command, arguments, message) in [
-        ("lint", &["src/Demo/Report.sharp"][..], "`mago lint` does not support PHP# files yet"),
-        ("lint", &["--fix", "src/Demo/Report.sharp"][..], "`mago lint` does not support PHP# files yet"),
         ("fmt", &["src/Demo/Report.sharp"][..], "`mago format` does not support PHP# files yet"),
         ("guard", &["src/Demo/Report.sharp"][..], "`mago guard` does not support PHP# files yet"),
     ] {
@@ -1658,7 +1706,7 @@ fn compile_refuses_a_sharp_file_whose_error_an_ignore_entry_or_a_baseline_entry_
 
         assert_eq!(output.status.code(), Some(1), "{suppression}: {printed}");
         assert!(printed.contains("invalid-return-statement"), "{suppression}: {printed}");
-        assert!(!directory.path().join(".sharp/src/Demo/Broken.sharpc").exists(), "{suppression}");
+        assert!(!directory.path().join(".sharp/current/src/Demo/Broken.sharpc").exists(), "{suppression}");
     }
 }
 
@@ -1763,7 +1811,7 @@ fn compile_takes_a_function_value_for_an_extern_callable_parameter_and_refuses_c
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert!(output.status.success(), "{printed}");
-    assert!(root.join(".sharp/app/Posts/Saving.sharpc").exists(), "{printed}");
+    assert!(root.join(".sharp/current/app/Posts/Saving.sharpc").exists(), "{printed}");
 }
 
 /// Spec section 6: a getter never writes `this`, and `compile` refuses the file that breaks the rule, while it still
@@ -1782,8 +1830,8 @@ fn compile_refuses_a_file_whose_getter_writes_this() {
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
     assert!(printed.contains("Getter `read` changes `this.reads`. A getter never writes `this`."), "{printed}");
-    assert!(!directory.path().join(".sharp/app/Shop/Label.sharpc").exists());
-    assert!(directory.path().join(".sharp/app/Stubs/Stripe.sharpc").exists(), "{printed}");
+    assert!(!directory.path().join(".sharp/current/app/Shop/Label.sharpc").exists());
+    assert!(directory.path().join(".sharp/current/app/Stubs/Stripe.sharpc").exists(), "{printed}");
 }
 
 /// The members of `App\Shop\Stop` its tests call: `halt`, which never returns, and `say` and `size`, which do. The file
@@ -1810,7 +1858,7 @@ fn compile_refuses_a_file_with_a_statement_that_never_runs() {
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
     assert!(printed.contains("This statement never runs, because line 9 ends the block."), "{printed}");
-    assert!(!root.join(".sharp/app/Shop/Stop.sharpc").exists());
+    assert!(!root.join(".sharp/current/app/Shop/Stop.sharpc").exists());
 }
 
 /// A condition that never finishes is refused with the code to write in place of its `if` or `for … of`, and the file
@@ -1868,7 +1916,7 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(0), "{printed}");
-    assert!(root.join(".sharp/app/Shop/Stop.sharpc").exists());
+    assert!(root.join(".sharp/current/app/Shop/Stop.sharpc").exists());
 }
 
 /// Spec section 23 reads a plain PHP constant through its namespace, so `mago compile` writes a file that reads the
@@ -1904,7 +1952,7 @@ fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(0), "{printed}");
-    assert!(root.join(".sharp/app/Shop/Reads.sharpc").exists());
+    assert!(root.join(".sharp/current/app/Shop/Reads.sharpc").exists());
 
     for (read, status) in [
         ("Pdf.measure", 0),
@@ -2001,8 +2049,8 @@ fn compile_refuses_a_file_whose_law_calls_plain_php_with_an_effect() {
         ),
         "{printed}"
     );
-    assert!(!root.join(".sharp/app/Shop/Refund.sharpc").exists());
-    assert!(root.join(".sharp/app/Stubs/Billing.sharpc").exists(), "{printed}");
+    assert!(!root.join(".sharp/current/app/Shop/Refund.sharpc").exists());
+    assert!(root.join(".sharp/current/app/Stubs/Billing.sharpc").exists(), "{printed}");
 }
 
 /// A `set` that empties its `List` with `field = []` and adds to it again, as php-sharp's `Accessors.sharp` does,
@@ -2024,7 +2072,7 @@ fn compile_writes_a_list_property_whose_set_empties_and_refills_it() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(0), "{printed}");
-    assert!(root.join(".sharp/app/Store/Product.sharpc").is_file(), "{printed}");
+    assert!(root.join(".sharp/current/app/Store/Product.sharpc").is_file(), "{printed}");
 }
 
 #[test]
@@ -2320,4 +2368,112 @@ fn two_moves_leave_each_import_line_whole_in_either_order() {
             String::from_utf8_lossy(&compiled.stderr)
         );
     }
+}
+
+/// `App.Shop.Behavior`, a class named like the standard library's `Behavior`, which `Order` of its namespace names
+/// bare, with the standard library's `Behavior` in its package, and `extra`, more files of the project.
+fn write_behavior_project(root: &Path, extra: &[(&str, &str)]) {
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"src\", \"vendor/heyjordanparker\"]\nincludes = [\"vendor\"]\nextensions = [\"php\", \"sharp\"]\n",
+    );
+    write(root, "composer.json", r#"{"type": "library", "autoload": {"psr-4": {"App\\": "src/App/"}}}"#);
+    write(root, "vendor/heyjordanparker/php-sharp-composer/composer.json", LIBRARY_PACKAGE);
+    write(
+        root,
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+        include_str!("../../composer/library/Sharp/Behavior.sharp"),
+    );
+    write(root, "src/App/Shop/Behavior.sharp", BEHAVIOR_CLASS);
+    write(root, "src/App/Shop/Order.sharp", BEHAVIOR_ORDER);
+    for (path, code) in extra {
+        write(root, path, code);
+    }
+    analyzes_clean(root);
+}
+
+const BEHAVIOR_CLASS: &str =
+    "namespace App.Shop;\n\npublic class Behavior\n{\n    public string name() => \"shop\";\n}\n";
+
+const BEHAVIOR_ORDER: &str =
+    "namespace App.Shop;\n\npublic class Order\n{\n    public string label(Behavior behavior) => behavior.name();\n}\n";
+
+fn compiles_clean(root: &Path) {
+    let compiled = run(root, "compile", &[]);
+
+    assert!(
+        compiled.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+}
+
+/// A bare `Behavior` in `App.Shop` names the class of its namespace over the standard library's `Behavior`, spec
+/// section 23, so moving the class out of `App.Shop` gives `Order` the import that keeps it naming the class.
+#[test]
+fn move_imports_a_class_a_bare_name_reached_through_its_namespace_over_a_standard_class() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    write_behavior_project(root, &[]);
+
+    let output = run(root, "move", &["App.Shop.Behavior", "App.Shop.Behaviors"]);
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/App/Shop/Order.sharp")).unwrap(),
+        BEHAVIOR_ORDER.replace("App.Shop;\n", "App.Shop;\n\nimport App.Shop.Behaviors.Behavior;\n")
+    );
+    compiles_clean(root);
+}
+
+/// A bare `Behavior` in `App.Shop.Behaviors` names the standard library's `Behavior` until the move puts a class of
+/// that name in its namespace, so the move gives `Counter` the import that keeps it naming the standard one.
+#[test]
+fn move_imports_the_standard_class_a_bare_name_named_before_a_class_of_its_name_joins_its_namespace() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let counter = "namespace App.Shop.Behaviors;\n\npublic class Counter : Behavior<int>\n{\n    public int get(int value) => value;\n\n    public int set(int value) => value;\n}\n";
+    write_behavior_project(root, &[("src/App/Shop/Behaviors/Counter.sharp", counter)]);
+
+    let output = run(root, "move", &["App.Shop.Behavior", "App.Shop.Behaviors"]);
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/App/Shop/Behaviors/Counter.sharp")).unwrap(),
+        counter.replace("App.Shop.Behaviors;\n", "App.Shop.Behaviors;\n\nimport Sharp.Behavior;\n")
+    );
+    compiles_clean(root);
+}
+
+/// A plain PHP file whose `App\Shop` block names `Behavior` bare and whose `Lib` block declares a `Behavior` can't
+/// take the `use` that would keep the bare name naming the moved class, as PHP refuses a `use` of a name the file
+/// declares, so the move refuses, naming the file, the line and the name, and changes no file.
+#[test]
+fn move_refuses_an_import_a_file_takes_by_a_name_it_declares_and_changes_no_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let rules = "<?php\n\nnamespace App\\Shop {\n    final class Rule\n    {\n        public function name(Behavior $behavior): string\n        {\n            return $behavior->name();\n        }\n    }\n}\n\nnamespace Lib {\n    final class Behavior\n    {\n    }\n}\n";
+    write_behavior_project(root, &[("src/Legacy/Rules.php", rules)]);
+
+    let output = run(root, "move", &["App.Shop.Behavior", "App.Shop.Behaviors"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("Can't move `App.Shop.Behavior` into `App.Shop.Behaviors`, so no file changed:"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            r"src/Legacy/Rules.php:6: `Behavior` names `App.Shop.Behaviors.Behavior`, and keeping it needs `use App\Shop\Behaviors\Behavior;`, but the file declares a class `Behavior`."
+        ),
+        "{stderr}"
+    );
+    assert_eq!(read("src/App/Shop/Behavior.sharp"), BEHAVIOR_CLASS);
+    assert_eq!(read("src/App/Shop/Order.sharp"), BEHAVIOR_ORDER);
+    assert_eq!(read("src/Legacy/Rules.php"), rules);
+    assert!(!root.join("src/App/Shop/Behaviors").exists());
 }

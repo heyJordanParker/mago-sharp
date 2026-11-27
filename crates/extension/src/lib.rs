@@ -20,6 +20,8 @@ pub use hosts::Host;
 pub use hosts::HostFile;
 pub use hosts::Hosts;
 pub use hosts::WorkerRequestHandler;
+pub use hosts::backstop;
+pub use mago_engine::Clock;
 pub use mago_engine::Value;
 pub use payload::PayloadReader;
 pub use payload::PayloadWriter;

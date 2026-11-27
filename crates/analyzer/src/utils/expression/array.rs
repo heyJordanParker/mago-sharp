@@ -37,6 +37,7 @@ use mago_codex::ttype::get_null;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::get_string;
 use mago_codex::ttype::get_undefined_null;
+use mago_codex::ttype::is_sharp_received_either_list;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -307,6 +308,10 @@ where
 
         reads_a_sharp_collection |= context.dialect.is_sharp() && !in_assignment && atomic_var_type.is_array();
         match atomic_var_type {
+            // Plain PHP's `array<V>`, a `List<V>` or a `Map<int|string, V>`, keeps the PHP array plain PHP gave, which
+            // PHP's own index reads as one array, so its `Map` part reads the index, an `int` or a `string`.
+            TAtomic::Array(TArray::List(list))
+                if context.dialect.is_sharp() && is_sharp_received_either_list(list, array_like_type.types.iter()) => {}
             TAtomic::Array(TArray::List(_)) => {
                 let new_type = handle_array_access_on_list(
                     context,

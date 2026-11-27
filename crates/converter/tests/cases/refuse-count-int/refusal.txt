@@ -1,0 +1,1 @@
+13:16: `count` has no PHP# form here: `ListMembers.count` takes `List<T>` where this call passes `int`, and `MapMembers.count` takes `Map<TKey, TValue>` where this call passes `int`, and `SetMembers.count` takes `Set<T>` where this call passes `int`

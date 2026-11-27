@@ -163,6 +163,38 @@ pub(crate) struct Call {
     pub(crate) receiver: Roots,
     /// The roots of each argument, by the callee's parameter index.
     pub(crate) arguments: Vec<Roots>,
+    /// The call's type arguments, by the callee's own type parameter index, as a read of attributes through one takes
+    /// them, which [`through`] substitutes.
+    pub(crate) type_arguments: Vec<AttributeArgument>,
+}
+
+/// What a call's type argument is to a read of the attributes of the class it names, `attributes<TAttribute>()`, spec
+/// sections 1 and 25.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum AttributeArgument {
+    /// A class-like by its name, whose attributes a read creates with no effects when [`sharp_attributes`] holds for
+    /// it in the codebase the effects are solved against, and with every effect otherwise.
+    Class(Word),
+    /// The type parameter at this index of the calling body's own method, which its callers give in turn.
+    Parameter(u32),
+    /// Any other type, whose attributes a read may create with every effect.
+    Other,
+}
+
+/// Whether a read creates the attributes of `class` with no effects, spec sections 1 and 25: a PHP# class-like that no
+/// plain PHP class extends or implements, since the attributes a read creates are of the class or of one that extends
+/// or implements it, and whose constructor, each one's own or inherited, PHP# declares.
+pub(crate) fn sharp_attributes(codebase: &CodebaseMetadata, class: Word) -> bool {
+    let is_sharp = |class: Word| codebase.get_class_like(class).is_some_and(|class| class.flags.is_sharp());
+    let written_in_sharp = |class: Word| {
+        is_sharp(class)
+            && codebase
+                .get_declaring_method_class(class, word("__construct"))
+                .is_none_or(|constructor| is_sharp(word(constructor.as_bytes())))
+    };
+
+    written_in_sharp(class)
+        && codebase.get_all_descendants(class).iter().all(|descendant| written_in_sharp(word(descendant.as_bytes())))
 }
 
 /// What one PHP# body does by itself: the effects of the plain PHP it calls, the PHP# bodies it calls, and the state
@@ -175,6 +207,10 @@ pub struct EffectSummary {
     /// Each effect, with the call that has it and that call's callee as its full class name and its member, with an
     /// empty class for a function and an empty member for a constructor.
     pub(crate) effects: Vec<(Effect, Span, (Word, Word))>,
+    /// Each read of the attributes of the class the body's own type parameter at an index names, as
+    /// `type.attributes<TAttribute>()` in `has<TAttribute>`, with the call and its callee: each call of the body gives
+    /// it the effects of the class it names.
+    pub(crate) attribute_reads: Vec<(u32, Span, (Word, Word))>,
     pub(crate) calls: Vec<Call>,
     /// Each change, with the write and the place written as the source writes it.
     pub(crate) changes: Vec<(Changed, Span, Word)>,
@@ -287,11 +323,25 @@ fn written((class, member): (Word, Word), class_name: &dyn Fn(Word) -> String) -
     }
 }
 
-/// What a body does: an effect, or a change of a root.
+/// What a body does: an effect, a change of a root, or a read of the attributes of the class the type parameter at an
+/// index of the body's own method names, whose effects each call gives, as [`through`] substitutes them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Item {
     Effect(Effect),
     Changed(Changed),
+    AttributesOf(u32),
+}
+
+impl Item {
+    /// The effect the item has where it is, `None` for a change. A read of attributes no call has named the class of
+    /// may have every effect, as a read of a plain PHP class's does.
+    fn effect(self) -> Option<Effect> {
+        match self {
+            Item::Effect(effect) => Some(effect),
+            Item::AttributesOf(_) => Some(Effect::Any),
+            Item::Changed(_) => None,
+        }
+    }
 }
 
 /// Where an item of a body comes from: its own call or write, or a call whose callee has `via`'s item.
@@ -395,7 +445,7 @@ impl Effects {
                         for &target in call_targets {
                             let reached: Vec<(Item, Item)> = solved[target]
                                 .iter()
-                                .flat_map(|(item, _)| through(*item, call).map(move |mapped| (*item, mapped)))
+                                .flat_map(|(item, _)| through(codebase, *item, call).map(move |mapped| (*item, mapped)))
                                 .collect();
 
                             for (callee_item, item) in reached {
@@ -583,10 +633,10 @@ impl Effects {
     fn effects_of(&self, positions: &[usize]) -> Option<Vec<Word>> {
         let mut effects = Vec::new();
         for (item, _) in positions.iter().flat_map(|position| &self.solved[*position]) {
-            let effect = match item {
-                Item::Effect(effect) => effect.named()?,
-                Item::Changed(_) => continue,
+            let Some(effect) = item.effect() else {
+                continue;
             };
+            let effect = effect.named()?;
             if !effects.contains(&effect) {
                 effects.push(effect);
             }
@@ -641,10 +691,7 @@ impl Effects {
 
     /// Why `body` has an effect that `allowed` does not list.
     fn effect_outside(&self, codebase: &CodebaseMetadata, body: Body, allowed: &[Word]) -> Option<Impurity> {
-        self.first_item(body, |item| match item {
-            Item::Effect(effect) => is_outside(codebase, effect, allowed),
-            Item::Changed(_) => false,
-        })
+        self.first_item(body, |item| item.effect().is_some_and(|effect| is_outside(codebase, effect, allowed)))
     }
 
     /// The first item of `body` that `keep` keeps, as the call or write in `body` that leads to it.
@@ -676,12 +723,14 @@ impl Effects {
             }
         }
 
-        let effect = match item {
-            Item::Effect(effect) => Some(effect),
-            Item::Changed(_) => None,
-        };
+        // A read of attributes no call named the class of reaches the standard library member it calls, as
+        // `ClassMembers.attributes`, which may have every effect.
+        if let Item::AttributesOf(_) = item {
+            path.push(origin.cause);
+            every_effect = true;
+        }
 
-        Some(Impurity { span, path, cause: origin.cause, effect, every_effect })
+        Some(Impurity { span, path, cause: origin.cause, effect: item.effect(), every_effect })
     }
 
     /// The first function value given each place that has an effect its place's function type does not list, with
@@ -803,7 +852,7 @@ impl Effects {
     fn bodies_with_effects(
         &self,
     ) -> impl Iterator<Item = (Body, Word, &WordMap<Word>, &NamespaceScope, Impurity)> + '_ {
-        self.bodies_with(|effects, body| effects.first_item(body, |item| matches!(item, Item::Effect(_))))
+        self.bodies_with(|effects, body| effects.first_item(body, |item| item.effect().is_some()))
     }
 
     /// Each body that changes the object it runs on, and the write that leads to it, as [`Self::bodies_with`] gives
@@ -890,9 +939,11 @@ fn undeclared(summaries: &[EffectSummary]) -> Vec<(Span, (Word, Word), usize)> {
 fn own_items(summary: &EffectSummary) -> Vec<(Item, Origin)> {
     let mut items: Vec<(Item, Origin)> = Vec::new();
     let effects = summary.effects.iter().map(|(effect, span, cause)| (Item::Effect(*effect), *span, *cause));
+    let attribute_reads =
+        summary.attribute_reads.iter().map(|(index, span, cause)| (Item::AttributesOf(*index), *span, *cause));
     let changes =
         summary.changes.iter().map(|(changed, span, place)| (Item::Changed(*changed), *span, (empty_word(), *place)));
-    for (item, span, cause) in effects.chain(changes) {
+    for (item, span, cause) in effects.chain(attribute_reads).chain(changes) {
         if !items.iter().any(|(known, _)| *known == item) {
             items.push((item, Origin { span, cause, via: None }));
         }
@@ -902,10 +953,13 @@ fn own_items(summary: &EffectSummary) -> Vec<(Item, Origin)> {
     items
 }
 
-/// What a callee's item is in the caller: an effect stays, and a change maps through the roots the call passes.
-fn through(item: Item, call: &Call) -> impl Iterator<Item = Item> + '_ {
+/// What a callee's item is in the caller: an effect stays, a change maps through the roots the call passes, and a read
+/// of attributes through a type parameter maps through the type argument the call gives it: none for a PHP# attribute
+/// class, spec section 1, as `codebase` holds its descendants now, the caller's own type parameter for one it passes on,
+/// and every effect for any other type.
+fn through<'call>(codebase: &CodebaseMetadata, item: Item, call: &'call Call) -> impl Iterator<Item = Item> + 'call {
     let roots: Vec<Changed> = match item {
-        Item::Effect(_) => Vec::new(),
+        Item::Effect(_) | Item::AttributesOf(_) => Vec::new(),
         Item::Changed(Changed::This) => call.receiver.iter().copied().collect(),
         Item::Changed(Changed::HeldByThis) => call.receiver.iter().map(|root| root.held()).collect(),
         Item::Changed(Changed::Parameter(index)) => {
@@ -916,6 +970,13 @@ fn through(item: Item, call: &Call) -> impl Iterator<Item = Item> + '_ {
 
     let effect = match item {
         Item::Effect(_) => Some(item),
+        Item::AttributesOf(index) => match call.type_arguments.get(index as usize) {
+            Some(AttributeArgument::Class(class)) => {
+                (!sharp_attributes(codebase, *class)).then_some(Item::Effect(Effect::Any))
+            }
+            Some(AttributeArgument::Parameter(own)) => Some(Item::AttributesOf(*own)),
+            Some(AttributeArgument::Other) | None => Some(Item::Effect(Effect::Any)),
+        },
         Item::Changed(_) => None,
     };
 

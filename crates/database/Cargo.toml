@@ -24,6 +24,9 @@ serde_json = { workspace = true, optional = true, features = ["preserve_order"] 
 rayon = { workspace = true }
 notify = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [features]
 default = ["loader", "watcher"]
 serde = ["dep:serde"]
