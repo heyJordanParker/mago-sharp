@@ -2196,17 +2196,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let field = self.statics_field(field_line, word(self.class), &own, variable.name, PlaceUse::Write);
             writes.push(self.node(SHARP_AST_ASSIGN, 0, field_line, &[field, value]));
         }
-        if let Some(MethodBody::Concrete(block)) = constructor.map(|constructor| &constructor.body) {
-            for statement in &block.statements {
-                writes.push(self.statement(statement));
-            }
-        }
+        let constructor_body: Vec<&Statement> = match constructor.map(|constructor| &constructor.body) {
+            Some(MethodBody::Concrete(block)) => block.statements.iter().collect(),
+            _ => Vec::new(),
+        };
+        let body = self.statement_list(&constructor_body, writes, line);
         self.static_type_parameters = None;
 
         let type_arguments = self.string(0, line, TYPE_ARGUMENTS);
         let parameter = self.node(SHARP_AST_PARAM, 0, line, &[NULL, type_arguments, NULL, NULL, NULL, NULL]);
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &writes);
 
         Some(self.declaration(
             SHARP_AST_METHOD,
@@ -3218,11 +3217,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn method_body(&mut self, body: &MethodBody, returns_value: bool, mut statements: Vec<u32>) -> u32 {
         match body {
             MethodBody::Concrete(block) => {
-                for statement in &block.statements {
-                    statements.push(self.statement(statement));
-                }
+                let body: Vec<&Statement> = block.statements.iter().collect();
 
-                self.node(SHARP_AST_STMT_LIST, 0, self.line(block), &statements)
+                self.statement_list(&body, statements, self.line(block))
             }
             MethodBody::Expression(body) => {
                 let line = self.line(body);
@@ -5627,12 +5624,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     fn block(&mut self, block: &Block) -> u32 {
-        let mut statements = Vec::new();
-        for statement in &block.statements {
-            statements.push(self.statement(statement));
+        let statements: Vec<&Statement> = block.statements.iter().collect();
+
+        self.statement_list(&statements, Vec::new(), self.line(block))
+    }
+
+    /// The `STMT_LIST` on `line` of `lowered`, nodes lowered before them, then `statements`. A `using` local, spec
+    /// section 2, is its assignment, then a `TRY` whose block holds the statements after it and whose `finally` calls
+    /// the local's `dispose()`. So a `return`, the end of the block and a throw each dispose it, and a later `using`
+    /// local, nested inside, is disposed first.
+    fn statement_list(&mut self, statements: &[&Statement], mut lowered: Vec<u32>, line: u32) -> u32 {
+        for (position, statement) in statements.iter().enumerate() {
+            lowered.push(self.statement(statement));
+            if let Statement::LocalDeclaration(local) = statement
+                && local.is_using()
+            {
+                let LocalTarget::Name(name) = &local.target else {
+                    unreachable!("the parser reads a `using` local with one name, at {:?}", local.span());
+                };
+                let local_line = self.line(local);
+                let rest = self.statement_list(&statements[position + 1..], Vec::new(), local_line);
+                let variable = self.variable(name.span, name.value);
+                let method = self.string(0, local_line, b"dispose");
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, local_line, &[]);
+                let dispose = self.node(SHARP_AST_METHOD_CALL, 0, local_line, &[variable, method, arguments]);
+                let finally = self.node(SHARP_AST_STMT_LIST, 0, local_line, &[dispose]);
+                let catches = self.node(SHARP_AST_CATCH_LIST, 0, local_line, &[]);
+                lowered.push(self.node(SHARP_AST_TRY, 0, local_line, &[rest, catches, finally]));
+                break;
+            }
         }
 
-        self.node(SHARP_AST_STMT_LIST, 0, self.line(block), &statements)
+        self.node(SHARP_AST_STMT_LIST, 0, line, &lowered)
     }
 
     fn statement(&mut self, statement: &Statement) -> u32 {
@@ -8284,15 +8307,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let lambda = closure.span();
         let parameters = self.lambda_parameters(lambda, &closure.parameter_list);
         let ((body, return_type), captures_type_arguments) = self.lambda_body(|lowering| {
-            let mut statements = lowering.collection_parameters(&closure.parameter_list.parameters);
-            for statement in &closure.body.statements {
-                statements.push(lowering.statement(statement));
-            }
+            let statements = lowering.collection_parameters(&closure.parameter_list.parameters);
+            let body: Vec<&Statement> = closure.body.statements.iter().collect();
 
-            (
-                lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(&closure.body), &statements),
-                lowering.lambda_type(lambda),
-            )
+            (lowering.statement_list(&body, statements, lowering.line(&closure.body)), lowering.lambda_type(lambda))
         });
         let uses = self.closure_uses(lambda, captures_type_arguments);
         let attributes = self.attributes(&closure.attribute_lists, None, &[]);
@@ -10578,7 +10596,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Some(Binding::Local(local)) => match local.kind {
                     LocalKind::Parameter => false,
                     LocalKind::Pattern { .. } => self.names.is_written(&local),
-                    LocalKind::Let | LocalKind::Const => self.typed_local(value).is_none(),
+                    LocalKind::Let | LocalKind::Const | LocalKind::Using => self.typed_local(value).is_none(),
                 },
                 _ => true,
             },

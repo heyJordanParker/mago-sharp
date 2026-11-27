@@ -32167,6 +32167,58 @@ fn a_use_of_a_class_s_statics_has_the_effects_of_their_initial_values() {
     );
 }
 
+const DISPOSABLE_LIBRARY: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Disposable.sharp",
+    include_str!("../../../../composer/library/Sharp/Disposable.sharp"),
+);
+
+/// Spec section 2: a `using` local's block calls `dispose()` on the value it holds when it ends, so the value is a
+/// `Disposable`, as `Archive` is. Any other value is refused.
+#[test]
+fn a_using_local_holds_a_disposable() {
+    let archive = (
+        "app/Shop/Archive.sharp",
+        "namespace App.Shop;\n\npublic class Archive : Disposable\n{\n    public void dispose() { }\n}\n",
+    );
+    let export = (
+        "app/Shop/Export.sharp",
+        "namespace App.Shop;\n\npublic class Export\n{\n    public int count()\n    {\n        using archive = new Archive();\n        using total = 3;\n        return total;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        messages(export, &[archive, DISPOSABLE_LIBRARY]),
+        ["A `using` local holds a `Disposable`, and the type of `3` is `int`."]
+    );
+}
+
+/// Spec sections 2 and 29: a `Disposable`'s `dispose()` may have any effect, as `Transaction`'s reads the database,
+/// and a `using` local carries the effects of its value's `dispose()`, as a written call of it would. So
+/// `Report.count`, which disposes a `Transaction`, has the effect `Database`, which the pure `Counter.count` refuses.
+#[test]
+fn a_using_local_carries_the_effects_of_its_value_s_dispose() {
+    let database = (
+        "src/App/Shop/Database.sharp",
+        "namespace App.Shop;\n\npublic effect abstract class Database\n{\n    public abstract int rows();\n}\n",
+    );
+    let transaction = (
+        "src/App/Shop/Transaction.sharp",
+        "namespace App.Shop;\n\npublic class Transaction : Disposable\n{\n    public Transaction(private Database database) { }\n\n    public void dispose()\n    {\n        this.database.rows();\n    }\n}\n",
+    );
+    let counter =
+        ("src/App/Shop/Counter.sharp", "namespace App.Shop;\n\npublic interface Counter\n{\n    int count();\n}\n");
+    let report = (
+        "src/App/Shop/Report.sharp",
+        "namespace App.Shop;\n\npublic class Report : Counter\n{\n    public Report(private Database database) { }\n\n    public int count()\n    {\n        using transaction = new Transaction(this.database);\n        return 1;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        effect_issues(&[report, transaction, database, counter, DISPOSABLE_LIBRARY]),
+        [
+            "src/App/Shop/Report.sharp:9:9 incompatible-effects: `Report.count` reaches `Transaction.dispose`, which calls `App.Shop.Database.rows` with the effect `App.Shop.Database`, so the pure `Counter.count` cannot accept it."
+        ]
+    );
+}
+
 const BEHAVIOR_LIBRARY: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
     include_str!("../../../../composer/library/Sharp/Behavior.sharp"),
