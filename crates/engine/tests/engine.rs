@@ -340,11 +340,14 @@ fn a_value_no_value_holds_fails_the_call() {
 }
 
 fn parcel(properties: Vec<(&'static str, Value)>) -> Value {
-    Value::Object { class: "Mago\\Tests\\Engine\\Parcel", properties }
+    Value::Object {
+        class: "Mago\\Tests\\Engine\\Parcel".into(),
+        properties: properties.into_iter().map(|(name, value)| (name.into(), value)).collect(),
+    }
 }
 
 fn post() -> Value {
-    Value::Case { enumeration: "Mago\\Tests\\Engine\\Carrier", case: "Post" }
+    Value::Case { enumeration: "Mago\\Tests\\Engine\\Carrier".into(), case: "Post".into() }
 }
 
 fn open_parcel(engine: &Engine, parcel: Value) -> Result<Value, EngineError> {
@@ -365,7 +368,7 @@ fn an_object_goes_to_php_with_its_properties_set_and_no_constructor_run() {
 fn an_object_the_interpreter_cant_build_fails_the_call_and_the_next_call_runs() {
     let engine = engine();
     let refused = [
-        Value::Object { class: "Mago\\Tests\\Engine\\Missing", properties: Vec::new() },
+        Value::Object { class: "Mago\\Tests\\Engine\\Missing".into(), properties: Vec::new() },
         parcel(vec![("grams", Value::Int(1)), ("label", Value::Null), ("carrier", post()), ("color", Value::Null)]),
         parcel(vec![("grams", Value::String(b"1".to_vec())), ("label", Value::Null), ("carrier", post())]),
         parcel(vec![("grams", Value::Int(1)), ("grams", Value::Int(2)), ("label", Value::Null), ("carrier", post())]),
@@ -373,7 +376,7 @@ fn an_object_the_interpreter_cant_build_fails_the_call_and_the_next_call_runs() 
         parcel(vec![
             ("grams", Value::Int(1)),
             ("label", Value::Null),
-            ("carrier", Value::Case { enumeration: "Mago\\Tests\\Engine\\Carrier", case: "Drone" }),
+            ("carrier", Value::Case { enumeration: "Mago\\Tests\\Engine\\Carrier".into(), case: "Drone".into() }),
         ]),
     ];
 

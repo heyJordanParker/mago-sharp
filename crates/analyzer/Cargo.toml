@@ -20,7 +20,7 @@ path = "tests/main.rs"
 workspace = true
 
 [dependencies]
-mago-codex = { workspace = true }
+mago-codex = { workspace = true, features = ["serde"] }
 mago-reporting = { workspace = true }
 mago-text-edit = { workspace = true }
 mago-syntax = { workspace = true }

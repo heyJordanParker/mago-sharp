@@ -19,6 +19,7 @@ test = false
 
 [dependencies]
 libc = { workspace = true }
+serde = { workspace = true }
 sharp = { workspace = true }
 
 [build-dependencies]
