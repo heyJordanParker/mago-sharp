@@ -839,6 +839,55 @@ fn a_compile_error_in_a_file_no_host_reaches_reports_that_file_and_every_host_ru
     assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\n");
 }
 
+/// The `extern` lines of a file nothing names apply to every file, as an analysis of the whole project applies them, so
+/// a rule a host asks as it loads that calls a Composer `files` helper an `extern` line declares compiles before the
+/// hosts start, and the first compile with the host passes.
+#[test]
+fn a_host_starts_on_a_rule_that_calls_an_extern_declared_helper_on_the_first_compile() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the extern helper host test") {
+        return;
+    }
+    let host = HOST_ASKING_A_RULE_AS_IT_LOADS.replace(
+        "spl_autoload_register(",
+        "require dirname(__DIR__) . '/vendor/acme/framework/helpers.php';\n\nspl_autoload_register(",
+    );
+    let rule = "namespace App.Rules;\n\nimport Framework;\n\npublic class Naming\n{\n    public static string message() => Framework.config(\"app.name\") as string ?? \"none\";\n}\n";
+    let directory = library_project(&[
+        ("app/Rules/Naming.sharp", rule),
+        (
+            "app/Stubs/Framework.sharp",
+            "namespace App.Stubs;\n\nimport Framework;\n\nextern namespace Framework for config;\n\nextern Framework.config uses Environment;\n",
+        ),
+        ("tools/host.php", &host),
+    ]);
+    let root = directory.path();
+    let maps = "<?php\n\n$vendorDir = dirname(__DIR__);\n$baseDir = dirname($vendorDir);\n\nreturn array(\n";
+    write(
+        root,
+        "vendor/acme/framework/helpers.php",
+        "<?php\n\nfunction config(string $key): mixed\n{\n    return $key === 'app.name' ? 'first' : null;\n}\n",
+    );
+    write(root, "vendor/composer/autoload_psr4.php", &format!("{maps});\n"));
+    write(
+        root,
+        "vendor/composer/autoload_files.php",
+        &format!("{maps}    'framework' => $vendorDir . '/acme/framework/helpers.php',\n);\n"),
+    );
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.rules]\nfile = \"tools/host.php\"\n",
+    );
+    let cache = tempfile::tempdir().unwrap();
+
+    let compiled = process::output(command(root, "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
+
+    assert!(!printed(&compiled).contains("isn't compiled for the extension hosts yet"), "{}", printed(&compiled));
+    assert!(compiled.status.success(), "{}", printed(&compiled));
+    assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\n");
+}
+
 /// `mago analyze` compiles the project's `.sharp` folder and the hosts' folder from one analysis without the hosts and
 /// one lowering before it analyzes with the hosts, so on a fresh tree its log holds one compile, and the host and the
 /// `.sharp` folder each get every file.
