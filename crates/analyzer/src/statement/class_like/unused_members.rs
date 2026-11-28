@@ -20,6 +20,7 @@ use foldhash::HashSet;
 use mago_allocator::Arena;
 
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::Member;
 use mago_codex::metadata::attribute::AttributeMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::flags::MetadataFlags;
@@ -739,7 +740,9 @@ pub fn too_wide_members(
 /// Refuses each class or member a reach the checker can't see reaches, as [`unseen_reaches`] gives them, where the
 /// reach throws when it runs, spec section 5: each reach is a use from outside any namespace, so `internal` on its
 /// class or member, written or by default, is too narrow, an error at its declaration, and the engine's check stays. A
-/// member of an `internal` class reaches no further than its class, so the class is the one refused. A private method
+/// member of an `internal` class reaches no further than its class, so the class is the one refused, unless the member
+/// replaces a member of a parent class or an interface that reaches further, through which the reach reaches it, as
+/// [`CodebaseMetadata::is_held_to_namespace`] says. A private method
 /// of a marked base's subclass that no code uses is one its framework calls from the base class's code, as Eloquent
 /// calls an accessor, so it is refused too, and `protected` is enough.
 fn too_narrow_reaches(
@@ -757,24 +760,30 @@ fn too_narrow_reaches(
             continue;
         };
         let class_label = sharp_class_like_name(codebase, &WordMap::default(), class.name);
-        let (label, span) = if class.flags.is_internal_reach() {
-            (class_label, class.name_span.unwrap_or(class.span))
-        } else if let Some(method) = codebase.function_likes.get(&(reach.on, reach.member))
-            && method.flags.is_internal_reach()
-        {
-            (display_sharp_member(&class_label, method.original_name), method.name_span.unwrap_or(method.span))
+        let class_span = class.name_span.unwrap_or(class.span);
+        let (member, label, span) = if reach.member == empty_word() {
+            (None, class_label.clone(), class_span)
+        } else if let Some(method) = codebase.function_likes.get(&(reach.on, reach.member)) {
+            (
+                Some(Member::Method(reach.member)),
+                display_sharp_member(&class_label, method.original_name),
+                method.name_span.unwrap_or(method.span),
+            )
         } else if let Some(property) = class.properties.get(&reach.member)
-            && property.flags.is_internal_reach()
             && let Some(span) = property.name_span.or(property.span)
         {
-            (display_sharp_member(&class_label, reach.member), span)
-        } else if let Some(constant) = class.constants.get(&reach.member)
-            && constant.flags.is_internal_reach()
-        {
-            (display_sharp_member(&class_label, reach.member), constant.span)
+            (Some(Member::Property(reach.member)), display_sharp_member(&class_label, reach.member), span)
+        } else if let Some(constant) = class.constants.get(&reach.member) {
+            (Some(Member::Constant(reach.member)), display_sharp_member(&class_label, reach.member), constant.span)
         } else {
             continue;
         };
+        // The engine holds the class to its namespace when it is `internal`, and a member when
+        // `CodebaseMetadata::is_held_to_namespace` says so, as the checker's own reach decides it.
+        if !member.map_or(class.flags.is_internal_reach(), |member| codebase.is_held_to_namespace(reach.on, member)) {
+            continue;
+        }
+        let (label, span) = if class.flags.is_internal_reach() { (class_label, class_span) } else { (label, span) };
         if !refused.insert(span) {
             continue;
         }
