@@ -78,6 +78,7 @@ use crate::effects::Roots;
 use crate::effects::Runs;
 use crate::effects::member_of_effect_class;
 use crate::effects::sharp_attributes;
+use crate::expression::set_members;
 use crate::external::Listing;
 use crate::resolver::class_name::class_value_classes;
 use crate::resolver::class_name::get_class_name_from_atomic;
@@ -128,6 +129,14 @@ pub(crate) fn record<'ast, 'arena, A>(
     artifacts.effect_summaries.append(&mut lambdas);
 }
 
+/// Records the `none` that the method with a body `body`, whose summary [`record`] recorded, writes after `uses` at
+/// `none`, which changes nothing, spec section 29, so the effect rules warn with the body's first effect.
+pub(crate) fn record_uses_none(artifacts: &mut AnalysisArtifacts, body: Body, none: Span) {
+    if let Some(summary) = artifacts.effect_summaries.iter_mut().rev().find(|summary| summary.body == body) {
+        summary.uses_none = Some(none);
+    }
+}
+
 /// Records the `get` and `set` accessors of the property `property` of the class `block_context` is in, which runs
 /// through `behaviors`, each a class and where `via` names it, spec section 6.4. A behavior's `get` and `set` are the
 /// property's accessors, so a read calls each behavior's `get` and a write each one's `set`, on the behavior the object
@@ -171,6 +180,7 @@ pub(crate) fn record_behaviors<A>(
             function_values: Vec::new(),
             readonly_calls: Vec::new(),
             undeclared: Vec::new(),
+            uses_none: None,
             imports: Arc::clone(&context.imported_names),
             scope: Arc::clone(&context.scope),
         });
@@ -208,6 +218,7 @@ pub(crate) fn record_parse<A>(
             function_values: Vec::new(),
             readonly_calls: Vec::new(),
             undeclared: Vec::new(),
+            uses_none: None,
             imports: Arc::clone(&context.imported_names),
             scope: Arc::clone(&context.scope),
         }
@@ -369,7 +380,9 @@ const SET_CLASS: &[u8] = b"Sharp\\Set";
 /// Pushes onto `readers` the class `name` when `parse` of it runs its own reader, spec section 29: an enum has none of
 /// a project's, and a `final` class, a struct, a family, whose reader reads one of its declared variants, and a class
 /// whose constructor is `required`, below which no constructor adds an effect, each run the `parse` it declares or
-/// the bridge writes. `None` for any other class, which may be a subclass whose reader differs.
+/// the bridge writes. A sealed type without a reader of its own reads one of its permitted cases, the closed set
+/// spec section 20 gives it, so it pushes each case's reader, through a sealed sub-family too. `None` for any other
+/// class, which may be a subclass whose reader differs, and for a sealed type with a case that is one.
 fn reader_of<'codebase>(
     codebase: &'codebase CodebaseMetadata,
     name: Word,
@@ -387,7 +400,11 @@ fn reader_of<'codebase>(
     let known = class.flags.is_final() || class.flags.is_struct() || class.tag_key().is_some() || required;
     let parses = codebase.get_declaring_method_class(class.name, word("parse")) == Some(class.name);
     if !known || !parses {
-        return None;
+        for case in set_members(class, codebase)? {
+            reader_of(codebase, case.name, readers)?;
+        }
+
+        return Some(());
     }
     if !readers.iter().any(|seen| seen.name == class.name) {
         readers.push(class);
@@ -538,6 +555,7 @@ where
         function_values: Vec::new(),
         readonly_calls: Vec::new(),
         undeclared: Vec::new(),
+        uses_none: None,
         imports: Arc::clone(&imports),
         scope: Arc::clone(&scope),
     };

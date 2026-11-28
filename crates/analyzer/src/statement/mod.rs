@@ -356,7 +356,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Unset(unset) => unset.analyze(context, block_context, artifacts),
                 Statement::Switch(r#switch) => r#switch.analyze(context, block_context, artifacts),
                 Statement::Extern(r#extern) => {
-                    crate::effects::check::check_extern(context, r#extern);
+                    crate::effects::check::check_extern(context, artifacts, r#extern);
 
                     crate::statement::attributes::analyze_extern_attributes(context, artifacts, r#extern)
                 }

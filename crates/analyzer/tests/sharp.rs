@@ -11987,6 +11987,28 @@ fn an_extern_callable_parameter_takes_a_function_value_and_an_extern_default_fit
     );
 }
 
+/// Spec sections 12 and 23: an `extern` line's `[]` default is the empty `List`, checked against the parameter's type as
+/// any default is. A `List` parameter takes it, a `Map` parameter refuses it as a `List`, since an empty `Map` is
+/// written `[:]`, and an `int` parameter refuses it as any default of another type.
+#[test]
+fn an_extern_empty_list_default_fits_a_list_parameter_only() {
+    let db = "<?php\n\nnamespace Lib;\n\nfinal class Db\n{\n    public static function select(string $query, array $bindings = []): array\n    {\n        return $bindings;\n    }\n\n    public static function configure(array $options = []): int\n    {\n        return count($options);\n    }\n\n    public static function total(int $total = 0): int\n    {\n        return $total;\n    }\n}\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Db;\n\nextern List<Any?> Db.select(string query, List<Any?> bindings = []) uses none;\nextern int Db.configure(Map<string, int> options = []) uses none;\nextern int Db.total(int total = []) uses none;\n";
+    let reports = "namespace Shop;\n\nimport Lib.Db;\n\npublic class Reports\n{\n    public int run() => Db.select(\"select 1\").count() + Db.configure() + Db.total();\n}\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Lib/Db.php", db),
+            ("src/Stubs/Library.sharp", stubs),
+            ("src/Shop/Reports.sharp", reports)
+        ]),
+        [
+            "`[]` is an empty List. An empty Map is written `[:]`.",
+            "Default value for parameter `total` is not assignable to its declared type.",
+        ]
+    );
+}
+
 /// Spec section 23: an `extern` line states any return type a PHP# method declares: a function type over a native
 /// `\Closure`, a tuple over a native `array` and a nullable union over a native one, as a nullable type over a nullable
 /// one. A call reads each as the line states it, so the function `Factory.make()` returns is called in turn, with no
@@ -30140,6 +30162,28 @@ fn a_readonly_that_cannot_matter_warns() {
     );
 }
 
+/// Spec section 29: code with a body writes no `uses`, since the checker works its effects out from its code, so
+/// `uses none` on a method with a body changes nothing and warns that it can go. When the body has an effect, the
+/// warning names the first one, as section 29's errors name it, so no one reads `uses none` as a promise. When the
+/// body has none, the warning says the method is pure already.
+#[test]
+fn uses_none_on_a_method_with_a_body_warns_with_the_first_effect_the_body_has() {
+    let row = ("app/Shop/Row.sharp", "namespace App.Shop;\n\npublic final class Row { }\n");
+    let probe = (
+        "app/Shop/Probe.sharp",
+        "namespace App.Shop;\n\npublic class Probe\n{\n    public static Any? direct(Class<Row> row) uses none => row.createInstance([]);\n\n    public static int one() uses none => 1;\n}\n",
+    );
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[probe, row, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/Probe.sharp:5:52 invalid-effect: `Probe.direct` reaches `ClassMembers.createInstance`, which may have every effect, so delete `uses none`.",
+            "app/Shop/Probe.sharp:7:34 invalid-effect: A method without `uses` is pure already, so delete `uses none`.",
+        ]
+    );
+}
+
 /// Spec section 29: `uses none` on a method changes nothing, so it warns, as Swift compiles `throws(Never)`, and a
 /// method with a body compiles with it. Beside another effect, on a method or a function type, it is an error.
 #[test]
@@ -33580,6 +33624,68 @@ fn class_parse_of_a_family_has_its_variants_readers_effects() {
         ]),
         [
             "app/Shop/EntryReader.sharp:5:35 incompatible-effects: `EntryReader.read` reaches `StoredEntry.StoredEntry`, which calls `Disk.save` with the effect `Database`, so the pure `Reading.read` cannot accept it."
+        ]
+    );
+}
+
+/// Spec sections 20, 25 and 29: a sealed type's cases are a closed set the checker sees, so `parse` on a class value
+/// bounded by one has the effects of each permitted case's reader, through a sealed sub-family too. Two pure cases,
+/// one below the sealed `Rounded`, keep a pure lambda pure. A case whose constructor reaches the database needs
+/// `uses Database`. A `Class<Object>` may hold any class, so its `parse` may have every effect.
+#[test]
+fn a_parse_on_a_sealed_family_s_class_value_has_its_cases_reader_effects() {
+    let shape = ("app/Shop/Shape.sharp", "namespace App.Shop;\n\npublic sealed interface Shape { }\n");
+    let rounded = ("app/Shop/Rounded.sharp", "namespace App.Shop;\n\npublic sealed interface Rounded : Shape { }\n");
+    let circle = (
+        "app/Shop/Circle.sharp",
+        "namespace App.Shop;\n\npublic final class Circle : Rounded\n{\n    public Circle(public int radius { get; } = 0) { }\n}\n",
+    );
+    let square = (
+        "app/Shop/Square.sharp",
+        "namespace App.Shop;\n\npublic final class Square : Shape\n{\n    public Square(public int side { get; } = 0) { }\n}\n",
+    );
+    let record = ("app/Shop/Record.sharp", "namespace App.Shop;\n\npublic sealed interface Record { }\n");
+    let plain = (
+        "app/Shop/Plain.sharp",
+        "namespace App.Shop;\n\npublic final class Plain : Record\n{\n    public Plain(public string text { get; } = \"\") { }\n}\n",
+    );
+    let kept = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\npublic final class Kept : Record\n{\n    public Kept() { Disk.save(); }\n}\n",
+    );
+    let probe = (
+        "app/Shop/Probe.sharp",
+        "namespace App.Shop;\n\npublic class Probe\n{\n    private static Any? pure(Function<Any?() uses none> work) => work();\n\n    private static Any? stored(Function<Any?() uses Database> work) => work();\n\n    public static Any? read(Class<Shape> shape, Class<Record> record, Class<Object> any, Any? row)\n    {\n        Probe.pure(() => shape.parse(row).unwrap());\n        Probe.pure(() => record.parse(row).unwrap());\n        Probe.stored(() => record.parse(row).unwrap());\n        return Probe.pure(() => any.parse(row).unwrap());\n    }\n}\n",
+    );
+    let [disk, stub, _, _] = BUILT;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[
+            probe,
+            shape,
+            rounded,
+            circle,
+            square,
+            record,
+            plain,
+            kept,
+            disk,
+            stub,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+            PARSE_LIBRARY[0],
+            PARSE_LIBRARY[1],
+            PARSE_LIBRARY[2]
+        ]),
+        [
+            "app/Shop/Probe.sharp:12:20 invalid-argument: This lambda reaches `Kept.Kept`, which calls `Disk.save` with the effect `Database`, so a pure `Function<Any?() uses none>` cannot hold it.",
+            "app/Shop/Probe.sharp:14:27 invalid-argument: This lambda reaches `ClassMembers.parse`, which may have every effect, so a pure `Function<Any?() uses none>` cannot hold it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects."
         ]
     );
 }

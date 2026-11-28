@@ -3421,25 +3421,16 @@ fn is_extern(method: &Method) -> bool {
     method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_)))
 }
 
-/// Refuses every name in the `uses` of a method with a body, spec section 29: the checker works a body's effects out
-/// from its code, so only a method without a body states the effects its implementations may have. A method is pure
-/// without `uses`, so its `none` changes nothing and warns that it can go, as Swift compiles `throws(Never)`. A
+/// Refuses every effect in the `uses` of a method with a body, spec section 29: the checker works a body's effects out
+/// from its code, so only a method without a body states the effects its implementations may have. Its `none` changes
+/// nothing, and the analyzer's effect rules warn that it can go, naming the body's first effect when it has one. A
 /// function parameter in `uses`, as the old `charge(…) uses prepare => …` wrote it, is the parser's error.
 fn check_method_uses(method: &Method, context: &mut Context<'_, '_, '_>) {
     if method.is_abstract() {
         return;
     }
 
-    for name in MethodParts::of_method(method).uses_effects() {
-        if name.value == b"none" {
-            context.report(
-                Issue::warning("A method without `uses` is pure already, so delete `uses none`.")
-                    .with_annotation(Annotation::primary(name.span).with_message("Written here.")),
-            );
-
-            continue;
-        }
-
+    for name in MethodParts::of_method(method).uses_effects().filter(|name| name.value != b"none") {
         context.report(
             Issue::error(format!(
                 "A method with a body takes no effect in `uses`, and it names `{}`.",
@@ -3545,6 +3536,7 @@ fn check_extern_signature(r#extern: &Extern, context: &mut Context<'_, '_, '_>) 
     for parameter in r#extern.parameter_list.iter().flat_map(|list| list.parameters.iter()) {
         if let Some(default) = &parameter.default_value
             && !is_literal(default.value)
+            && !is_empty_list(default.value)
         {
             context.report(
                 Issue::error(format!(
@@ -3553,7 +3545,7 @@ fn check_extern_signature(r#extern: &Extern, context: &mut Context<'_, '_, '_>) 
                 ))
                 .with_annotation(Annotation::primary(default.value.span()).with_message("Written here."))
                 .with_note(
-                    "A literal is a string shorter than 1000 bytes, an `int`, a `float`, `true`, `false` or `null`.",
+                    "A literal is a string shorter than 1000 bytes, an `int`, a `float`, `true`, `false`, `null`, or `[]` for a `List` parameter.",
                 )
                 .with_help("Write the value, as in `int priority = 10`."),
             );
@@ -3583,6 +3575,12 @@ fn is_literal(expression: &Expression) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Whether `expression` is `[]`, the empty `List`, spec section 23's one collection literal. The analyzer checks it
+/// against the parameter's type, as any default, so a `Map` parameter refuses it as an empty `List`.
+fn is_empty_list(expression: &Expression) -> bool {
+    matches!(expression.unparenthesized(), Expression::Array(array) if array.elements.is_empty() && array.colon.is_none())
 }
 
 /// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose

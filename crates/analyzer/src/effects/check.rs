@@ -80,6 +80,7 @@ use crate::effects::events;
 use crate::effects::holding_declaration;
 use crate::effects::is_effect;
 use crate::effects::summary::parameter_index;
+use crate::expression::array::check_sharp_literal_kind;
 use crate::resolver::extension::collection_member_kind;
 use crate::statement::class_like::r#struct::data_enum;
 use crate::statement::function_like::FunctionLikeBody;
@@ -369,6 +370,35 @@ pub(crate) fn implementations_must_fit_their_declarations(
         .collect()
 }
 
+/// Spec section 29: code with a body writes no `uses`, since the checker works its effects out from its code, so a
+/// method's `uses none` changes nothing and warns that it can go, as Swift compiles a method's `throws(Never)`. When
+/// the body has an effect, the warning names the first one, as section 29's errors do, so `uses none` reads as no
+/// promise.
+pub(crate) fn bodies_write_no_uses_none(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
+    effects
+        .written_uses_none(codebase)
+        .map(|(span, (class, member), imports, impurity)| {
+            let message = match impurity {
+                Some(impurity) => {
+                    let class_name = |class| sharp_class_like_name(codebase, imports, class);
+                    let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
+
+                    format!(
+                        "`{}` {}, so delete `uses none`.",
+                        display_sharp_member(class_name(class), member),
+                        impurity.describe(&class_name, &effect_name)
+                    )
+                }
+                None => "A method without `uses` is pure already, so delete `uses none`.".to_owned(),
+            };
+
+            Issue::warning(message)
+                .with_code(IssueCode::InvalidEffect.as_str())
+                .with_annotation(Annotation::primary(span).with_message("Written here."))
+        })
+        .collect()
+}
+
 /// Spec section 29: `new (type)(…)` of a `Class<Saved>` may build any subclass of `Saved` with the effects of `Saved`'s
 /// `required` constructor alone, spec section 25, so a constructor below a `required` one may add no effect to it, as an
 /// implementation adds none to its interface method. The refusal names the effect it adds and the `required`
@@ -615,8 +645,11 @@ pub(crate) fn written_target(r#extern: &Extern<'_>) -> String {
 }
 
 /// Spec section 29: an `extern` declaration declares plain PHP that exists, once in the whole project.
-pub(crate) fn check_extern<A>(context: &mut Context<'_, '_, A>, r#extern: &Extern<'_>)
-where
+pub(crate) fn check_extern<'arena, A>(
+    context: &mut Context<'_, 'arena, A>,
+    artifacts: &AnalysisArtifacts,
+    r#extern: &Extern<'arena>,
+) where
     A: Arena,
 {
     if let Some(namespaced) = &r#extern.namespaced {
@@ -700,7 +733,7 @@ where
         // `extern Pdf.render` after `import Vendor.Pdf;` declares the function `render` of that namespace, spec
         // section 23, as `extern Foundation.now` declares Laravel's `now()`.
         if namespace_function(context.codebase, class, member).is_some() {
-            check_extern_signature(context, r#extern, own, &written);
+            check_extern_signature(context, artifacts, r#extern, own, &written);
 
             return;
         }
@@ -760,7 +793,7 @@ where
             .with_annotation(Annotation::primary(target).with_message("Inherited here.")),
         );
     } else {
-        check_extern_signature(context, r#extern, own, &written);
+        check_extern_signature(context, artifacts, r#extern, own, &written);
     }
 }
 
@@ -769,9 +802,10 @@ where
 /// parameter after the stated ones has a default, and the return type takes the declared one, a `List` or a `Map` the
 /// array the library declares and a `Bytes` the string.
 /// A generic class's type parameters are written as the class declares them. An untyped declaration takes any type.
-fn check_extern_signature<A>(
-    context: &mut Context<'_, '_, A>,
-    r#extern: &Extern<'_>,
+fn check_extern_signature<'arena, A>(
+    context: &mut Context<'_, 'arena, A>,
+    artifacts: &AnalysisArtifacts,
+    r#extern: &Extern<'arena>,
     own: &ExternMetadata,
     written: &str,
 ) where
@@ -875,6 +909,11 @@ fn check_extern_signature<A>(
 
             break;
         };
+        // A default's literal is checked as a method's is, spec section 12: `[]` is an empty `List`, which a `Map`
+        // refuses.
+        if let (Some(default), Some(stated_type)) = (&written_parameter.default_value, &parameter.type_metadata) {
+            check_sharp_literal_kind(context, None, artifacts, default.value, &stated_type.type_union);
+        }
         if let (Some(default), Some(default_type), Some(stated_type)) =
             (&written_parameter.default_value, &parameter.default_type, &parameter.type_metadata)
             && !fits(&default_type.type_union, &expanded(&stated_type.type_union))

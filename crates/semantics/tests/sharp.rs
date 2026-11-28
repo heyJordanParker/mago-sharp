@@ -150,6 +150,19 @@ fn an_extern_signature_names_a_member() {
     );
 }
 
+/// Spec section 23: `[]` is a literal an `extern` line's `List` parameter may default to, nullable or not, as plain
+/// PHP's `array $bindings = []` does, so a call that leaves it out passes an empty array. A list that holds a value is no
+/// literal. The analyzer checks `[]` against the parameter's type, as any default.
+#[test]
+fn an_extern_list_parameter_may_default_to_an_empty_list() {
+    let code = "namespace App.Stubs;\n\nimport Illuminate.Support.Facades.DB;\n\nextern List<Any?> DB.select(string query, List<Any?> bindings = []) uses none;\nextern void DB.maybe(List<int>? ids = []) uses none;\nextern void DB.find(List<int> ids = [1]) uses none;\n";
+
+    assert_eq!(
+        issues(code),
+        ["7:37 An `extern` line's default is a literal, which a call that leaves `ids` out passes to plain PHP."]
+    );
+}
+
 /// Spec sections 7 and 23: `callable` is only the type of an `extern` line's parameter, nullable there as any type is,
 /// and every other place that writes it, a return type, a union, a property, a PHP# parameter, a type argument and a
 /// local, is refused. An `extern` line's parameter takes a default as a method's does, a literal, which a call that
@@ -4233,7 +4246,8 @@ fn an_extern_method_is_static_in_a_static_or_effect_class_with_no_body_in_any_na
 }
 
 /// Spec section 29 works a body's effects out from its code, so only a method without a body, an interface's or an
-/// abstract class's, names effects in `uses`. A function parameter in `uses` is the parser's error.
+/// abstract class's, names effects in `uses`. Its `uses none` changes nothing, which the analyzer's effect rules warn
+/// about. A function parameter in `uses` is the parser's error.
 #[test]
 fn a_method_with_a_body_names_no_effect_in_uses() {
     let refused = |name: &str| format!("A method with a body takes no effect in `uses`, and it names `{name}`.");
@@ -4250,6 +4264,7 @@ fn a_method_with_a_body_names_no_effect_in_uses() {
             "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses cents, Http => prepare(cents);\n}\n",
             vec![format!("5:67 {}", refused("cents")), format!("5:74 {}", refused("Http"))],
         ),
+        ("public class Gateway\n{\n    public int charge(int cents) uses none => cents;\n}\n", vec![]),
         ("public interface Gateway\n{\n    int charge(int cents) uses Http;\n}\n", vec![]),
         ("public abstract class Gateway\n{\n    public abstract int charge(int cents) uses Http;\n}\n", vec![]),
     ] {

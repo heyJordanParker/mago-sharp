@@ -486,6 +486,13 @@ where
                 initializer,
                 body,
             );
+            if let Some(none) = method.uses_effects().find(|name| name.value == b"none") {
+                effects::summary::record_uses_none(
+                    artifacts,
+                    Body::Method(class_like_metadata.name, method_name_key),
+                    none.span,
+                );
+            }
             effects::check::report_escaping_functions(context, artifacts, method_metadata, method.parameter_list, body);
         }
 
