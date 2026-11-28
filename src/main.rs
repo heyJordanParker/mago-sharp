@@ -299,3 +299,39 @@ pub fn run(main_start: Instant) -> Result<ExitCode, Error> {
 
     result
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::ffi::c_void;
+    use std::mem::MaybeUninit;
+    use std::ptr;
+
+    /// Shrinks the `Vec<u8>` that `bytes` points to from 64 bytes to 48, as the thread's first call into the allocator.
+    extern "C" fn shrink(bytes: *mut c_void) -> *mut c_void {
+        // SAFETY: the test passes a pointer to its own vector and joins this thread before it reads the vector again.
+        let bytes = unsafe { &mut *bytes.cast::<Vec<u8>>() };
+        bytes.shrink_to(48);
+
+        ptr::null_mut()
+    }
+
+    /// A thread's first call into the allocator can be a realloc of memory another thread allocated, as when rustls's
+    /// read thread first resizes its buffer during Lean's download (#1088). mimalloc 3.3.2 leaves a thread's heap NULL
+    /// until its first malloc, and a realloc that keeps its block reads that heap unchecked, so such a thread crashed
+    /// with SIGSEGV. The thread is a POSIX one, because a Rust thread's start allocates before its closure runs.
+    #[test]
+    fn a_thread_whose_first_allocation_resizes_memory_from_another_thread_runs() {
+        let mut bytes = Vec::<u8>::with_capacity(64);
+        bytes.push(1);
+
+        let mut thread = MaybeUninit::<libc::pthread_t>::uninit();
+        // SAFETY: `shrink` reads only `bytes`, which outlives the thread, since the join below waits for it.
+        unsafe {
+            let argument = ptr::from_mut(&mut bytes).cast::<c_void>();
+            assert_eq!(libc::pthread_create(thread.as_mut_ptr(), ptr::null(), shrink, argument), 0);
+            assert_eq!(libc::pthread_join(thread.assume_init(), ptr::null_mut()), 0);
+        }
+
+        assert_eq!((bytes.len(), bytes.capacity()), (1, 48));
+    }
+}
