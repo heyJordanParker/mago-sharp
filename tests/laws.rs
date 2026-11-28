@@ -4482,6 +4482,29 @@ fn a_law_reaching_a_type_that_holds_itself_is_refused() {
     );
 }
 
+/// Spec sections 20 and 28: a case of an enum that carries data runs as a class, so an enum whose case holds the enum
+/// in a `List` or a `Map` holds itself, and a law over it is refused as a class that holds itself is.
+#[test]
+fn a_law_over_an_enum_that_holds_itself_in_a_list_or_a_map_is_refused() {
+    for case in ["Items(List<Doc> items)", "Fields(Map<string, Doc> fields)"] {
+        let source = format!(
+            "namespace App.Shared;\n\npublic enum Doc\n{{\n    case Text(string text);\n    case {case};\n\n    law sameIsSame(Doc a) => a == a;\n}}\n"
+        );
+        let directory = library_project(&[("app/Shared/Doc.sharp", &source)]);
+        let root = directory.path();
+
+        let output = compile_without_lean(root);
+
+        assert_eq!(output.status.code(), Some(1), "{case}: {}", printed(&output));
+        assert!(
+            printed(&output).contains("error - unmodeled-construct: Law sameIsSame reaches a type that holds itself in Doc. A law reasons only about a class whose properties never hold a value of the class itself."),
+            "{case}: {}",
+            printed(&output)
+        );
+        assert!(!compiled(root, "app/Shared/Doc.sharp").exists());
+    }
+}
+
 /// A value pattern tests a List by `==`, which a `when` guard writes, so the refusal says to write it there.
 #[test]
 fn a_law_reaching_a_value_pattern_on_a_list_is_refused() {
