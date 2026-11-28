@@ -33846,6 +33846,60 @@ fn a_parse_into_any_runs_no_reader_and_an_open_class_may_have_every_effect() {
     );
 }
 
+/// Spec sections 25 and 29, the program on #1149: a read has the effects of the reader it runs where the checker knows
+/// which one that is, and at each call of a generic method that parses into its own type parameter it knows. So
+/// `Stored.read<Point>`, a wrapper of it and `typeof(T).parse` through `Stored.readValue<Point>` are pure,
+/// `Stored.read<Saved>` has the effect `Database` of `Saved`'s constructor, and a read into a type parameter of the
+/// lambda's own method, which no call gives here, may have every effect.
+#[test]
+fn a_generic_wrapper_of_parse_has_its_call_s_reader_effects() {
+    let point = (
+        "app/Shop/Point.sharp",
+        "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; } = 0) { }\n}\n",
+    );
+    let stored = (
+        "app/Shop/Stored.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class Stored\n{\n    public static T read<T>(string json) => Json.parse<T>(json).unwrap();\n\n    public static T readAgain<T>(string json) => Stored.read<T>(json);\n\n    public static Any? readValue<T>(Any? value) => typeof(T).parse(value).unwrap();\n}\n",
+    );
+    let probe = (
+        "app/Shop/ReadProbe.sharp",
+        "namespace App.Shop;\n\npublic class ReadProbe\n{\n    private static Any? pure(Function<Any?() uses none> work) => work();\n\n    private static Any? saving(Function<Any?() uses Database> work) => work();\n\n    public static Any? point() => ReadProbe.pure(() => Stored.read<Point>(\"{}\"));\n\n    public static Any? pointAgain() => ReadProbe.pure(() => Stored.readAgain<Point>(\"{}\"));\n\n    public static Any? pointValue() => ReadProbe.pure(() => Stored.readValue<Point>([:]));\n\n    public static Any? saved() => ReadProbe.saving(() => Stored.read<Saved>(\"{}\"));\n\n    public static Any? savedPure() => ReadProbe.pure(() => Stored.read<Saved>(\"{}\"));\n\n    public static Any? unknown<T : Object>() => ReadProbe.pure(() => Stored.read<T>(\"{}\"));\n}\n",
+    );
+    let [disk, stub, saved, note] = BUILT;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+    let [json, json_value, query, url] = TEXT_READERS;
+
+    assert_eq!(
+        effect_issues(&[
+            point,
+            stored,
+            probe,
+            disk,
+            stub,
+            saved,
+            note,
+            json,
+            json_value,
+            query,
+            url,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+            PARSE_LIBRARY[0],
+            PARSE_LIBRARY[1],
+            PARSE_LIBRARY[2],
+        ]),
+        [
+            "app/Shop/ReadProbe.sharp:17:54 invalid-argument: This lambda reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so a pure `Function<Any?() uses none>` cannot hold it.",
+            "app/Shop/ReadProbe.sharp:19:64 invalid-argument: This lambda reaches `Json.parse`, which may have every effect, so a pure `Function<Any?() uses none>` cannot hold it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects.",
+        ]
+    );
+}
+
 /// Spec sections 25 and 29: `attributeData<T>()` reads attributes as written and builds none, so the pure `Counting.count`
 /// accepts a method that reads them, and rebuilding one from its data goes through `createInstance`, which may have
 /// every effect, so the pure `Rebuilding.rebuild` refuses a method that does it and a method no `uses` limits does it.
