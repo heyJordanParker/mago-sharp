@@ -11943,7 +11943,11 @@ fn an_extern_empty_list_default_fits_a_list_parameter_only() {
     let reports = "namespace Shop;\n\nimport Lib.Db;\n\npublic class Reports\n{\n    public int run() => Db.select(\"select 1\").count() + Db.configure() + Db.total();\n}\n";
 
     assert_eq!(
-        package_errors(&[("src/Lib/Db.php", db), ("src/Stubs/Library.sharp", stubs), ("src/Shop/Reports.sharp", reports)]),
+        package_errors(&[
+            ("src/Lib/Db.php", db),
+            ("src/Stubs/Library.sharp", stubs),
+            ("src/Shop/Reports.sharp", reports)
+        ]),
         [
             "`[]` is an empty List. An empty Map is written `[:]`.",
             "Default value for parameter `total` is not assignable to its declared type.",
