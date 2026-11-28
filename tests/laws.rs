@@ -2761,13 +2761,18 @@ fn compile_proves_a_law_over_an_interface_that_extends_equatable() {
 /// proves when that `==` holds, and a claim it breaks names the implementers it is broken for.
 #[test]
 fn a_law_over_a_sealed_equatable_family_of_structs_and_classes_proves() {
-    let card = "namespace App.Pay;\n\npublic struct Card : Tender\n{\n    public Card(public string last4 { get; }) { }\n}\n";
-    let cash_struct = "namespace App.Pay;\n\npublic struct Cash : Tender\n{\n    public Cash(public int cents { get; }) { }\n}\n";
+    let card =
+        "namespace App.Pay;\n\npublic struct Card : Tender\n{\n    public Card(public string last4 { get; }) { }\n}\n";
+    let cash_struct =
+        "namespace App.Pay;\n\npublic struct Cash : Tender\n{\n    public Cash(public int cents { get; }) { }\n}\n";
     let cash_class = "namespace App.Pay;\n\npublic final class Cash : Tender\n{\n    public Cash(public int cents { get; }) { }\n\n    public static bool operator ==(Cash a, Cash b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n";
     let compiled_with = |law: &str, cash: &str| {
         let tender = format!("namespace App.Pay;\n\npublic sealed interface Tender : Equatable\n{{\n    {law}\n}}\n");
-        let directory =
-            lawful_project(&[("app/Pay/Tender.sharp", &tender), ("app/Pay/Card.sharp", card), ("app/Pay/Cash.sharp", cash)]);
+        let directory = lawful_project(&[
+            ("app/Pay/Tender.sharp", &tender),
+            ("app/Pay/Card.sharp", card),
+            ("app/Pay/Cash.sharp", cash),
+        ]);
         let output = compile(directory.path());
 
         (directory, output)
