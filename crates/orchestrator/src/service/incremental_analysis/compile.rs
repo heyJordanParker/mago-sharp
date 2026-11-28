@@ -44,6 +44,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_reporting::Level;
+use mago_semantics::SEMANTICS_ISSUE_CODE;
 use mago_sharp_bridge::CheckedProgram;
 use mago_sharp_bridge::InlineForm;
 use mago_sharp_bridge::InlineForms;
@@ -68,6 +69,8 @@ use mago_sharp_lean::Translation;
 use mago_sharp_lean::refusals;
 use mago_sharp_lean::translate;
 use mago_syntax::dialect::Dialect;
+use mago_syntax::error::PARSE_ERROR_CODE;
+use mago_syntax::error::SYNTAX_ERROR_CODE;
 use mago_syntax::parser::parse_file_with_settings;
 use mago_word::Word;
 use mago_word::empty_word;
@@ -711,8 +714,9 @@ impl IncrementalAnalysisService {
         let files = self.sharp_files();
         let (errors, unrefused) = self.errors(refusing);
         let errored: HashSet<FileId> = errors.keys().chain(unrefused.keys()).copied().collect();
-        // No error refuses a file in the hosts' folder, which lowers code with errors as written, spec section 27.
-        let mut hosts = hosts.map(|hosts| Target::new(hosts, HashMap::default()));
+        // Spec section 27: a type error refuses no file in the hosts' folder, which lowers its code as written, and a
+        // file whose code isn't PHP# doesn't lower, so its language errors alone refuse it.
+        let mut hosts = hosts.map(|hosts| Target::new(hosts, language_errors(&errors)));
         let mut first = Target::new(folder, errors);
         let session = self.plugin_registry.create_external_analysis_session(self.database.files());
         let (library, rest): (Vec<_>, Vec<_>) = files.iter().partition(|file| file.is_standard_library);
@@ -1880,7 +1884,9 @@ impl IncrementalAnalysisService {
     }
 
     /// The last analysis's errors, a package's PHP# file's that it reports none of among them, by file: those that
-    /// refuse their file, as `refusing` keeps them, and those of each other file, which refuse nothing.
+    /// refuse their file, as `refusing` keeps them, and those of each other file, which refuse nothing. A file's
+    /// language errors refuse it whatever `refusing` keeps, as in the hosts' compile, whose type errors refuse no file,
+    /// since its code isn't PHP# and doesn't lower, spec section 27.
     fn errors(
         &self,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
@@ -1901,8 +1907,11 @@ impl IncrementalAnalysisService {
             .chain(self.file_states.values().flat_map(|state| state.package_errors.iter().cloned()))
             .filter(|issue| issue.level == Level::Error)
             .collect();
-        let errors = by_file(refusing(reported.clone()));
+        let mut errors = by_file(refusing(reported.clone()));
         let mut unrefused = by_file(reported);
+        for (file_id, language) in language_errors(&unrefused) {
+            errors.entry(file_id).or_insert(language);
+        }
         unrefused.retain(|file_id, _| !errors.contains_key(file_id));
 
         (errors, unrefused)
@@ -2007,6 +2016,24 @@ impl IncrementalAnalysisService {
             })
             .collect()
     }
+}
+
+/// The language errors among `errors`, by file: the parser's and the semantic checks', which say the file's code isn't
+/// PHP#, as `[1, , 2]` and a write to `PHP_INT_MAX` are, so no lowering writes it as written.
+fn language_errors(errors: &HashMap<FileId, IssueCollection>) -> HashMap<FileId, IssueCollection> {
+    errors
+        .iter()
+        .filter_map(|(file_id, issues)| {
+            let language: Vec<Issue> = issues.iter().filter(|issue| is_language_error(issue)).cloned().collect();
+
+            (!language.is_empty()).then(|| (*file_id, IssueCollection::from(language)))
+        })
+        .collect()
+}
+
+/// Whether `issue` is an error of the parser or of the semantic checks, by its code.
+fn is_language_error(issue: &Issue) -> bool {
+    matches!(issue.code.as_deref(), Some(PARSE_ERROR_CODE | SYNTAX_ERROR_CODE | SEMANTICS_ISSUE_CODE))
 }
 
 /// The code of the error a panic in the lowering of a file gives, a defect of the compiler.
@@ -2894,8 +2921,8 @@ mod tests {
                 "namespace App;\n\npublic class Lambda\n{\n    public int a() => this.nope(x => x + 1);\n}\n",
             ),
             (
-                "app/Static.sharp",
-                "namespace App;\n\npublic class Static\n{\n    public int a() => Order.nope(1 + 2);\n}\n",
+                "app/Unbound.sharp",
+                "namespace App;\n\npublic class Unbound\n{\n    public int a() => Order.nope(1 + 2);\n}\n",
             ),
         ]);
     }
@@ -2946,7 +2973,7 @@ mod tests {
 
     /// A class no file declares, as a parameter's type or in a class-like's header, lowers as its name written, which
     /// PHP finds no class of when it runs, where its lowering panicked with "the analyzer refuses a type PHP# can't
-    /// write" and "the checker refuses the unknown class `T`".
+    /// write" and "the checker refuses the unknown class `App\Nope`".
     #[test]
     fn an_unknown_class_lowers_as_its_name_despite_its_error() {
         assert_lowered_despite_errors(&[
@@ -2954,9 +2981,69 @@ mod tests {
             ("app/Child.sharp", "namespace App;\n\npublic class Child : Nope\n{\n}\n"),
             ("app/Both.sharp", "namespace App;\n\npublic class Both : Order, Nope\n{\n}\n"),
             ("app/Shaped.sharp", "namespace App;\n\npublic struct Shaped : Nope\n{\n}\n"),
-            ("app/Wrapped.sharp", "namespace App;\n\npublic class Wrapped<T> : T\n{\n}\n"),
             ("app/Contract.sharp", "namespace App;\n\npublic interface Contract : Nope\n{\n}\n"),
         ]);
+    }
+
+    /// The errors that refuse `source`, as `app/Shape.sharp`, in the hosts' compile, each as `code: message`.
+    fn refused_for_the_hosts(source: &str) -> Vec<String> {
+        let database = project(&[("app/Shape.sharp", source)]);
+        let mut service = analyzed(&database);
+
+        let compiled = compile_refusing(&mut service, empty_stamp, |_| IssueCollection::default());
+
+        let Some(Compilation::Refused(errors)) = compiled.get("app/Shape.sharp") else {
+            panic!("app/Shape.sharp is not refused: {compiled:?}");
+        };
+        errors.iter().map(|issue| format!("{}: {}", issue.code.as_deref().unwrap_or("none"), issue.message)).collect()
+    }
+
+    /// Spec section 27: a file whose code isn't PHP# doesn't lower, so the hosts' compile refuses it by its language
+    /// errors alone, as a missing element in a `List` literal, which the lowering panicked on.
+    #[test]
+    fn a_missing_element_in_a_list_literal_is_refused_by_its_parse_error_for_the_hosts() {
+        assert_eq!(
+            refused_for_the_hosts(
+                "namespace App;\n\npublic class Shape\n{\n    public List<int> a() => [1, , 2];\n}\n"
+            ),
+            ["parse: Unexpected `,`"]
+        );
+    }
+
+    /// As [`a_missing_element_in_a_list_literal_is_refused_by_its_parse_error_for_the_hosts`]: `static`, which PHP#
+    /// doesn't write, as a call's receiver.
+    #[test]
+    fn a_call_on_static_is_refused_by_its_parse_error_for_the_hosts() {
+        assert_eq!(
+            refused_for_the_hosts(
+                "namespace App;\n\npublic class Shape\n{\n    public int a() => static.nope(1 + 2);\n}\n"
+            ),
+            ["parse: Unexpected `static`"]
+        );
+    }
+
+    /// As [`a_missing_element_in_a_list_literal_is_refused_by_its_parse_error_for_the_hosts`]: a write to a name that
+    /// names no local, which the semantic checks refuse.
+    #[test]
+    fn a_write_to_a_constant_is_refused_by_its_semantics_error_for_the_hosts() {
+        assert_eq!(
+            refused_for_the_hosts(
+                "namespace App;\n\npublic class Shape\n{\n    public void a() { nope = 1 + 2; }\n}\n"
+            ),
+            ["semantics: `nope` can't be written to."]
+        );
+    }
+
+    /// As [`a_missing_element_in_a_list_literal_is_refused_by_its_parse_error_for_the_hosts`]: a type parameter in a
+    /// class's header, where its lowering panicked with "the checker refuses the unknown class `T`".
+    #[test]
+    fn a_type_parameter_in_a_header_is_refused_by_its_semantics_error_for_the_hosts() {
+        assert_eq!(
+            refused_for_the_hosts("namespace App;\n\npublic class Shape<T> : T\n{\n}\n"),
+            [
+                "semantics: A header names classes and interfaces, and `T` is neither: list a class or an interface, as in `: DatabaseEntity, Linkable`."
+            ]
+        );
     }
 
     /// A panic's text is its `&str` or `String`, as `std` prints it, and the internal compiler error that refuses its

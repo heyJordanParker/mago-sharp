@@ -839,9 +839,9 @@ fn a_compile_error_in_a_file_no_host_reaches_reports_that_file_and_every_host_ru
     assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\n");
 }
 
-/// A rule a host asks as it loads, whose lowering fails on its errors, is refused in the hosts' folder before the hosts
-/// start, so the first compile with an empty cache names the rule's errors, as every later compile does, and never
-/// says the rule isn't compiled yet.
+/// A rule a host asks as it loads, whose code isn't PHP#, so it doesn't lower, is refused in the hosts' folder by its
+/// language errors before the hosts start, spec section 27, so the first compile with an empty cache names the rule's
+/// errors, as every later compile does, and never says the rule isn't compiled yet.
 #[test]
 fn a_host_that_loads_a_refused_rule_gets_its_errors_on_the_first_compile_with_an_empty_cache() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -850,7 +850,7 @@ fn a_host_that_loads_a_refused_rule_gets_its_errors_on_the_first_compile_with_an
     }
     let directory = project_with_a_host_asking_a_rule();
     let root = directory.path();
-    let refused = "namespace App.Rules;\n\nimport Sharp.Encoding.Missing;\n\npublic class Naming\n{\n    public static string message() => Missing.of(\"x\");\n}\n";
+    let refused = "namespace App.Rules;\n\npublic class Naming\n{\n    public static string message()\n    {\n        nope = 1 + 2;\n        return \"x\";\n    }\n}\n";
     write(root, "app/Rules/Naming.sharp", refused);
     let cache = tempfile::tempdir().unwrap();
 
