@@ -150,6 +150,19 @@ fn an_extern_signature_names_a_member() {
     );
 }
 
+/// Spec section 23: `[]` is a literal an `extern` line's `List` parameter may default to, nullable or not, as plain
+/// PHP's `array $bindings = []` does, so a call that leaves it out passes an empty array. A list that holds a value is no
+/// literal. The analyzer checks `[]` against the parameter's type, as any default.
+#[test]
+fn an_extern_list_parameter_may_default_to_an_empty_list() {
+    let code = "namespace App.Stubs;\n\nimport Illuminate.Support.Facades.DB;\n\nextern List<Any?> DB.select(string query, List<Any?> bindings = []) uses none;\nextern void DB.maybe(List<int>? ids = []) uses none;\nextern void DB.find(List<int> ids = [1]) uses none;\n";
+
+    assert_eq!(
+        issues(code),
+        ["7:37 An `extern` line's default is a literal, which a call that leaves `ids` out passes to plain PHP."]
+    );
+}
+
 /// Spec sections 7 and 23: `callable` is only the type of an `extern` line's parameter, nullable there as any type is,
 /// and every other place that writes it, a return type, a union, a property, a PHP# parameter, a type argument and a
 /// local, is refused. An `extern` line's parameter takes a default as a method's does, a literal, which a call that
