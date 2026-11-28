@@ -248,6 +248,10 @@ where
                     declaring_class,
                     type_arguments.as_deref(),
                 );
+                // The effects summary reads the class each way of naming it resolves to, spec section 29.
+                if context.dialect.is_sharp() {
+                    artifacts.record_static_class(access.span, fqcn);
+                }
 
                 result.properties.push(resolved_property);
             }

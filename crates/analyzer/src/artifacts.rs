@@ -148,6 +148,10 @@ pub struct AnalysisArtifacts {
     /// collection's member it runs on the other parts, spec sections 12 and 26, keyed by the call's or the read's span.
     /// Read through [`Self::get_own_member_classes`].
     pub(crate) own_member_classes: HashMap<(u32, u32), Vec<Word>>,
+    /// The classes each PHP# static access names, `Class.name`, `Self.name`, `TItem.name` or `Counter<Order>.name`, as
+    /// the analysis resolved them, spec sections 6, 11 and 25, keyed by the access's span. Read through
+    /// [`Self::get_static_classes`].
+    pub(crate) static_classes: HashMap<(u32, u32), Vec<Word>>,
     /// The type each argument of a PHP# call to plain PHP arrives as, where it is not the argument's own type, as a
     /// `Map` a parameter that takes `array` receives as its PHP array, spec section 12, keyed by the call's span and
     /// then the argument's. The call's analysis writes its entry anew each time it checks the call, for the target it
@@ -243,6 +247,7 @@ impl AnalysisArtifacts {
             null_safe_void_calls: HashSet::default(),
             member_calls: HashMap::default(),
             own_member_classes: HashMap::default(),
+            static_classes: HashMap::default(),
             received_argument_types: HashMap::default(),
             tested_types: HashMap::default(),
             declared_types: HashMap::default(),
@@ -522,6 +527,20 @@ impl AnalysisArtifacts {
     /// Records that the PHP# call or read at `span` runs the own member of the receiver's parts of `classes`.
     pub(crate) fn record_own_member_classes(&mut self, span: Span, classes: Vec<Word>) {
         self.own_member_classes.insert((span.start.offset, span.end.offset), classes);
+    }
+
+    /// The classes the PHP# static access at `span` names, as [`Self::record_static_class`] recorded them. None for an
+    /// access of an instance's property.
+    pub(crate) fn get_static_classes(&self, span: Span) -> Option<&[Word]> {
+        self.static_classes.get(&(span.start.offset, span.end.offset)).map(Vec::as_slice)
+    }
+
+    /// Records that the PHP# static access at `span` names `class`, once however often the analysis checks it.
+    pub(crate) fn record_static_class(&mut self, span: Span, class: Word) {
+        let recorded = self.static_classes.entry((span.start.offset, span.end.offset)).or_default();
+        if !recorded.contains(&class) {
+            recorded.push(class);
+        }
     }
 
     /// Records that the PHP# test or `typeof` that writes the type `hint` reads `tested` while the code runs.
