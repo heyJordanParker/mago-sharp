@@ -1659,12 +1659,11 @@ where
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
         let classes: Vec<Word> = match instantiation.class.unparenthesized() {
-            Expression::Identifier(identifier) => resolved_names.resolve(identifier).map(word).into_iter().collect(),
-            Expression::ConstantAccess(name) => resolved_names.resolve(&name.name).map(word).into_iter().collect(),
             // `new (type)(…)` builds the class `type`'s `Class<T>` names or a subclass, whose constructor below a
             // `required` one may add no effect to it, so it has the effects of `T`'s constructor, spec sections 25 and
             // 29, as `new T(…)` has them. A `Class<Owner & Row>` builds a `Row`, since an interface declares no
-            // constructor, spec section 9.
+            // constructor, spec section 9. The class value's type is its expression's, whichever expression it is, so
+            // a local or a parameter, whose bare name reads as a class's without the parentheses, takes this path too.
             class_value if matches!(instantiation.class, Expression::Parenthesized(_)) => {
                 let codebase = self.codebase();
                 self.artifacts
@@ -1679,6 +1678,8 @@ where
                     })
                     .unwrap_or_default()
             }
+            Expression::Identifier(identifier) => resolved_names.resolve(identifier).map(word).into_iter().collect(),
+            Expression::ConstantAccess(name) => resolved_names.resolve(&name.name).map(word).into_iter().collect(),
             _ => Vec::new(),
         };
         for class in classes {
