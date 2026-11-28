@@ -237,9 +237,10 @@ impl Candidates<'_, '_, '_> {
     }
 
     /// Each case of the enum `r#enum`, spec section 20, or its case `only` alone, a case that carries data with the
-    /// values of its fields [`Candidates::applied`] gives: `Shape.Dot`, `Shape.Circle(0)`. A case that carries data runs
-    /// as a class, so its fields build one class deeper, as [`Candidates::built`] builds a class's, and it is left out
-    /// past `depth`, as is a case whose field has no candidate value.
+    /// values of its fields [`Candidates::applied`] gives: `Shape.Dot`, `Shape.Circle(0)`. A case that carries data
+    /// runs as a class, so its fields build one class deeper, as [`Candidates::built`] builds a class's. Past `depth`
+    /// only a case whose fields hold no class or enum is built, as `Shape.Circle(0)` is, since it builds no class. A
+    /// case whose field has no candidate value is left out.
     fn cases(&mut self, r#enum: &[u8], only: Option<&[u8]>, depth: usize) -> Vec<Candidate> {
         let reach = self.reach;
         let lean = self.body.class_type(self.span, r#enum);
@@ -253,11 +254,14 @@ impl Candidates<'_, '_, '_> {
                 values.push(Candidate { term: format!("(pure {constructor})"), written });
                 continue;
             };
-            if depth == 0 {
+            let parameters = self.body.checked.types().constructor_parameters(class);
+            let builds_a_class = parameters.iter().any(|parameter| {
+                parameter.type_metadata.as_ref().is_none_or(|declared| holds_an_object(&declared.type_union))
+            });
+            if depth == 0 && builds_a_class {
                 continue;
             }
-            let parameters = self.body.checked.types().constructor_parameters(class);
-            values.extend(self.applied(parameters, depth - 1, &constructor, false, &written));
+            values.extend(self.applied(parameters, depth.saturating_sub(1), &constructor, false, &written));
         }
 
         values
@@ -369,4 +373,13 @@ impl Candidates<'_, '_, '_> {
 
         values
     }
+}
+
+/// Whether a value of `r#type` may hold an object, a class's or an enum's, itself or as an element of a `List`. The
+/// candidate values of a `Map` are the empty one, which holds none.
+fn holds_an_object(r#type: &TUnion) -> bool {
+    r#type.types.iter().any(|atomic| match atomic {
+        TAtomic::Array(TArray::List(list)) => holds_an_object(&list.element_type),
+        atomic => matches!(atomic, TAtomic::Object(_) | TAtomic::Reference(_)),
+    })
 }
