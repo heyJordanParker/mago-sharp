@@ -10329,7 +10329,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The value of `r#type`, the type of a literal, on line `line`, as an `extern` line's default is one, spec section
-    /// 23: the empty PHP array for `[]`.
+    /// 23: the empty PHP array for `[]` and `[:]`.
     fn literal_value(&mut self, line: u32, r#type: &TUnion) -> u32 {
         if r#type.is_empty_array() {
             return self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);

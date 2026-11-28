@@ -3536,7 +3536,7 @@ fn check_extern_signature(r#extern: &Extern, context: &mut Context<'_, '_, '_>) 
     for parameter in r#extern.parameter_list.iter().flat_map(|list| list.parameters.iter()) {
         if let Some(default) = &parameter.default_value
             && !is_literal(default.value)
-            && !is_empty_list(default.value)
+            && !is_empty_collection(default.value)
         {
             context.report(
                 Issue::error(format!(
@@ -3545,7 +3545,7 @@ fn check_extern_signature(r#extern: &Extern, context: &mut Context<'_, '_, '_>) 
                 ))
                 .with_annotation(Annotation::primary(default.value.span()).with_message("Written here."))
                 .with_note(
-                    "A literal is a string shorter than 1000 bytes, an `int`, a `float`, `true`, `false`, `null`, or `[]` for a `List` parameter.",
+                    "A literal is a string shorter than 1000 bytes, an `int`, a `float`, `true`, `false`, `null`, `[]` for a `List` parameter, or `[:]` for a `Map` parameter.",
                 )
                 .with_help("Write the value, as in `int priority = 10`."),
             );
@@ -3577,10 +3577,11 @@ fn is_literal(expression: &Expression) -> bool {
     }
 }
 
-/// Whether `expression` is `[]`, the empty `List`, spec section 23's one collection literal. The analyzer checks it
-/// against the parameter's type, as any default, so a `Map` parameter refuses it as an empty `List`.
-fn is_empty_list(expression: &Expression) -> bool {
-    matches!(expression.unparenthesized(), Expression::Array(array) if array.elements.is_empty() && array.colon.is_none())
+/// Whether `expression` is `[]` or `[:]`, the empty `List` and the empty `Map`, spec section 23's collection literals.
+/// The analyzer checks each against the parameter's type, as any default, so a `Map` parameter refuses `[]` as an empty
+/// `List`, and a `List` parameter refuses `[:]` as an empty `Map`.
+fn is_empty_collection(expression: &Expression) -> bool {
+    matches!(expression.unparenthesized(), Expression::Array(array) if array.elements.is_empty())
 }
 
 /// Decides an `extern event`, which marks a plain PHP class as an event, spec section 15: it names a class, whose
