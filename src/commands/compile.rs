@@ -1625,6 +1625,9 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     }
 
     let (started, outcome, loaded) = compile_with_hosts(configuration, color_choice, true)?;
+    if let Some(refused) = outcome.report_library_refusal() {
+        return Ok(refused);
+    }
     let (database, issues) = hosted(configuration, color_choice, started, loaded)?;
     let errors = issues
         .into_iter()
@@ -1827,7 +1830,9 @@ fn without_hosts(configuration: &Configuration) -> Configuration {
 /// [`hosts_reach`] finds a host's code reaches, since a host's file runs as its worker starts, before the compile reads
 /// what the host registers, and may construct a class there, as a host that builds its rules or its services does. A
 /// stale folder gets those files lowered alone into it first, so the hosts start on them as they are now, and the rest
-/// of the project compiles beside the hosts. With `keeping` [`Keeping::Hosted`], what the hosts register decides
+/// of the project compiles beside the hosts. A compile that refuses the project's standard library starts no host and
+/// leaves the hosts' folder as it is, since a host's code compiles against the library, so the run reports the refusal
+/// alone. With `keeping` [`Keeping::Hosted`], what the hosts register decides
 /// whether the compile records their return-type requests or keeps its scans. Returns the outcome of the compile into
 /// the `.sharp` folder, with the database its issues point into, what `keeping` names, nothing when the compile had
 /// nothing to do or when its analysis reports in no file of the project, and the started hosts.
@@ -1893,8 +1898,9 @@ fn compiled(
             collect_generations(&compiled_folder)?;
         }
         drop(writing);
+        let refused_library = record.outcome.refused_library;
         if let Some((hosts, (lock, held, exclusive, stale))) = hosts {
-            let compiled = if stale {
+            let compiled = if stale && !refused_library {
                 let phase = Phase::start("hosts");
                 let (compiled, _) = silenced(|| {
                     compile_into(configuration, &root, &hosts.folder, &orchestrator, &listing, &sources, filesystems)
@@ -1907,7 +1913,12 @@ fn compiled(
             hosts.hold(lock, held, exclusive, compiled)?;
         }
 
-        return Ok((std::mem::take(&mut record.outcome), database, Loaded::Nothing, start()));
+        return Ok((
+            std::mem::take(&mut record.outcome),
+            database,
+            Loaded::Nothing,
+            (!refused_library).then(start).flatten(),
+        ));
     }
     // A record that holds in all but the source files names the analysis its compile left, which this compile restores
     // and rechecks the changed files from, as watch mode does, the analysis the hosts took over included. A run that
@@ -1966,7 +1977,8 @@ fn compiled(
         match standard_library(&root, &database).and_then(|library| Ok((library, library_codex(&root, &database)?))) {
             Ok(library) => library,
             Err(refusal) => {
-                let outcome = Outcome { errors, summary: refusal, failed: true, ..Outcome::default() };
+                let outcome =
+                    Outcome { errors, summary: refusal, failed: true, refused_library: true, ..Outcome::default() };
                 let record = record.filter(|_| logger::warnings() == warnings);
                 let (outcome, database) = finish(record, &record_path, outcome, &database, Vec::new())?;
                 drop(writing);
@@ -1978,7 +1990,7 @@ fn compiled(
                     outcome,
                     database,
                     loaded_files.map_or(Loaded::Nothing, |files| Loaded::Files(Box::new(files), Scans::default())),
-                    started.or_else(start),
+                    started,
                 ));
             }
         };
@@ -2373,6 +2385,9 @@ pub(crate) struct Outcome {
     summary: String,
     /// Whether the compile failed, which its exit status says.
     failed: bool,
+    /// Whether the compile refused the project's standard library, the summary, so the run starts no extension host,
+    /// whose code compiles against the library.
+    refused_library: bool,
 }
 
 impl Outcome {
@@ -2394,7 +2409,17 @@ impl Outcome {
             .into_iter()
             .collect();
 
-        Self { issues, issue_files, errors, summary, failed }
+        Self { issues, issue_files, errors, summary, failed, refused_library: false }
+    }
+
+    /// Reports the refusal of the project's standard library, when the compile refused it, and gives the run's exit
+    /// status, so a run with extension hosts reports it alone, as a run with none does.
+    pub(crate) fn report_library_refusal(&self) -> Option<CommandOutcome> {
+        self.refused_library.then(|| {
+            tracing::error!("{}", self.summary);
+
+            ExitCode::FAILURE.into()
+        })
     }
 
     /// The issues of each file the compile refused, and each other error it found.

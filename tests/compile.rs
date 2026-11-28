@@ -862,6 +862,33 @@ fn a_host_that_loads_a_refused_rule_gets_its_errors_on_the_first_compile_with_an
     assert!(printed(&first).contains("app/Rules/Naming.sharp has"), "{}", printed(&first));
 }
 
+/// A project whose standard library is another release than mago's, as a project halfway through an upgrade is, starts
+/// no extension host, so every compile and analyze with an empty cache, and every one after, names the two releases,
+/// and none says a host's file isn't compiled yet.
+#[test]
+fn a_project_with_a_host_and_a_standard_library_of_another_release_is_told_to_match_the_releases() {
+    let directory = project_with_a_host_asking_a_rule();
+    let root = directory.path();
+    write(
+        root,
+        "vendor/composer/installed.json",
+        "{\"packages\": [{\"name\": \"heyjordanparker/php-sharp-composer\", \"version\": \"v0.5.9\"}]}\n",
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let mago = env!("CARGO_PKG_VERSION");
+    let refusal = format!("This project's PHP# standard library is 0.5.9, and mago is {mago}.");
+
+    let first = process::output(command(root, "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
+    let second = process::output(command(root, "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
+    let analyzed = analyze_with_cache(root, cache.path());
+
+    for output in [&first, &second, &analyzed] {
+        assert_eq!(output.status.code(), Some(1), "{}", printed(output));
+        assert!(printed(output).contains(&refusal), "{}", printed(output));
+        assert!(!printed(output).contains("isn't compiled for the extension hosts yet"), "{}", printed(output));
+    }
+}
+
 /// The `extern` lines of a file nothing names apply to every file, as an analysis of the whole project applies them, so
 /// a rule a host asks as it loads that calls a Composer `files` helper an `extern` line declares compiles before the
 /// hosts start, and the first compile with the host passes.

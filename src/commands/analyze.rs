@@ -335,6 +335,9 @@ impl AnalyzeCommand {
         } else {
             let analysis = !self.no_stubs && substitutions.is_empty();
             let (external_analyzer, outcome, loaded) = compile_with_hosts(&configuration, color_choice, analysis)?;
+            if let Some(refused) = outcome.report_library_refusal() {
+                return Ok(refused);
+            }
             (external_analyzer, Some(outcome.into_parts()), loaded)
         };
 
