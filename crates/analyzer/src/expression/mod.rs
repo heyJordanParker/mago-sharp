@@ -1962,7 +1962,7 @@ fn closed_class<'codebase>(
 /// implementers of a sealed interface. A member of a set inherits the set's `permitted_inheritors` from its parent, as
 /// an enum with data that implements a sealed interface holds the interface's beside its cases, so the set is the
 /// inheritors below `class`, and `None` when none is.
-fn set_members<'codebase>(
+pub(crate) fn set_members<'codebase>(
     class: &ClassLikeMetadata,
     codebase: &'codebase CodebaseMetadata,
 ) -> Option<Vec<&'codebase ClassLikeMetadata>> {

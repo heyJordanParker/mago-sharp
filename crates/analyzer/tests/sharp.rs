@@ -33530,6 +33530,68 @@ fn class_parse_of_a_family_has_its_variants_readers_effects() {
     );
 }
 
+/// Spec sections 20, 25 and 29: a sealed type's cases are a closed set the checker sees, so `parse` on a class value
+/// bounded by one has the effects of each permitted case's reader, through a sealed sub-family too. Two pure cases,
+/// one below the sealed `Rounded`, keep a pure lambda pure. A case whose constructor reaches the database needs
+/// `uses Database`. A `Class<Object>` may hold any class, so its `parse` may have every effect.
+#[test]
+fn a_parse_on_a_sealed_family_s_class_value_has_its_cases_reader_effects() {
+    let shape = ("app/Shop/Shape.sharp", "namespace App.Shop;\n\npublic sealed interface Shape { }\n");
+    let rounded = ("app/Shop/Rounded.sharp", "namespace App.Shop;\n\npublic sealed interface Rounded : Shape { }\n");
+    let circle = (
+        "app/Shop/Circle.sharp",
+        "namespace App.Shop;\n\npublic final class Circle : Rounded\n{\n    public Circle(public int radius { get; } = 0) { }\n}\n",
+    );
+    let square = (
+        "app/Shop/Square.sharp",
+        "namespace App.Shop;\n\npublic final class Square : Shape\n{\n    public Square(public int side { get; } = 0) { }\n}\n",
+    );
+    let record = ("app/Shop/Record.sharp", "namespace App.Shop;\n\npublic sealed interface Record { }\n");
+    let plain = (
+        "app/Shop/Plain.sharp",
+        "namespace App.Shop;\n\npublic final class Plain : Record\n{\n    public Plain(public string text { get; } = \"\") { }\n}\n",
+    );
+    let kept = (
+        "app/Shop/Kept.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\npublic final class Kept : Record\n{\n    public Kept() { Disk.save(); }\n}\n",
+    );
+    let probe = (
+        "app/Shop/Probe.sharp",
+        "namespace App.Shop;\n\npublic class Probe\n{\n    private static Any? pure(Function<Any?() uses none> work) => work();\n\n    private static Any? stored(Function<Any?() uses Database> work) => work();\n\n    public static Any? read(Class<Shape> shape, Class<Record> record, Class<Object> any, Any? row)\n    {\n        Probe.pure(() => shape.parse(row).unwrap());\n        Probe.pure(() => record.parse(row).unwrap());\n        Probe.stored(() => record.parse(row).unwrap());\n        return Probe.pure(() => any.parse(row).unwrap());\n    }\n}\n",
+    );
+    let [disk, stub, _, _] = BUILT;
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[
+            probe,
+            shape,
+            rounded,
+            circle,
+            square,
+            record,
+            plain,
+            kept,
+            disk,
+            stub,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+            PARSE_LIBRARY[0],
+            PARSE_LIBRARY[1],
+            PARSE_LIBRARY[2]
+        ]),
+        [
+            "app/Shop/Probe.sharp:12:20 invalid-argument: This lambda reaches `Kept.Kept`, which calls `Disk.save` with the effect `Database`, so a pure `Function<Any?() uses none>` cannot hold it.",
+            "app/Shop/Probe.sharp:14:27 invalid-argument: This lambda reaches `ClassMembers.parse`, which may have every effect, so a pure `Function<Any?() uses none>` cannot hold it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects."
+        ]
+    );
+}
+
 /// Spec sections 10 and 29: a type that is no class runs only the readers of the classes inside it, so `parse` of a
 /// `List<Memo>` or of an `int` keeps a pure method pure, and `parse` of a `List<Saved>` has `Saved`'s reader's effects.
 #[test]
