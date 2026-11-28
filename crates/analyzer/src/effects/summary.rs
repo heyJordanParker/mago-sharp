@@ -1761,6 +1761,25 @@ where
             // one may add no effect to it, so it has the effects of the class's own constructor, spec sections 25 and
             // 29, as `new Saved(…)` has them inside `Saved`. A lambda belongs to the class it is written in.
             Expression::Self_(_) => vec![self.class],
+            // `new TItem(…)` builds the type argument, the class its bound names or one below it, whose constructor
+            // below the bound's `required` one may add no effect to it, spec sections 11 and 29. A type parameter's
+            // name resolves to the name as written, which names no class, so the class is the one the type the
+            // analysis gave the `new` holds through its bound.
+            Expression::Identifier(identifier)
+                if matches!(resolved_names.binding(identifier), Some(Binding::TypeParameter { .. })) =>
+            {
+                let codebase = self.codebase();
+                self.artifacts
+                    .get_expression_type(instantiation)
+                    .map(|created| {
+                        created
+                            .types
+                            .iter()
+                            .filter_map(|atomic| get_class_name_from_atomic(codebase, atomic)?.created_class(codebase))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
             Expression::Identifier(identifier) => resolved_names.resolve(identifier).map(word).into_iter().collect(),
             Expression::ConstantAccess(name) => resolved_names.resolve(&name.name).map(word).into_iter().collect(),
             _ => Vec::new(),
