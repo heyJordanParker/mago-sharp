@@ -369,6 +369,35 @@ pub(crate) fn implementations_must_fit_their_declarations(
         .collect()
 }
 
+/// Spec section 29: code with a body writes no `uses`, since the checker works its effects out from its code, so a
+/// method's `uses none` changes nothing and warns that it can go, as Swift compiles a method's `throws(Never)`. When
+/// the body has an effect, the warning names the first one, as section 29's errors do, so `uses none` reads as no
+/// promise.
+pub(crate) fn bodies_write_no_uses_none(effects: &Effects, codebase: &CodebaseMetadata) -> IssueCollection {
+    effects
+        .written_uses_none(codebase)
+        .map(|(span, (class, member), imports, impurity)| {
+            let message = match impurity {
+                Some(impurity) => {
+                    let class_name = |class| sharp_class_like_name(codebase, imports, class);
+                    let effect_name = |effect| sharp_effect_name(codebase, imports, effect);
+
+                    format!(
+                        "`{}` {}, so delete `uses none`.",
+                        display_sharp_member(class_name(class), member),
+                        impurity.describe(&class_name, &effect_name)
+                    )
+                }
+                None => "A method without `uses` is pure already, so delete `uses none`.".to_owned(),
+            };
+
+            Issue::warning(message)
+                .with_code(IssueCode::InvalidEffect.as_str())
+                .with_annotation(Annotation::primary(span).with_message("Written here."))
+        })
+        .collect()
+}
+
 /// Spec section 29: `new (type)(…)` of a `Class<Saved>` may build any subclass of `Saved` with the effects of `Saved`'s
 /// `required` constructor alone, spec section 25, so a constructor below a `required` one may add no effect to it, as an
 /// implementation adds none to its interface method. The refusal names the effect it adds and the `required`

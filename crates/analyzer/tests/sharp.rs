@@ -30086,6 +30086,28 @@ fn a_readonly_that_cannot_matter_warns() {
     );
 }
 
+/// Spec section 29: code with a body writes no `uses`, since the checker works its effects out from its code, so
+/// `uses none` on a method with a body changes nothing and warns that it can go. When the body has an effect, the
+/// warning names the first one, as section 29's errors name it, so no one reads `uses none` as a promise. When the
+/// body has none, the warning says the method is pure already.
+#[test]
+fn uses_none_on_a_method_with_a_body_warns_with_the_first_effect_the_body_has() {
+    let row = ("app/Shop/Row.sharp", "namespace App.Shop;\n\npublic final class Row { }\n");
+    let probe = (
+        "app/Shop/Probe.sharp",
+        "namespace App.Shop;\n\npublic class Probe\n{\n    public static Any? direct(Class<Row> row) uses none => row.createInstance([]);\n\n    public static int one() uses none => 1;\n}\n",
+    );
+    let [a, b, c, d, e, f, g] = REFLECTION;
+
+    assert_eq!(
+        effect_issues(&[probe, row, a, b, c, d, e, f, g]),
+        [
+            "app/Shop/Probe.sharp:5:52 invalid-effect: `Probe.direct` reaches `ClassMembers.createInstance`, which may have every effect, so delete `uses none`.",
+            "app/Shop/Probe.sharp:7:34 invalid-effect: A method without `uses` is pure already, so delete `uses none`.",
+        ]
+    );
+}
+
 /// Spec section 29: `uses none` on a method changes nothing, so it warns, as Swift compiles `throws(Never)`, and a
 /// method with a body compiles with it. Beside another effect, on a method or a function type, it is an error.
 #[test]

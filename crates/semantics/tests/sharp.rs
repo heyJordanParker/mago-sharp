@@ -4233,7 +4233,8 @@ fn an_extern_method_is_static_in_a_static_or_effect_class_with_no_body_in_any_na
 }
 
 /// Spec section 29 works a body's effects out from its code, so only a method without a body, an interface's or an
-/// abstract class's, names effects in `uses`. A function parameter in `uses` is the parser's error.
+/// abstract class's, names effects in `uses`. Its `uses none` changes nothing, which the analyzer's effect rules warn
+/// about. A function parameter in `uses` is the parser's error.
 #[test]
 fn a_method_with_a_body_names_no_effect_in_uses() {
     let refused = |name: &str| format!("A method with a body takes no effect in `uses`, and it names `{name}`.");
@@ -4250,6 +4251,7 @@ fn a_method_with_a_body_names_no_effect_in_uses() {
             "public class Gateway\n{\n    public int charge(int cents, Function<int(int)> prepare) uses cents, Http => prepare(cents);\n}\n",
             vec![format!("5:67 {}", refused("cents")), format!("5:74 {}", refused("Http"))],
         ),
+        ("public class Gateway\n{\n    public int charge(int cents) uses none => cents;\n}\n", vec![]),
         ("public interface Gateway\n{\n    int charge(int cents) uses Http;\n}\n", vec![]),
         ("public abstract class Gateway\n{\n    public abstract int charge(int cents) uses Http;\n}\n", vec![]),
     ] {
