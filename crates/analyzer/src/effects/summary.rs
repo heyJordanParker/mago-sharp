@@ -1677,6 +1677,10 @@ where
     fn instantiate(&mut self, instantiation: &'ast Instantiation<'arena>) {
         let resolved_names = self.context.resolved_names;
         let classes: Vec<Word> = match instantiation.class.unparenthesized() {
+            // `new Self(…)` builds the class the body belongs to or a subclass, whose constructor below a `required`
+            // one may add no effect to it, so it has the effects of the class's own constructor, spec sections 25 and
+            // 29, as `new Saved(…)` has them inside `Saved`. A lambda belongs to the class it is written in.
+            Expression::Self_(_) => vec![self.class],
             Expression::Identifier(identifier) => resolved_names.resolve(identifier).map(word).into_iter().collect(),
             Expression::ConstantAccess(name) => resolved_names.resolve(&name.name).map(word).into_iter().collect(),
             // `new (type)(…)` builds the class `type`'s `Class<T>` names or a subclass, whose constructor below a

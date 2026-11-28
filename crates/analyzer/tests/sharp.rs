@@ -33356,6 +33356,29 @@ fn a_class_value_new_has_its_required_constructors_effects() {
     );
 }
 
+/// Spec sections 25 and 29: `new Self(…)` calls the `required` constructor of the class the code is in, below which
+/// no constructor adds an effect, so it has that constructor's effects, as `new Stored(…)` has them, and
+/// `new Self.copy(…)` has those of the named constructor, which runs the main one. So a pure lambda that builds either
+/// is refused, in an open class.
+#[test]
+fn new_self_has_its_required_constructor_s_effects() {
+    let stored = (
+        "app/Shop/Stored.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\npublic class Stored\n{\n    public required Stored() { Disk.save(); }\n\n    public required Stored.copy() : this() { }\n\n    private static Any? pure(Function<Any?() uses none> work) => work();\n\n    public static Any? viaName() => Stored.pure(() => new Stored());\n\n    public static Any? viaSelf() => Stored.pure(() => new Self());\n\n    public static Any? viaSelfNamed() => Stored.pure(() => new Self.copy());\n}\n",
+    );
+    let [disk, stub, _, _] = BUILT;
+    let refused = |at: &str, constructor: &str| {
+        format!(
+            "app/Shop/Stored.sharp:{at} invalid-argument: This lambda reaches `{constructor}`, which calls `Disk.save` with the effect `Database`, so a pure `Function<Any?() uses none>` cannot hold it."
+        )
+    };
+
+    assert_eq!(
+        effect_issues(&[stored, disk, stub]),
+        [refused("13:49", "Stored.Stored"), refused("15:49", "Stored.Stored"), refused("17:54", "Stored.Stored")]
+    );
+}
+
 /// Spec sections 9, 25 and 29: `new (type)(…)` of a `Class<Marked & Saved>` builds a `Saved`, the class the
 /// intersection joins, since an interface declares no constructor, so it has the effects of `Saved`'s `required`
 /// constructor, and a pure method that builds one through it is refused as one that writes `new Saved()` is.
