@@ -11933,6 +11933,24 @@ fn an_extern_callable_parameter_takes_a_function_value_and_an_extern_default_fit
     );
 }
 
+/// Spec sections 12 and 23: an `extern` line's `[]` default is the empty `List`, checked against the parameter's type as
+/// any default is. A `List` parameter takes it, a `Map` parameter refuses it as a `List`, since an empty `Map` is
+/// written `[:]`, and an `int` parameter refuses it as any default of another type.
+#[test]
+fn an_extern_empty_list_default_fits_a_list_parameter_only() {
+    let db = "<?php\n\nnamespace Lib;\n\nfinal class Db\n{\n    public static function select(string $query, array $bindings = []): array\n    {\n        return $bindings;\n    }\n\n    public static function configure(array $options = []): int\n    {\n        return count($options);\n    }\n\n    public static function total(int $total = 0): int\n    {\n        return $total;\n    }\n}\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Db;\n\nextern List<Any?> Db.select(string query, List<Any?> bindings = []) uses none;\nextern int Db.configure(Map<string, int> options = []) uses none;\nextern int Db.total(int total = []) uses none;\n";
+    let reports = "namespace Shop;\n\nimport Lib.Db;\n\npublic class Reports\n{\n    public int run() => Db.select(\"select 1\").count() + Db.configure() + Db.total();\n}\n";
+
+    assert_eq!(
+        package_errors(&[("src/Lib/Db.php", db), ("src/Stubs/Library.sharp", stubs), ("src/Shop/Reports.sharp", reports)]),
+        [
+            "`[]` is an empty List. An empty Map is written `[:]`.",
+            "Default value for parameter `total` is not assignable to its declared type.",
+        ]
+    );
+}
+
 /// Spec section 23: an `extern` line states any return type a PHP# method declares: a function type over a native
 /// `\Closure`, a tuple over a native `array` and a nullable union over a native one, as a nullable type over a nullable
 /// one. A call reads each as the line states it, so the function `Factory.make()` returns is called in turn, with no
