@@ -67,7 +67,6 @@ use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
-use crate::effects::AttributeArgument;
 use crate::effects::Body;
 use crate::effects::Call;
 use crate::effects::Changed;
@@ -76,6 +75,7 @@ use crate::effects::EffectSummary;
 use crate::effects::FunctionValue;
 use crate::effects::Roots;
 use crate::effects::Runs;
+use crate::effects::TypeArgument;
 use crate::effects::member_of_effect_class;
 use crate::effects::sharp_attributes;
 use crate::expression::set_members;
@@ -175,6 +175,7 @@ pub(crate) fn record_behaviors<A>(
             member,
             effects: Vec::new(),
             attribute_reads: Vec::new(),
+            parses: Vec::new(),
             calls,
             changes: Vec::new(),
             function_values: Vec::new(),
@@ -213,6 +214,7 @@ pub(crate) fn record_parse<A>(
             member: word(member),
             effects,
             attribute_reads: Vec::new(),
+            parses: Vec::new(),
             calls: Vec::new(),
             changes: Vec::new(),
             function_values: Vec::new(),
@@ -376,6 +378,11 @@ fn readers_of<'codebase>(
 
 /// The prelude's `Set`, a type that is no class, spec section 12, whose readers are its element type's.
 const SET_CLASS: &[u8] = b"Sharp\\Set";
+
+/// The `parse` body of each class in `readers`.
+fn reader_bodies(readers: Vec<&ClassLikeMetadata>) -> Vec<Body> {
+    readers.into_iter().map(|reader| Body::Method(reader.name, reader.method_key(word("parse")))).collect()
+}
 
 /// Pushes onto `readers` the class `name` when `parse` of it runs its own reader, spec section 29: an enum has none of
 /// a project's, and a `final` class, a struct, a family, whose reader reads one of its declared variants, and a class
@@ -550,6 +557,7 @@ where
         member,
         effects: Vec::new(),
         attribute_reads: Vec::new(),
+        parses: Vec::new(),
         calls: Vec::new(),
         changes: Vec::new(),
         function_values: Vec::new(),
@@ -1190,18 +1198,22 @@ where
                     // A read of attributes has the effects of the class its type argument names, spec section 1: none
                     // for a PHP# attribute class, and those each call gives for the body's own type parameter.
                     match self.attributes_read(declaring_class, method_name, span) {
-                        Some(AttributeArgument::Class(class)) if sharp_attributes(self.codebase(), class) => continue,
-                        Some(AttributeArgument::Parameter(index)) => {
+                        Some(TypeArgument::Type { class: Some(class), .. })
+                            if sharp_attributes(self.codebase(), class) =>
+                        {
+                            continue;
+                        }
+                        Some(TypeArgument::Parameter(index)) => {
                             let cause = self.member_cause(declaring_class, method_name, named_class);
                             self.summary.attribute_reads.push((index, span, cause));
                             continue;
                         }
-                        Some(AttributeArgument::Class(_) | AttributeArgument::Other) | None => {}
+                        Some(TypeArgument::Type { .. }) | None => {}
                     }
                     if self.runs_initial_values(declaring_class, method_name, span) {
                         continue;
                     }
-                    if self.decode_read(declaring_class, method_name, receiver, span) {
+                    if self.decode_read(declaring_class, method_name, named_class, receiver, span) {
                         continue;
                     }
                     let class = named_class.unwrap_or(declaring_class);
@@ -1224,10 +1236,10 @@ where
 
     /// What the call at `span` of `method` of `class` reads, when the standard library marks the method
     /// `CreatesAttributes`, as `Class<T>.attributes<TAttribute>()`: the attributes of the class its own type argument
-    /// names, the last the checker inferred, after an extension block's, as [`Self::attribute_argument`] gives it. The
+    /// names, the last the checker inferred, after an extension block's, as [`Self::type_argument`] gives it. The
     /// summary decides what the read does from every descendant of a class it names, so it records that set. None for
     /// any other method.
-    fn attributes_read(&mut self, class: Word, method: Word, span: Span) -> Option<AttributeArgument> {
+    fn attributes_read(&mut self, class: Word, method: Word, span: Span) -> Option<TypeArgument> {
         let codebase = self.codebase();
         if !codebase
             .get_method(class, method)
@@ -1236,8 +1248,8 @@ where
             return None;
         }
 
-        let argument = self.attribute_arguments(span).last().copied().unwrap_or(AttributeArgument::Other);
-        if let AttributeArgument::Class(attribute_class) = argument {
+        let argument = self.type_arguments(span).pop().unwrap_or(TypeArgument::Type { class: None, readers: None });
+        if let TypeArgument::Type { class: Some(attribute_class), .. } = argument {
             self.listings.insert(Listing::Descendants(attribute_class));
         }
 
@@ -1247,42 +1259,44 @@ where
     /// Records the call at `span` of the standard library's `Class<T>.parse`, or of a method it marks
     /// `ParsesTypeArgument`, as `Json.parse<T>`, as calls of the readers it runs, spec sections 10, 23, 24, 25 and 29:
     /// the `parse` of each class [`decoded_readers`] finds in the type of the class value `receiver`, or [`readers_of`]
-    /// finds in the call's type argument, when it knows each one. A marked method reads its text first with its class's
-    /// `read`, which the call also runs. True when it records them. False for any other call, and for a type whose
-    /// reader it can't know, which the call of the member itself gives every effect through its `uses any`.
+    /// finds in the call's type argument, when it knows each one. A parse into a type parameter of the body's own
+    /// method runs the readers each call of the body names, so it records it for the solve to give. A marked method
+    /// reads its text first with its class's `read`, which the call also runs. True when it records them. False for any
+    /// other call, and for a type whose reader it can't know, which the call of the member itself gives every effect
+    /// through its `uses any`.
     fn decode_read(
         &mut self,
         class: Word,
         method: Word,
+        named_class: Option<Word>,
         receiver: Option<&'ast Expression<'arena>>,
         span: Span,
     ) -> bool {
         let codebase = self.codebase();
-        let (readers, text_read) =
+        let unknown = TypeArgument::Type { class: None, readers: None };
+        let (parsed, text_read) =
             if codebase.class_key(class) == codebase.class_key(word(CLASS_MEMBERS)) && method.as_bytes() == b"parse" {
-                let readers = receiver
+                let parsed = receiver
                     .and_then(|receiver| self.artifacts.get_expression_type(receiver))
-                    .and_then(|class_value| decoded_readers(codebase, class_value));
-                (readers, None)
+                    .map_or(unknown, |class_value| self.class_value_argument(class_value));
+                (parsed, None)
             } else if codebase
                 .get_method(class, method)
                 .is_some_and(|metadata| metadata.has_attribute(codebase, word(PARSES_TYPE_ARGUMENT)))
             {
-                let readers = self
-                    .artifacts
-                    .inferred_type_arguments
-                    .get(&(span.start.offset, span.end.offset))
-                    .and_then(|arguments| arguments.first())
-                    .and_then(|parsed| {
-                        let mut readers = Vec::new();
-                        readers_of(codebase, parsed, &mut readers).map(|()| readers)
-                    });
-                (readers, codebase.get_class_like(class).map(|metadata| metadata.method_key(word("read"))))
+                let parsed = self.type_arguments(span).into_iter().next().unwrap_or(unknown);
+                (parsed, codebase.get_class_like(class).map(|metadata| metadata.method_key(word("read"))))
             } else {
                 return false;
             };
-        let Some(readers) = readers else {
-            return false;
+        let readers = match parsed {
+            TypeArgument::Type { readers: Some(readers), .. } => readers,
+            TypeArgument::Parameter(index) => {
+                let cause = self.member_cause(class, method, named_class);
+                self.summary.parses.push((index, span, cause));
+                Vec::new()
+            }
+            TypeArgument::Type { readers: None, .. } => return false,
         };
         if let Some(read) = text_read {
             self.summary.calls.push(Call {
@@ -1295,7 +1309,7 @@ where
         }
         for reader in readers {
             self.summary.calls.push(Call {
-                callee: Body::Method(reader.name, reader.method_key(word("parse"))),
+                callee: reader,
                 span,
                 receiver: Roots::new(),
                 arguments: Vec::new(),
@@ -1307,35 +1321,72 @@ where
     }
 
     /// The type arguments the checker inferred for the call at `span`, by the callee's own type parameter index, each as
-    /// [`Self::attribute_argument`] gives it, which [`super::through`] substitutes for a read of attributes.
-    fn attribute_arguments(&self, span: Span) -> Vec<AttributeArgument> {
+    /// [`Self::type_argument`] gives it, which [`super::through`] and the solve substitute for a read of attributes and
+    /// a parse.
+    fn type_arguments(&self, span: Span) -> Vec<TypeArgument> {
         self.artifacts
             .inferred_type_arguments
             .get(&(span.start.offset, span.end.offset))
-            .map(|arguments| arguments.iter().map(|argument| self.attribute_argument(argument)).collect())
+            .map(|arguments| arguments.iter().map(|argument| self.type_argument(argument)).collect())
             .unwrap_or_default()
     }
 
-    /// What `argument` is to a read of the attributes of the class it names, spec sections 1 and 25: the class-like it
-    /// names, which [`sharp_attributes`] decides where a read takes it, a type parameter of the body's own method, which
-    /// each of its calls gives, or any other type, which may have every effect.
-    fn attribute_argument(&self, argument: &TUnion) -> AttributeArgument {
-        let codebase = self.codebase();
+    /// What `argument` is to a read of the attributes of the class it names, spec sections 1 and 25, and to a parse
+    /// into it, spec section 29: a type parameter of the body's own method, which each of its calls gives, or a type,
+    /// with the class-like it names, which [`sharp_attributes`] decides where a read takes it, and the readers
+    /// [`readers_of`] finds in it.
+    fn type_argument(&self, argument: &TUnion) -> TypeArgument {
         if let [TAtomic::GenericParameter(parameter)] = &*argument.types
-            && let GenericParent::FunctionLike((class, method)) = &parameter.defining_entity
-            && let Body::Method(own_class, own_method) = self.summary.body
-            && codebase.class_key(*class) == own_class
-            && codebase.method_key(own_class, *method) == own_method
-            && let Some(index) = codebase
-                .get_method(own_class, own_method)
-                .and_then(|metadata| metadata.template_types.get_index_of(&parameter.parameter_name))
+            && let Some(index) = self.own_type_parameter(parameter.parameter_name, &parameter.defining_entity)
         {
-            return AttributeArgument::Parameter(index as u32);
+            return TypeArgument::Parameter(index);
         }
 
-        argument
-            .get_single_named_object()
-            .map_or(AttributeArgument::Other, |named| AttributeArgument::Class(named.name))
+        let mut readers = Vec::new();
+        TypeArgument::Type {
+            class: argument.get_single_named_object().map(|named| named.name),
+            readers: readers_of(self.codebase(), argument, &mut readers).map(|()| reader_bodies(readers)),
+        }
+    }
+
+    /// What the class value of type `class_value` is to a parse of it, `Class<T>.parse`, spec sections 25 and 29: a
+    /// type parameter of the body's own method when every class it may be is that parameter's, as `typeof(T)` is, or
+    /// the readers [`decoded_readers`] finds in it.
+    fn class_value_argument(&self, class_value: &TUnion) -> TypeArgument {
+        let own = class_value
+            .types
+            .iter()
+            .map(|atomic| match atomic {
+                TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic {
+                    parameter_name,
+                    defining_entity,
+                    ..
+                })) => self.own_type_parameter(*parameter_name, defining_entity),
+                _ => None,
+            })
+            .reduce(|first, next| first.filter(|_| first == next))
+            .flatten();
+        if let Some(index) = own {
+            return TypeArgument::Parameter(index);
+        }
+
+        TypeArgument::Type { class: None, readers: decoded_readers(self.codebase(), class_value).map(reader_bodies) }
+    }
+
+    /// The index of the type parameter `name` that `defining_entity` declares, when that is the body's own method.
+    fn own_type_parameter(&self, name: Word, defining_entity: &GenericParent) -> Option<u32> {
+        let codebase = self.codebase();
+        let GenericParent::FunctionLike((class, method)) = defining_entity else {
+            return None;
+        };
+        let Body::Method(own_class, own_method) = self.summary.body else {
+            return None;
+        };
+        if codebase.class_key(*class) != own_class || codebase.method_key(own_class, *method) != own_method {
+            return None;
+        }
+
+        codebase.get_method(own_class, own_method)?.template_types.get_index_of(&name).map(|index| index as u32)
     }
 
     /// The callee of a call of `method` of `declaring_class`, through `named_class` when the call names another, as
@@ -1544,7 +1595,7 @@ where
                 span,
                 receiver: receiver_roots,
                 arguments: roots,
-                type_arguments: self.attribute_arguments(span),
+                type_arguments: self.type_arguments(span),
             });
 
             return;
