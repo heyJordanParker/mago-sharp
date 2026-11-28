@@ -237,8 +237,9 @@ impl Candidates<'_, '_, '_> {
     }
 
     /// Each case of the enum `r#enum`, spec section 20, or its case `only` alone, a case that carries data with the
-    /// values of its fields [`Candidates::applied`] gives: `Shape.Dot`, `Shape.Circle(0)`. A case whose field has no
-    /// candidate value is left out.
+    /// values of its fields [`Candidates::applied`] gives: `Shape.Dot`, `Shape.Circle(0)`. A case that carries data runs
+    /// as a class, so its fields build one class deeper, as [`Candidates::built`] builds a class's, and it is left out
+    /// past `depth`, as is a case whose field has no candidate value.
     fn cases(&mut self, r#enum: &[u8], only: Option<&[u8]>, depth: usize) -> Vec<Candidate> {
         let reach = self.reach;
         let lean = self.body.class_type(self.span, r#enum);
@@ -252,8 +253,11 @@ impl Candidates<'_, '_, '_> {
                 values.push(Candidate { term: format!("(pure {constructor})"), written });
                 continue;
             };
+            if depth == 0 {
+                continue;
+            }
             let parameters = self.body.checked.types().constructor_parameters(class);
-            values.extend(self.applied(parameters, depth, &constructor, false, &written));
+            values.extend(self.applied(parameters, depth - 1, &constructor, false, &written));
         }
 
         values
