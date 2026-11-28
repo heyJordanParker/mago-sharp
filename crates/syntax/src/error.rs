@@ -14,8 +14,10 @@ use crate::parser::MAX_RECURSION_DEPTH;
 use crate::settings::LexerSettings;
 use crate::token::TokenKind;
 
-const SYNTAX_ERROR_CODE: &str = "syntax";
-const PARSE_ERROR_CODE: &str = "parse";
+/// The code of the issue a syntax error gives.
+pub const SYNTAX_ERROR_CODE: &str = "syntax";
+/// The code of the issue a parse error gives.
+pub const PARSE_ERROR_CODE: &str = "parse";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]

@@ -7123,7 +7123,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             {
                 self.constant_object(read, classes, name.value, class, member)
             }
-            DeclarationKind::Constant | DeclarationKind::EnumCase => {
+            // A member the class doesn't declare, which the checker refuses, is the property `member_declaration`
+            // gives, and reads as written, `Class::name`, which PHP finds no constant of when it runs, spec section 27.
+            DeclarationKind::Constant | DeclarationKind::EnumCase | DeclarationKind::Property { .. } => {
                 self.node(SHARP_AST_CLASS_CONST, 0, line, &[class, member])
             }
             DeclarationKind::StaticProperty => {
@@ -7241,7 +7243,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// Whether the method call `call` on `object` runs the function the property of that name holds.
     fn is_property_call(&self, call: &Expression, object: &Expression) -> bool {
         receiver_classes(self.types.expression_type(object)).is_some()
-            && matches!(self.types.call_target(call).kind, DeclarationKind::Property { .. })
+            && self
+                .types
+                .call_target(call)
+                .is_some_and(|declaration| matches!(declaration.kind, DeclarationKind::Property { .. }))
     }
 
     /// `value` as a reader of an `Iterable` takes it, spec section 12, which reads a `Map` as the
@@ -8425,7 +8430,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_UNPACK, 0, line, &[value])
             }
-            _ => unreachable!("the checker refuses a `Map` entry in a `List` literal"),
+            // The checker refuses a `Map` entry in a `List` literal. Code with errors lowers as written, `[1, 'a' => 2]`,
+            // and PHP runs it as it does, spec section 27.
+            ArrayElement::KeyValue(entry) => {
+                let key = self.expression(entry.key);
+                let value = self.expression(entry.value);
+
+                self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, key])
+            }
+            ArrayElement::Missing(_) => {
+                unreachable!("the checker refuses a missing element in a `List` literal as a parse error")
+            }
         }
     }
 
@@ -8468,7 +8483,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let entries = self.global_call(line, b"array_merge", &[empty, pairs]);
                     keys_and_values.push(self.node(SHARP_AST_UNPACK, 0, line, &[entries]));
                 }
-                _ => unreachable!("the checker refuses a `List` element in a `Map` literal"),
+                _ => unreachable!("`is_map` takes a literal with a value or a missing element for a `List`"),
             }
         }
         let keys_and_values = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &keys_and_values);
@@ -8603,11 +8618,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             .any(|atomic| matches!(atomic, TAtomic::Array(TArray::Set(_))))
     }
 
-    /// Whether the literal `array` of `expression` is a `Map`: `[:]`, or one the analysis gave a `Map` type, as it gives
-    /// a literal of entries. `[]` is the empty `List`, though the analysis types it as the empty array of either.
+    /// Whether the literal `array` of `expression` is a `Map`: `[:]`, or one of entries and spreads the analysis gave a
+    /// `Map` type, as it gives a literal of entries. `[]` is the empty `List`, though the analysis types it as the empty
+    /// array of either. A literal with a value element is a `List` as written, as `[...counts, "soup"]` of a `Map`
+    /// `counts`, which the checker refuses, so it lowers to PHP's runtime spread, spec section 27.
     fn is_map(&self, expression: &Expression, array: &Array) -> bool {
         array.colon.is_some()
             || (!array.elements.is_empty()
+                && array
+                    .elements
+                    .iter()
+                    .all(|element| matches!(element, ArrayElement::KeyValue(_) | ArrayElement::Variadic(_)))
                 && self
                     .types
                     .expression_type(expression)
@@ -9285,8 +9306,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let property_call = kind == SHARP_AST_METHOD_CALL && self.is_property_call(expression, call.object);
         // Spec section 14.3: `Rates.round(x)` of a class with no method `round` runs the function its static field
         // `round` holds, as `(Rates::$round)($x)`.
-        let static_property_call =
-            kind == SHARP_AST_STATIC_CALL && self.types.call_target(expression).kind == DeclarationKind::StaticProperty;
+        let static_property_call = kind == SHARP_AST_STATIC_CALL
+            && self
+                .types
+                .call_target(expression)
+                .is_some_and(|declaration| declaration.kind == DeclarationKind::StaticProperty);
         // The type arguments a static field's call records are its class's, which pick the field's statics entry, and
         // a function value takes none.
         let type_arguments = if static_property_call { None } else { self.types.call_type_arguments(expression) }
@@ -9416,7 +9440,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let line = self.line(call);
         let interface = word(self.names.get(&super_of.interface));
-        let method = self.types.call_target(expression).name;
+        let method = match (self.types.call_target(expression), &call.method) {
+            (Some(declaration), _) => declaration.name,
+            (None, ClassLikeMemberSelector::Identifier(name)) => word(name.value),
+            (None, member) => unreachable!("check_slice refuses the member name `{member}`"),
+        };
         let object = self.variable(super_of.span(), b"this");
         let method = self.string(0, self.line(&call.method), &super_alias(interface, method));
         let type_arguments = self

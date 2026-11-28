@@ -17,6 +17,7 @@ use crate::internal::CheckingWalker;
 use crate::internal::context::Context;
 
 pub use crate::internal::checker::class_like::is_php_keyword;
+pub use crate::internal::context::SEMANTICS_ISSUE_CODE;
 
 mod internal;
 
