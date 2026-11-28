@@ -12009,6 +12009,25 @@ fn an_extern_empty_list_default_fits_a_list_parameter_only() {
     );
 }
 
+/// Spec sections 12 and 23: an `extern` line's `[:]` default is the empty `Map`, checked against the parameter's type as
+/// any default is. A `Map` parameter takes it, and a `List` parameter refuses it as a `Map`, since an empty `List` is
+/// written `[]`.
+#[test]
+fn an_extern_empty_map_default_fits_a_map_parameter_only() {
+    let mailer = "<?php\n\nnamespace Lib;\n\nfinal class Mailer\n{\n    public static function send(string $to, array $headers = []): int\n    {\n        return count($headers);\n    }\n\n    public static function queue(array $ids = []): int\n    {\n        return count($ids);\n    }\n}\n";
+    let stubs = "namespace Stubs;\n\nimport Lib.Mailer;\n\nextern int Mailer.send(string to, Map<string, string> headers = [:]) uses none;\nextern int Mailer.queue(List<int> ids = [:]) uses none;\n";
+    let outbox = "namespace Shop;\n\nimport Lib.Mailer;\n\npublic class Outbox\n{\n    public int run() => Mailer.send(\"a@b.co\") + Mailer.queue();\n}\n";
+
+    assert_eq!(
+        package_errors(&[
+            ("src/Lib/Mailer.php", mailer),
+            ("src/Stubs/Library.sharp", stubs),
+            ("src/Shop/Outbox.sharp", outbox)
+        ]),
+        ["`[:]` is an empty Map. An empty List is written `[]`."]
+    );
+}
+
 /// Spec section 23: an `extern` line states any return type a PHP# method declares: a function type over a native
 /// `\Closure`, a tuple over a native `array` and a nullable union over a native one, as a nullable type over a nullable
 /// one. A call reads each as the line states it, so the function `Factory.make()` returns is called in turn, with no
