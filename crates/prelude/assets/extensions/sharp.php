@@ -308,7 +308,7 @@ function jsonEncode(mixed $value, int $flags, int $indent): string {}
 /**
  * The value the JSON text `$json` holds, as `json_decode` reads it with `JSON_OBJECT_AS_ARRAY`, each object a PHP
  * array, but an empty object an empty `Map`, which `jsonEncode` writes as `{}` again. The standard library's
- * `Json.parse` and `Json.decode` read by it.
+ * `Json.parse<T>` reads by it.
  *
  * @throws \JsonException
  */
@@ -316,26 +316,36 @@ function jsonDecode(string $json): mixed {}
 
 /**
  * The value of the type the class value `$type` holds that `$value` builds, as a struct's `parse` reads a field of that
- * type, each number and bool read from its text with `$text`. A struct's and a class's `parse`, and the standard
- * library's `Json.decode` and `Query.decode`, read by it.
+ * type, each number and bool read from its text with `$text`, as an `Ok`, or an `Err` whose `ParseError` lists every
+ * bad part under its path. A struct's and a class's `parse`, and the standard library's `Json.parse` and
+ * `Query.parse`, read by it.
  *
  * @template T
  *
  * @param class-string<T> $type
  *
- * @return T
- *
- * @throws \Sharp\InvalidFields
+ * @return \Sharp\Result<T, \Sharp\ParseError>
  */
-function parseAs(string $type, mixed $value, bool $text): mixed {}
+function parseAs(string $type, mixed $value, bool $text): object {}
 
 /**
- * The variant of the family `$family` that `$value` names under the family's key, read as `parseAs` reads it. With
- * `$throws` false, null wherever that throws a ValueError, as `tryParse` gives.
+ * The variant of the family `$family` that `$value` names under the family's key, read as `parseAs` reads it.
  *
- * @throws \Sharp\InvalidFields
+ * @return \Sharp\Result<object, \Sharp\ParseError>
  */
-function parseVariant(string $family, mixed $value, bool $throws = true): ?object {}
+function parseVariant(string $family, mixed $value): object {}
+
+/**
+ * A new `$class`, a backed struct, that holds `$value`, built through its constructor, as an `Ok`, or an `Err` whose
+ * `ParseError` holds the message of the `ValueError` the constructor threw, at "". A backed struct's `parse` reads by it.
+ *
+ * @template T
+ *
+ * @param class-string<T> $class
+ *
+ * @return \Sharp\Result<T, \Sharp\ParseError>
+ */
+function parseHeld(string $class, mixed $value): object {}
 
 /**
  * The class name of the variant of the family `$family` whose `[Key]` is `$tag`, or null. The standard library's
@@ -547,7 +557,7 @@ final class DispatchesEmits {}
 
 /**
  * Marks a standard library generic method that reads its text with its class's `read`, then parses the value into
- * its type argument with the type's `parse`, as `Json.decode<T>` does. The checker gives each call's type argument the
+ * its type argument with the type's `parse`, as `Json.parse<T>` does. The checker gives each call's type argument the
  * struct parse check, and the call the effects of that `read` and of the readers the type argument holds.
  */
 #[\Attribute(\Attribute::TARGET_METHOD)]

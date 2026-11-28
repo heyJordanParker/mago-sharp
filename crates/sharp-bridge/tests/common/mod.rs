@@ -92,16 +92,32 @@ pub const FAILURES: (&str, &str) = (
     "<?php namespace App\\Tenant; final class Missing extends \\Exception {} final class Broken extends \\Exception {}",
 );
 
-/// The standard library's `Sharp\Int`, with the signatures of its `parse` and `tryParse`.
+/// The standard library's `Result`, `Error` and `ParseError`, which every `parse` gives, spec sections 10 and 31.
+pub const PARSE_LIBRARY: [(&str, &str); 3] = [
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Result.sharp",
+        include_str!("../../../../../composer/library/Sharp/Result.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Error.sharp",
+        include_str!("../../../../../composer/library/Sharp/Error.sharp"),
+    ),
+    (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ParseError.sharp",
+        include_str!("../../../../../composer/library/Sharp/ParseError.sharp"),
+    ),
+];
+
+/// The standard library's `Sharp\Int`, with a `parse` that gives a `Result` as the library's does.
 pub const INT: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Int.sharp",
-    "namespace Sharp;\n\npublic static class Int\n{\n    public static int parse(Any? value) => 0;\n\n    public static int? tryParse(Any? value) => null;\n}\n",
+    "namespace Sharp;\n\npublic static class Int\n{\n    public static Result<int, ParseError> parse(Any? value) => Result.Ok(0);\n}\n",
 );
 
-/// The standard library's `Sharp\Float`, with the signatures of its `parse` and `tryParse`.
+/// The standard library's `Sharp\Float`, with a `parse` that gives a `Result` as the library's does.
 pub const FLOAT: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Float.sharp",
-    "namespace Sharp;\n\npublic static class Float\n{\n    public static float parse(Any? value) => 0.0;\n\n    public static float? tryParse(Any? value) => null;\n}\n",
+    "namespace Sharp;\n\npublic static class Float\n{\n    public static Result<float, ParseError> parse(Any? value) => Result.Ok(0.0);\n}\n",
 );
 
 /// The standard library's package in `vendor/`. A checked file under it is the standard library's, as the loader marks

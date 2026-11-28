@@ -80,6 +80,7 @@ use crate::effects::member_of_effect_class;
 use crate::effects::sharp_attributes;
 use crate::external::Listing;
 use crate::resolver::class_name::class_value_classes;
+use crate::resolver::class_name::get_class_name_from_atomic;
 use crate::resolver::static_property::StaticProperty;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_holder;
@@ -176,11 +177,10 @@ pub(crate) fn record_behaviors<A>(
     }
 }
 
-/// Records the `parse` and `tryParse` spec section 10 gives the struct or PHP# class `class`, whose bodies the bridge
-/// writes, so each one's function type lists the effects of what it runs. `parse` calls the main constructor, writes
-/// each property field through its `set` accessor, and calls the `parse` of each struct or class a field's type holds,
-/// and `tryParse` calls `parse`. The `parse` of a family calls the `parse` of one of its variants. Each
-/// makes the object it gives, so neither changes state. A call that reaches an effect object has its class's effect,
+/// Records the `parse` spec section 10 gives the struct or PHP# class `class`, whose body the bridge writes, so its
+/// function type lists the effects of what it runs. It calls the main constructor, writes each property field through
+/// its `set` accessor, and calls the `parse` of each struct or class a field's type holds. The `parse` of a family calls
+/// the `parse` of one of its variants. It makes the object it gives, so it changes no state. A call that reaches an effect object has its class's effect,
 /// as a written call does.
 pub(crate) fn record_parse<A>(
     context: &Context<'_, '_, A>,
@@ -230,8 +230,6 @@ pub(crate) fn record_parse<A>(
     let parse = Body::Method(class.name, class.method_key(word("parse")));
 
     let mut parsing = summary(parse, b"parse");
-    let mut trying = summary(Body::Method(class.name, class.method_key(word("tryParse"))), b"tryParse");
-    reach(&mut trying, class.name, parse, b"parse");
     if class.tag_key().is_some() {
         for (_, variant) in codebase.variants(class) {
             // A case that carries no data is one object, which the family's `parse` gives as it is. A case is no
@@ -245,7 +243,6 @@ pub(crate) fn record_parse<A>(
             reach(&mut parsing, variant.name, Body::Method(variant.name, variant.method_key(word("parse"))), b"parse");
         }
         artifacts.effect_summaries.push(parsing);
-        artifacts.effect_summaries.push(trying);
 
         return;
     }
@@ -279,7 +276,6 @@ pub(crate) fn record_parse<A>(
     }
 
     artifacts.effect_summaries.push(parsing);
-    artifacts.effect_summaries.push(trying);
 }
 
 /// Pushes onto `parsed` each struct or PHP# class `r#type` holds, also as a collection's element, once each, whose
@@ -310,10 +306,10 @@ fn parsed_classes<'codebase>(
     }
 }
 
-/// The standard library's `ClassMembers`, which holds `Class<T>.decode`, spec section 25.
+/// The standard library's `ClassMembers`, which holds `Class<T>.parse`, spec section 25.
 const CLASS_MEMBERS: &[u8] = b"Sharp\\ClassMembers";
 
-/// The classes whose readers `decode` of a class value of `class_value`'s type runs, spec sections 10 and 29, as
+/// The classes whose readers `parse` of a class value of `class_value`'s type runs, spec sections 10 and 29, as
 /// [`readers_of`] finds them in the type it holds, or `None` when one of them may be any class's reader.
 fn decoded_readers<'codebase>(
     codebase: &'codebase CodebaseMetadata,
@@ -335,7 +331,7 @@ fn decoded_readers<'codebase>(
     Some(readers)
 }
 
-/// Pushes onto `readers` the class of each reader `decode` of `r#type` runs, once each, spec section 29: a type that is
+/// Pushes onto `readers` the class of each reader `parse` of `r#type` runs, once each, spec section 29: a type that is
 /// no class runs only the readers of the classes inside it, so a scalar, an enum and `null` add none, and a `List`, a
 /// `Map`, a tuple, a `Set`, a union and a generic class's type arguments add their classes'. `None` for a type whose
 /// reader may be any, as [`reader_of`] says.
@@ -370,7 +366,7 @@ fn readers_of<'codebase>(
 /// The prelude's `Set`, a type that is no class, spec section 12, whose readers are its element type's.
 const SET_CLASS: &[u8] = b"Sharp\\Set";
 
-/// Pushes onto `readers` the class `name` when `decode` of it runs its own reader, spec section 29: an enum has none of
+/// Pushes onto `readers` the class `name` when `parse` of it runs its own reader, spec section 29: an enum has none of
 /// a project's, and a `final` class, a struct, a family, whose reader reads one of its declared variants, and a class
 /// whose constructor is `required`, below which no constructor adds an effect, each run the `parse` it declares or
 /// the bridge writes. `None` for any other class, which may be a subclass whose reader differs.
@@ -1220,8 +1216,8 @@ where
         Some(argument)
     }
 
-    /// Records the call at `span` of the standard library's `Class<T>.decode`, or of a method it marks
-    /// `ParsesTypeArgument`, as `Json.decode<T>`, as calls of the readers it runs, spec sections 10, 23, 24, 25 and 29:
+    /// Records the call at `span` of the standard library's `Class<T>.parse`, or of a method it marks
+    /// `ParsesTypeArgument`, as `Json.parse<T>`, as calls of the readers it runs, spec sections 10, 23, 24, 25 and 29:
     /// the `parse` of each class [`decoded_readers`] finds in the type of the class value `receiver`, or [`readers_of`]
     /// finds in the call's type argument, when it knows each one. A marked method reads its text first with its class's
     /// `read`, which the call also runs. True when it records them. False for any other call, and for a type whose
@@ -1235,7 +1231,7 @@ where
     ) -> bool {
         let codebase = self.codebase();
         let (readers, text_read) =
-            if codebase.class_key(class) == codebase.class_key(word(CLASS_MEMBERS)) && method.as_bytes() == b"decode" {
+            if codebase.class_key(class) == codebase.class_key(word(CLASS_MEMBERS)) && method.as_bytes() == b"parse" {
                 let readers = receiver
                     .and_then(|receiver| self.artifacts.get_expression_type(receiver))
                     .and_then(|class_value| decoded_readers(codebase, class_value));
@@ -1667,9 +1663,21 @@ where
             Expression::ConstantAccess(name) => resolved_names.resolve(&name.name).map(word).into_iter().collect(),
             // `new (type)(…)` builds the class `type`'s `Class<T>` names or a subclass, whose constructor below a
             // `required` one may add no effect to it, so it has the effects of `T`'s constructor, spec sections 25 and
-            // 29, as `new T(…)` has them.
+            // 29, as `new T(…)` has them. A `Class<Owner & Row>` builds a `Row`, since an interface declares no
+            // constructor, spec section 9.
             class_value if matches!(instantiation.class, Expression::Parenthesized(_)) => {
-                self.artifacts.get_expression_type(class_value).and_then(class_value_classes).unwrap_or_default()
+                let codebase = self.codebase();
+                self.artifacts
+                    .get_expression_type(class_value)
+                    .filter(|class_value_type| class_value_classes(class_value_type).is_some())
+                    .map(|class_value_type| {
+                        class_value_type
+                            .types
+                            .iter()
+                            .filter_map(|atomic| get_class_name_from_atomic(codebase, atomic)?.created_class(codebase))
+                            .collect()
+                    })
+                    .unwrap_or_default()
             }
             _ => Vec::new(),
         };

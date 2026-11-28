@@ -220,7 +220,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
         }
 
         let created_class = match classnames.as_slice() {
-            [classname] => classname.fqcn,
+            [classname] => classname.created_class(context.codebase),
             _ => None,
         };
         let mut resulting_type = None;
@@ -458,7 +458,7 @@ where
         return Ok(refused_instantiation(context));
     }
 
-    let Some(fq_classname) = classname.fqcn else {
+    let Some(fq_classname) = classname.created_class(context.codebase) else {
         context.collector.report_with_code(
             IssueCode::UnknownClassInstantiation,
             Issue::error("Cannot determine the concrete class for instantiation.")
@@ -1080,7 +1080,7 @@ where
         {
             class_string.get_object_type(context.codebase)
         } else {
-            constraint_object
+            classname.created_object(constraint_object, context.codebase)
         };
 
     Ok(wrap_atomic(result_atomic))

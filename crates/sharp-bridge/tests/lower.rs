@@ -88,8 +88,8 @@ impl Lowered {
         self.tree_without(&[])
     }
 
-    /// The tree, leaving out the methods PHP declares as one of `methods`, and the `#fields`, `#json`, `parse` and
-    /// `tryParse` the bridge gives a struct or a class, which tests of their own show.
+    /// The tree, leaving out the methods PHP declares as one of `methods`, and the `#fields`, `#json` and `parse` the
+    /// bridge gives a struct or a class, which tests of their own show.
     fn tree_without(&self, methods: &[&str]) -> String {
         assert_eq!(self.diagnostics(), Vec::<String>::new(), "the source lowers");
         let mut tree = String::new();
@@ -98,8 +98,8 @@ impl Lowered {
         tree
     }
 
-    /// The `#fields`, `#json`, `parse` and `tryParse` methods the bridge gives a struct or a class. Each spans the
-    /// type's name, so it starts and ends on the line of its class.
+    /// The `#fields`, `#json` and `parse` methods the bridge gives a struct or a class. Each spans the type's name, so
+    /// it starts and ends on the line of its class.
     fn generated(&self) -> HashSet<u32> {
         let mut generated = HashSet::new();
         for (index, class) in self.nodes().iter().enumerate() {
@@ -116,7 +116,7 @@ impl Lowered {
                 let member = self.child(members, member);
                 let method = &self.nodes()[member as usize];
                 if method.kind == sharp_kind::SHARP_AST_METHOD
-                    && ["#fields", "#json", "parse", "tryParse"].contains(&self.text(method.text).as_str())
+                    && ["#fields", "#json", "parse"].contains(&self.text(method.text).as_str())
                     && (method.line, method.end_line) == (class.line, class.line)
                 {
                     generated.insert(member);
@@ -128,7 +128,7 @@ impl Lowered {
     }
 
     /// Each node the source writes, with its index, in the order the bridge lowers them: every node but those of the
-    /// `#fields`, `#json`, `parse` and `tryParse` the bridge gives a struct or a class.
+    /// `#fields`, `#json` and `parse` the bridge gives a struct or a class.
     fn written(&self) -> Vec<(usize, &sharp_node)> {
         let mut left_out = HashSet::new();
         let mut pending: Vec<u32> = self.generated().into_iter().collect();
@@ -185,7 +185,7 @@ impl Lowered {
         self.children()[(self.nodes()[node as usize].first_child + index) as usize]
     }
 
-    /// `node` and what it holds, leaving out the `parse` and `tryParse` the bridge gives a struct or a class below it.
+    /// `node` and what it holds, leaving out the `parse` the bridge gives a struct or a class below it.
     fn render(&self, node: u32) -> String {
         let mut tree = String::new();
         self.render_into(node, 0, &[], &self.generated(), &mut tree);
@@ -914,7 +914,7 @@ fn a_file_declares_strict_types_then_its_namespace_and_classes() {
                     null
                     null
                     null
-                    ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
+                    ZVAL "\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>"
                 null
                 null
         "#}
@@ -1520,7 +1520,7 @@ fn a_file_without_a_namespace_declares_its_classes_globally() {
                     null
                     null
                     null
-                    ZVAL "\nparse: Function<Report(Map<string, Any?>|Object)>\ntryParse: Function<Report?(Map<string, Any?>|Object)>"
+                    ZVAL "\nparse: Function<Sharp.Result<Report, Sharp.ParseError>(Map<string, Any?>|Object)>"
                 null
                 null
         "#}
@@ -1571,7 +1571,7 @@ fn a_method_is_a_public_function_with_its_return_type_after_its_parameters() {
                   null
                   null
                   null
-                  ZVAL "\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\nrun: Function<int(int)>"
+                  ZVAL "\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>\nrun: Function<int(int)>"
               null
               null
         "#}
@@ -1660,7 +1660,7 @@ fn a_field_is_a_property_group_of_one_property() {
                 null
                 null
                 null
-                ZVAL "\n$count set private: int\n$calc set protected virtual: Lib.Calc\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\n__construct: Function<Any?(Lib.Calc)>"
+                ZVAL "\n$count set private: int\n$calc set protected virtual: Lib.Calc\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>\n__construct: Function<Any?(Lib.Calc)>"
         "#}
     );
 }
@@ -1794,7 +1794,7 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                 null
                 null
                 null
-                ZVAL "\n$cache set private: Map<string, App.Shop.Plan>\n$priceOf set private: Function<App.Shop.Money(App.Shop.Offer) uses Sharp.Net.Http>\n$charge set private: Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Net.Http>\nparse: Function<App.Shop.Checkout(Map<string, Any?>|Object)>\ntryParse: Function<App.Shop.Checkout?(Map<string, Any?>|Object)>\n__construct: Function<Any?(Function<App.Shop.Money(App.Shop.Offer) uses Sharp.Net.Http>, Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Net.Http>)>"
+                ZVAL "\n$cache set private: Map<string, App.Shop.Plan>\n$priceOf set private: Function<App.Shop.Money(App.Shop.Offer) uses Sharp.Net.Http>\n$charge set private: Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Net.Http>\nparse: Function<Sharp.Result<App.Shop.Checkout, Sharp.ParseError>(Map<string, Any?>|Object)>\n__construct: Function<Any?(Function<App.Shop.Money(App.Shop.Offer) uses Sharp.Net.Http>, Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Net.Http>)>"
         "#}
     );
 }
@@ -2737,7 +2737,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                     null
                     null
                     null
-                    ZVAL "\n$hits set internal: int\n$note set internal: string?\n$twice: int\n$thrice: int\n$label set private: string\ntryParse: Function<Meter?(Map<string, Any?>|Object)>\nlog: Function<void(string?)>\nparse: Function<Meter(Map<string, Any?>|Object)>\nrun: Function<void()>"
+                    ZVAL "\n$hits set internal: int\n$note set internal: string?\n$twice: int\n$thrice: int\n$label set private: string\nparse: Function<Sharp.Result<Meter, Sharp.ParseError>(Map<string, Any?>|Object)>\nlog: Function<void(string?)>\nrun: Function<void()>"
                 null
                 null
         "##}
@@ -2877,7 +2877,7 @@ fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
                   null
                   null
                   null
-                  ZVAL "\n$total set private: int\n$doubled: int\nparse: Function<Tally(Map<string, Any?>|Object)>\ntryParse: Function<Tally?(Map<string, Any?>|Object)>\nrun: Function<int()>"
+                  ZVAL "\n$total set private: int\n$doubled: int\nparse: Function<Sharp.Result<Tally, Sharp.ParseError>(Map<string, Any?>|Object)>\nrun: Function<int()>"
               null
               null
         "#}
@@ -3105,7 +3105,7 @@ fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_static
                     null
                     null
                     null
-                    ZVAL "\n$calc: Lib.Calc\n$next set private: int\n$most set private: int\n$size: int\n$name set private: string\n::MOST: int\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
+                    ZVAL "\n$calc: Lib.Calc\n$next set private: int\n$most set private: int\n$size: int\n$name set private: string\n::MOST: int\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>"
                 null
                 null
         "##}
@@ -3365,7 +3365,7 @@ fn a_static_constructor_of_a_generic_class_ends_its_init() {
                     null
                     ZVAL "Any?"
                     null
-                    ZVAL "T\n$made set internal: int\nparse: Function<App.Tenant.Pool<$0>(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Pool<$0>?(Map<string, Any?>|Object)>"
+                    ZVAL "T\n$made set internal: int\nparse: Function<Sharp.Result<App.Tenant.Pool<$0>, Sharp.ParseError>(Map<string, Any?>|Object)>"
                 null
                 null
         "##}
@@ -4619,7 +4619,7 @@ fn a_non_constant_initial_value_runs_at_the_start_of_the_constructor() {
                 null
                 null
                 null
-                ZVAL "\n$total set internal: int\n$calc set private: Lib.Calc\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\n__construct: Function<Any?(int)>"
+                ZVAL "\n$total set internal: int\n$calc set private: Lib.Calc\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>\n__construct: Function<Any?(int)>"
         "#}
     );
 }
@@ -4684,7 +4684,7 @@ fn a_class_with_a_non_constant_initial_value_and_no_constructor_gets_one() {
                 null
                 null
                 null
-                ZVAL "\n$calc set private: Lib.Calc\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\n__construct: Function<Any?()>"
+                ZVAL "\n$calc set private: Lib.Calc\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>\n__construct: Function<Any?()>"
         "#}
     );
 }
@@ -5381,7 +5381,7 @@ fn new_of_a_type_parameter_with_a_named_constructor_calls_it_on_the_type_argumen
 }
 
 /// ```php
-/// public static function parse($json): static {
+/// public static function read($json): static {
 ///     return static::fromJson($json);
 /// }
 /// public function copy(): static {
@@ -5394,11 +5394,11 @@ fn new_of_a_type_parameter_with_a_named_constructor_calls_it_on_the_type_argumen
 #[test]
 fn new_of_self_with_a_named_constructor_calls_it_on_the_class_the_code_is_called_on() {
     let record = Lowered::new(
-        "namespace App;\n\nclass Record\n{\n    public Record() { }\n\n    public required Record.fromJson(string json) : this() { }\n\n    public static Self parse(string json) => new Self.fromJson(json);\n}\n",
+        "namespace App;\n\nclass Record\n{\n    public Record() { }\n\n    public required Record.fromJson(string json) : this() { }\n\n    public static Self read(string json) => new Self.fromJson(json);\n}\n",
     );
 
     assert_eq!(
-        record.render(record.child(record.method_named("parse"), 2)),
+        record.render(record.child(record.method_named("read"), 2)),
         indoc! {r#"
             STMT_LIST
               RETURN
@@ -5860,7 +5860,7 @@ fn a_get_only_property_gets_its_initial_value_in_the_constructor() {
                 null
                 null
                 null
-                ZVAL "\n$code: string\nparse: Function<Report(Map<string, Any?>|Object)>\ntryParse: Function<Report?(Map<string, Any?>|Object)>\n__construct: Function<Any?()>"
+                ZVAL "\n$code: string\nparse: Function<Sharp.Result<Report, Sharp.ParseError>(Map<string, Any?>|Object)>\n__construct: Function<Any?()>"
         "#}
     );
 }
@@ -5968,7 +5968,7 @@ fn a_nullable_member_s_initial_null_is_its_default() {
                 null
                 null
                 null
-                ZVAL "\n$key set private: (int|string)?\n$owner set internal: Lib.Calc?\n$total set private: int?\n$start set private: int?\n$limit: int?\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\n__construct: Function<Any?()>"
+                ZVAL "\n$key set private: (int|string)?\n$owner set internal: Lib.Calc?\n$total set private: int?\n$start set private: int?\n$limit: int?\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>\n__construct: Function<Any?()>"
         "#}
     );
     let members = lowered.child(class, 2);
@@ -13583,7 +13583,7 @@ fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
                   null
                   ZVAL "Lib.DatabaseEntity"
                   null
-                  ZVAL "TItem\n$rows set private: List<$0>\ntryParse: Function<App.Tenant.PaginatedList<$0>?(Map<string, Any?>|Object)>\nfirst: Function<$0()>\nparse: Function<App.Tenant.PaginatedList<$0>(Map<string, Any?>|Object)>\n__construct: Function<Any?(List<$0>)>\nfind: Function<$0?(int)>"
+                  ZVAL "TItem\n$rows set private: List<$0>\nfirst: Function<$0()>\nparse: Function<Sharp.Result<App.Tenant.PaginatedList<$0>, Sharp.ParseError>(Map<string, Any?>|Object)>\n__construct: Function<Any?(List<$0>)>\nfind: Function<$0?(int)>"
               null
               null
         "#}
@@ -15012,21 +15012,21 @@ fn a_class_like_metadata_holds_its_header_type_arguments_its_bounds_and_its_vari
                   null
                   ZVAL "Any?"
                   null
-                  ZVAL "T\nparse: Function<App.Base<$0>(Map<string, Any?>|Object)>\ntryParse: Function<App.Base<$0>?(Map<string, Any?>|Object)>"
+                  ZVAL "T\nparse: Function<Sharp.Result<App.Base<$0>, Sharp.ParseError>(Map<string, Any?>|Object)>"
             "#},
             indoc! {r#"
                 SHARP_CLASS_METADATA
                   ZVAL "App.Base<List<$0>>, App.Query<App.Order>"
                   ZVAL "Any?"
                   null
-                  ZVAL "T\nparse: Function<App.Sub<$0>(Map<string, Any?>|Object)>\ntryParse: Function<App.Sub<$0>?(Map<string, Any?>|Object)>"
+                  ZVAL "T\nparse: Function<Sharp.Result<App.Sub<$0>, Sharp.ParseError>(Map<string, Any?>|Object)>"
             "#},
             indoc! {r#"
                 SHARP_CLASS_METADATA
                   ZVAL "App.Base<App.Order>"
                   null
                   null
-                  ZVAL "\nparse: Function<App.OrderPage(Map<string, Any?>|Object)>\ntryParse: Function<App.OrderPage?(Map<string, Any?>|Object)>"
+                  ZVAL "\nparse: Function<Sharp.Result<App.OrderPage, Sharp.ParseError>(Map<string, Any?>|Object)>"
             "#},
             indoc! {r#"
                 SHARP_CLASS_METADATA
@@ -15055,7 +15055,7 @@ fn a_collection_class_value_without_type_arguments_reads_as_the_collection_alone
               null
               null
               null
-              ZVAL "\nholds: Function<bool(Class<List>, Class<Map>)>\nparse: Function<App.Shelf(Map<string, Any?>|Object)>\ntryParse: Function<App.Shelf?(Map<string, Any?>|Object)>"
+              ZVAL "\nholds: Function<bool(Class<List>, Class<Map>)>\nparse: Function<Sharp.Result<App.Shelf, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -16090,7 +16090,7 @@ fn new_of_a_generic_php_sharp_class_carries_its_type_arguments() {
               null
               ZVAL "App.DatabaseEntity, Any?"
               null
-              ZVAL "TItem, TKey\n$rows set private: List<$0>\nnested: Function<App.PaginatedList<$0, List<$1>?>()>\ntryParse: Function<App.PaginatedList<$0, $1>?(Map<string, Any?>|Object)>\nparse: Function<App.PaginatedList<$0, $1>(Map<string, Any?>|Object)>\n__construct: Function<Any?(List<$0>)>\ncopy: Function<App.PaginatedList<$0, $1>()>"
+              ZVAL "TItem, TKey\n$rows set private: List<$0>\nnested: Function<App.PaginatedList<$0, List<$1>?>()>\nparse: Function<Sharp.Result<App.PaginatedList<$0, $1>, Sharp.ParseError>(Map<string, Any?>|Object)>\n__construct: Function<Any?(List<$0>)>\ncopy: Function<App.PaginatedList<$0, $1>()>"
         "#}
     );
     // A class without type parameters has no bounds, so no slot for type arguments.
@@ -16276,7 +16276,7 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                     null
                     null
                     null
-                    ZVAL "\nparse: Function<App.Tenant.Unit(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Unit?(Map<string, Any?>|Object)>"
+                    ZVAL "\nparse: Function<Sharp.Result<App.Tenant.Unit, Sharp.ParseError>(Map<string, Any?>|Object)>"
                 null
                 null
         "#}
@@ -16504,7 +16504,7 @@ fn a_header_is_the_parent_class_and_the_interface_name_list() {
                     null
                     null
                     null
-                    ZVAL "\nparse: Function<App.Tenant.Page(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Page?(Map<string, Any?>|Object)>"
+                    ZVAL "\nparse: Function<Sharp.Result<App.Tenant.Page, Sharp.ParseError>(Map<string, Any?>|Object)>"
                 null
                 null
         "#})
@@ -16784,7 +16784,7 @@ fn super_of_an_interface_calls_a_protected_alias_of_its_default_body() {
                 null
                 null
                 null
-                ZVAL "\nparse: Function<App.Both(Map<string, Any?>|Object)>\ntryParse: Function<App.Both?(Map<string, Any?>|Object)>\ndescribe virtual override: Function<string()>"
+                ZVAL "\nparse: Function<Sharp.Result<App.Both, Sharp.ParseError>(Map<string, Any?>|Object)>\ndescribe virtual override: Function<string()>"
         "#}
     );
 }
@@ -17363,7 +17363,7 @@ fn an_interface_computed_property_runs_its_default_body_through_a_protected_meth
                 null
                 null
                 null
-                ZVAL "\nparse: Function<App.Note(Map<string, Any?>|Object)>\ntryParse: Function<App.Note?(Map<string, Any?>|Object)>"
+                ZVAL "\nparse: Function<Sharp.Result<App.Note, Sharp.ParseError>(Map<string, Any?>|Object)>"
             PROP_GROUP [1]
               SHARP_TYPE_ARGS
                 ZVAL [1] "string"
@@ -17467,7 +17467,7 @@ fn a_header_entry_with_type_arguments_is_its_class() {
                 ZVAL "Lib.PaginatedList<Lib.Order>"
                 null
                 null
-                ZVAL "\nparse: Function<App.Tenant.OrderPage(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.OrderPage?(Map<string, Any?>|Object)>"
+                ZVAL "\nparse: Function<Sharp.Result<App.Tenant.OrderPage, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
     assert_eq!(
@@ -17478,7 +17478,7 @@ fn a_header_entry_with_type_arguments_is_its_class() {
                 null
                 null
                 null
-                ZVAL "\nparse: Function<App.Tenant.OrderPage(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.OrderPage?(Map<string, Any?>|Object)>"
+                ZVAL "\nparse: Function<Sharp.Result<App.Tenant.OrderPage, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -17811,7 +17811,7 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                     null
                     null
                     null
-                    ZVAL "\ntryParse: Function<App.Shop?(Map<string, Any?>|Object)>\nsame: Function<bool(App.CheckoutState, App.CheckoutState)>\nparse: Function<App.Shop(Map<string, Any?>|Object)>\nopen: Function<App.CheckoutState()>\npay: Function<App.CheckoutState()>"
+                    ZVAL "\nsame: Function<bool(App.CheckoutState, App.CheckoutState)>\nparse: Function<Sharp.Result<App.Shop, Sharp.ParseError>(Map<string, Any?>|Object)>\nopen: Function<App.CheckoutState()>\npay: Function<App.CheckoutState()>"
                 null
                 null
         "#}
@@ -17951,7 +17951,7 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
                     null
                     null
                     null
-                    ZVAL "\nparse: Function<App.Order(Map<string, Any?>|Object)>\ntryParse: Function<App.Order?(Map<string, Any?>|Object)>\npay: Function<App.OrderPaid(int)>"
+                    ZVAL "\nparse: Function<Sharp.Result<App.Order, Sharp.ParseError>(Map<string, Any?>|Object)>\npay: Function<App.OrderPaid(int)>"
                 null
                 null
         "#}
@@ -18057,7 +18057,7 @@ fn virtual_lowers_to_nothing_and_override_to_the_override_attribute() {
                     null
                     null
                     null
-                    ZVAL "\nsize virtual: Function<int()>\ntryParse: Function<Thumbnail?(Map<string, Any?>|Object)>\nname virtual override: Function<string()>\nparse: Function<Thumbnail(Map<string, Any?>|Object)>"
+                    ZVAL "\nsize virtual: Function<int()>\nparse: Function<Sharp.Result<Thumbnail, Sharp.ParseError>(Map<string, Any?>|Object)>\nname virtual override: Function<string()>"
                 null
                 null
         "#}
@@ -18110,7 +18110,7 @@ fn final_override_lowers_to_a_final_method_with_the_override_attribute() {
                     null
                     null
                     null
-                    ZVAL "\nparse: Function<Thumbnail(Map<string, Any?>|Object)>\ntryParse: Function<Thumbnail?(Map<string, Any?>|Object)>\nname override: Function<string()>"
+                    ZVAL "\nparse: Function<Sharp.Result<Thumbnail, Sharp.ParseError>(Map<string, Any?>|Object)>\nname override: Function<string()>"
                 null
                 null
         "#}
@@ -18167,7 +18167,7 @@ fn an_override_of_a_property_with_no_type_has_no_type() {
                 null
                 null
                 null
-                ZVAL "\n$timestamps set public virtual override: bool\n$table set protected virtual override: string\nparse: Function<Order(Map<string, Any?>|Object)>\ntryParse: Function<Order?(Map<string, Any?>|Object)>"
+                ZVAL "\n$timestamps set public virtual override: bool\n$table set protected virtual override: string\nparse: Function<Sharp.Result<Order, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -18391,7 +18391,7 @@ fn an_override_that_narrows_a_typed_property_runs_with_the_parent_type_and_check
                 null
                 null
                 null
-                ZVAL "\n$table set protected virtual override: string\n$level set public virtual override: int\nparse: Function<Order(Map<string, Any?>|Object)>\ntryParse: Function<Order?(Map<string, Any?>|Object)>"
+                ZVAL "\n$table set protected virtual override: string\n$level set public virtual override: int\nparse: Function<Sharp.Result<Order, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -18629,7 +18629,7 @@ fn internal_runs_as_public_with_the_engine_flag() {
                   null
                   null
                   null
-                  ZVAL "\n$stock set internal: int\n$id init internal: int\n$views set internal: int\n::MAX: int\nsecret: Function<int()>\nparse: Function<Shop(Map<string, Any?>|Object)>\ntryParse: Function<Shop?(Map<string, Any?>|Object)>"
+                  ZVAL "\n$stock set internal: int\n$id init internal: int\n$views set internal: int\n::MAX: int\nsecret: Function<int()>\nparse: Function<Sharp.Result<Shop, Sharp.ParseError>(Map<string, Any?>|Object)>"
               null
               null
         "#}
@@ -18822,7 +18822,7 @@ fn a_lazy_property_keeps_its_first_value_in_its_storage() {
                 null
                 null
                 null
-                ZVAL "\n$doubled: int\n$found: int?\nparse: Function<Plan(Map<string, Any?>|Object)>\ntryParse: Function<Plan?(Map<string, Any?>|Object)>"
+                ZVAL "\n$doubled: int\n$found: int?\nparse: Function<Sharp.Result<Plan, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -18874,7 +18874,7 @@ fn an_override_of_an_override_of_a_property_with_no_type_has_no_type() {
                 null
                 null
                 null
-                ZVAL "\n$table set protected virtual override: string?\nparse: Function<RushOrder(Map<string, Any?>|Object)>\ntryParse: Function<RushOrder?(Map<string, Any?>|Object)>"
+                ZVAL "\n$table set protected virtual override: string?\nparse: Function<Sharp.Result<RushOrder, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -18909,7 +18909,7 @@ fn an_override_of_an_override_of_a_typed_property_keeps_its_type() {
                 null
                 null
                 null
-                ZVAL "\n$table set protected virtual override: string?\nparse: Function<RushOrder(Map<string, Any?>|Object)>\ntryParse: Function<RushOrder?(Map<string, Any?>|Object)>"
+                ZVAL "\n$table set protected virtual override: string?\nparse: Function<Sharp.Result<RushOrder, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -19006,7 +19006,7 @@ fn a_subclass_method_with_a_union_variadic_spreads_it_into_the_parent_method() {
                     null
                     null
                     null
-                    ZVAL "\ntotal virtual override: Function<float|int(string, float|int)>\nparse: Function<App.Tenant.Account(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Account?(Map<string, Any?>|Object)>"
+                    ZVAL "\ntotal virtual override: Function<float|int(string, float|int)>\nparse: Function<Sharp.Result<App.Tenant.Account, Sharp.ParseError>(Map<string, Any?>|Object)>"
                 null
                 null
         "#}
@@ -19420,7 +19420,7 @@ fn a_class_constant_is_a_class_constant_group_of_one_constant() {
                 null
                 null
                 null
-                ZVAL "\n::MAX: int\n::LIMIT: Any?\n::MIN: int\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
+                ZVAL "\n::MAX: int\n::LIMIT: Any?\n::MIN: int\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -19467,7 +19467,7 @@ fn a_union_typed_class_constant_has_its_type_union() {
                 null
                 null
                 null
-                ZVAL "\n::KEY: int|string\n::CODE: (int|string)?\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
+                ZVAL "\n::KEY: int|string\n::CODE: (int|string)?\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -19575,7 +19575,7 @@ fn a_map_or_a_set_constant_is_its_php_array() {
                 null
                 null
                 null
-                ZVAL "\n::LIMITS: Map<string, int>\n::LEVELS: Map<App.Tenant.Level, int>\n::CODES: Set<string>\n::SPARE: Map<string, int>?\n::NAMES: List<string>\n::CODES_LIST: List<string>\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
+                ZVAL "\n::LIMITS: Map<string, int>\n::LEVELS: Map<App.Tenant.Level, int>\n::CODES: Set<string>\n::SPARE: Map<string, int>?\n::NAMES: List<string>\n::CODES_LIST: List<string>\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -19727,7 +19727,7 @@ fn an_iterable_or_a_tuple_constant_holds_its_list_literal() {
                 null
                 null
                 null
-                ZVAL "\n::STEPS: Iterable<int>\n::PAIR: [int, string]\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>"
+                ZVAL "\n::STEPS: Iterable<int>\n::PAIR: [int, string]\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>"
         "#}
     );
 }
@@ -19772,7 +19772,7 @@ fn a_method_an_interface_types_and_a_plain_parent_leaves_untyped_is_the_parents(
                       null
                       null
                       null
-                      ZVAL "\nparse: Function<App.Bill(Map<string, Any?>|Object)>\ntryParse: Function<App.Bill?(Map<string, Any?>|Object)>"
+                      ZVAL "\nparse: Function<Sharp.Result<App.Bill, Sharp.ParseError>(Map<string, Any?>|Object)>"
                   null
                   null
             "#}
@@ -22585,32 +22585,38 @@ fn a_class_of_the_same_namespace_is_called_by_its_full_name() {
 }
 
 /// ```php
-/// return \Sharp\Int::parse($extra) + \Sharp\Float::tryParse($extra);
+/// return \Sharp\Int::parse($extra)->unwrap() + \Sharp\Float::parse($extra)->unwrap();
 /// ```
 #[test]
 fn int_and_float_are_the_classes_of_the_sharp_namespace() {
     assert_eq!(
         body_in(
             "float run(string extra)",
-            "        return Int.parse(extra) + Float.tryParse(extra);\n",
-            &[common::INT, common::FLOAT]
+            "        return Int.parse(extra).unwrap() + Float.parse(extra).unwrap();\n",
+            &[common::INT, common::FLOAT, common::PARSE_LIBRARY[0], common::PARSE_LIBRARY[1], common::PARSE_LIBRARY[2]]
         ),
         indoc! {r#"
             STMT_LIST
               RETURN
                 BINARY_OP [1]
-                  STATIC_CALL
-                    ZVAL "Sharp\\Int"
-                    ZVAL "parse"
+                  METHOD_CALL
+                    STATIC_CALL
+                      ZVAL "Sharp\\Int"
+                      ZVAL "parse"
+                      ARG_LIST
+                        VAR
+                          ZVAL "extra"
+                    ZVAL "unwrap"
                     ARG_LIST
-                      VAR
-                        ZVAL "extra"
-                  STATIC_CALL
-                    ZVAL "Sharp\\Float"
-                    ZVAL "tryParse"
+                  METHOD_CALL
+                    STATIC_CALL
+                      ZVAL "Sharp\\Float"
+                      ZVAL "parse"
+                      ARG_LIST
+                        VAR
+                          ZVAL "extra"
+                    ZVAL "unwrap"
                     ARG_LIST
-                      VAR
-                        ZVAL "extra"
         "#}
     );
 }
@@ -26125,10 +26131,7 @@ fn a_method_that_yields_is_a_generator() {
         .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD)
         .map(|node| format!("{} [{}]", lowered.text(node.text), node.attr))
         .collect();
-    assert_eq!(
-        methods,
-        ["lines [16777217]", "all [16777217]", "kept [1]", "#fields [17]", "parse [17]", "tryParse [17]", "#json [1]"]
-    );
+    assert_eq!(methods, ["lines [16777217]", "all [16777217]", "kept [1]", "#fields [17]", "parse [17]", "#json [1]"]);
 }
 
 /// A function whose result can hold a `Map` or a `Set`, at any depth, as `Any`, a type parameter or an `Iterable` can,
@@ -28056,7 +28059,7 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
                   null
                   null
                   null
-                  ZVAL "\n$total: int\n$count set private: int\ntryParse: Function<App.Tenant.Report?(Map<string, Any?>|Object)>\nparse: Function<App.Tenant.Report(Map<string, Any?>|Object)>\n__construct: Function<Any?(int)>\nrun: Function<void(int)>"
+                  ZVAL "\n$total: int\n$count set private: int\nparse: Function<Sharp.Result<App.Tenant.Report, Sharp.ParseError>(Map<string, Any?>|Object)>\n__construct: Function<Any?(int)>\nrun: Function<void(int)>"
               ATTRIBUTE_LIST
                 ATTRIBUTE_GROUP
                   ATTRIBUTE
@@ -29088,7 +29091,7 @@ fn an_extern_property_is_a_hidden_static_and_its_read_calls_get_checked_where_it
                 null
                 null
                 null
-                ZVAL "\n$owner extern: string\ntryParse: Function<App.Tenant.Row?(Map<string, Any?>|Object)>\nowner: Function<string()>\nparse: Function<App.Tenant.Row(Map<string, Any?>|Object)>\n__construct: Function<Any?()>\nrun: Function<string()>"
+                ZVAL "\n$owner extern: string\nowner: Function<string()>\nparse: Function<Sharp.Result<App.Tenant.Row, Sharp.ParseError>(Map<string, Any?>|Object)>\n__construct: Function<Any?()>\nrun: Function<string()>"
         "#}
     );
 }
@@ -32196,6 +32199,9 @@ fn every_construct_of_the_slice_lowers_into_nodes_of_their_kinds_child_count() {
             common::FAILURES,
             common::INT,
             common::FLOAT,
+            common::PARSE_LIBRARY[0],
+            common::PARSE_LIBRARY[1],
+            common::PARSE_LIBRARY[2],
             DISPATCHER_LIBRARY,
         ],
     );
@@ -32963,8 +32969,8 @@ fn effects_fingerprint(effects: &[&str]) -> u64 {
 }
 
 /// The unit names the function type of each method its file declares with the fingerprint of the effects it lists,
-/// which `Reads::function_types` takes, since those effects come from other files. The `parse` and `tryParse` spec
-/// section 10 gives the class carry theirs too, which list no effect.
+/// which `Reads::function_types` takes, since those effects come from other files. The `parse` spec section 10 gives
+/// the class carries its own too, which lists no effect.
 #[test]
 fn the_unit_names_each_function_type_with_the_fingerprint_of_its_effects() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int twice(int x) => x * 2;\n}\n";
@@ -32981,7 +32987,6 @@ fn the_unit_names_each_function_type_with_the_fingerprint_of_its_effects() {
         function_types,
         [
             ("App\\Tenant\\Report::parse".to_owned(), effects_fingerprint(&[])),
-            ("App\\Tenant\\Report::tryParse".to_owned(), effects_fingerprint(&[])),
             ("App\\Tenant\\Report::twice".to_owned(), effects_fingerprint(&[])),
         ]
     );
@@ -34684,20 +34689,15 @@ const KEY: (&str, &str) = (
 ///     return [['id', 'ticket_id', 'int', true, false], ['seats', 'seats', 'int', true, true], ['note', 'note', 'string', false, true], ['owner', 'owner', 'string?', false, false]];
 /// }
 ///
-/// public static function parse(array|object $value): \App\Ticket
+/// public static function parse(array|object $value): \Sharp\Result
 /// {
 ///     return \Sharp\Internal\parseAs('App\Ticket', $value, false);
-/// }
-///
-/// public static function tryParse(array|object $value): ?\App\Ticket
-/// {
-///     try { return \App\Ticket::parse($value); } catch (\ValueError) { return null; }
 /// }
 /// ```
 ///
 /// Spec section 10: the engine's reader builds a struct by the rows of its `#fields`: each main constructor parameter
 /// under its key, which `[Key]` renames, then each other stored property, each with whether a missing
-/// key leaves it to its default. It records every bad or missing field, throws them all at once, and passes the
+/// key leaves it to its default. It records every bad or missing field, gives them all in one `Err`, and passes the
 /// parameters by name, so a missing key takes its parameter's default, and a missing `T?` property is null. A
 /// parameter that reads the key of a property the main constructor doesn't set is refused, so `parse` never leaves
 /// that property unset.
@@ -34709,7 +34709,7 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
     );
 
     assert_eq!(
-        [lowered.declared("#fields"), lowered.declared("parse"), lowered.declared("tryParse")].join("\n"),
+        [lowered.declared("#fields"), lowered.declared("parse")].join("\n"),
         indoc! {r##"
             METHOD [17] "#fields" @5-5
               PARAM_LIST
@@ -34826,50 +34826,14 @@ fn a_struct_parses_each_field_from_its_key_and_creates_itself_through_its_main_c
                         ZVAL "value"
                       ZVAL false
               SHARP_TYPE_ARGS
-                ZVAL "App\\Ticket"
-                ZVAL "Function<App.Ticket(Map<string, Any?>|Object)>"
-              null
-
-            METHOD [17] "tryParse" @5-5
-              PARAM_LIST
-                PARAM
-                  TYPE_UNION
-                    TYPE [7]
-                    ZVAL [1] "object"
-                  ZVAL "value"
-                  null
-                  null
-                  null
-                  null
-              null
-              STMT_LIST
-                TRY
-                  STMT_LIST
-                    RETURN
-                      STATIC_CALL
-                        ZVAL "App\\Ticket"
-                        ZVAL "parse"
-                        ARG_LIST
-                          VAR
-                            ZVAL "value"
-                  CATCH_LIST
-                    CATCH
-                      NAME_LIST
-                        ZVAL "ValueError"
-                      null
-                      STMT_LIST
-                        RETURN
-                          ZVAL null
-                  null
-              SHARP_TYPE_ARGS
-                ZVAL [256] "App\\Ticket"
-                ZVAL "Function<App.Ticket?(Map<string, Any?>|Object)>"
+                ZVAL "Sharp\\Result"
+                ZVAL "Function<Sharp.Result<App.Ticket, Sharp.ParseError>(Map<string, Any?>|Object)>"
               null
         "##}
     );
     assert_eq!(
         Lowered::new(
-            "namespace App;\n\npublic struct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Split read(Map<string, Any?> input) => Split.parse(input);\n}\n"
+            "namespace App;\n\npublic struct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Split read(Map<string, Any?> input) => Split.parse(input).unwrap();\n}\n"
         )
         .diagnostics(),
         [
@@ -35635,16 +35599,8 @@ fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
     );
 }
 
-/// ```php
-/// public static function tryParse(array|object $value): ?\App\Ticket
-/// {
-///     try { return \App\Ticket::parse($value); } catch (\ValueError) { return null; }
-/// }
-/// ```
-///
 /// Spec section 10: a PHP# class that can be created parses the same way a struct does, so the same members give the
-/// same `#fields`, `parse` and `tryParse`, and `tryParse` gives null where `parse` throws, a `\ValueError` its main
-/// constructor throws included. A class with no constructor of its own reads the main constructor it inherits, `[Key]`
+/// same `#fields` and `parse`. A class with no constructor of its own reads the main constructor it inherits, `[Key]`
 /// included, and the engine builds a list of a class element by element, so no `parse` calls another. A class whose
 /// parent declares `parse`, an abstract or a static class, and a class or a struct that declares its own `parse` get
 /// none of them.
@@ -35661,47 +35617,6 @@ fn a_class_parses_as_a_struct_does() {
 
     assert_eq!(class.declared("#fields"), r#struct.declared("#fields"));
     assert_eq!(class.declared("parse"), r#struct.declared("parse"));
-    assert_eq!(class.declared("tryParse"), r#struct.declared("tryParse"));
-    assert_eq!(
-        class.declared("tryParse"),
-        indoc! {r#"
-            METHOD [17] "tryParse" @5-5
-              PARAM_LIST
-                PARAM
-                  TYPE_UNION
-                    TYPE [7]
-                    ZVAL [1] "object"
-                  ZVAL "value"
-                  null
-                  null
-                  null
-                  null
-              null
-              STMT_LIST
-                TRY
-                  STMT_LIST
-                    RETURN
-                      STATIC_CALL
-                        ZVAL "App\\Ticket"
-                        ZVAL "parse"
-                        ARG_LIST
-                          VAR
-                            ZVAL "value"
-                  CATCH_LIST
-                    CATCH
-                      NAME_LIST
-                        ZVAL "ValueError"
-                      null
-                      STMT_LIST
-                        RETURN
-                          ZVAL null
-                  null
-              SHARP_TYPE_ARGS
-                ZVAL [256] "App\\Ticket"
-                ZVAL "Function<App.Ticket?(Map<string, Any?>|Object)>"
-              null
-        "#}
-    );
 
     let note = (
         "src/App/Note.sharp",
@@ -35753,14 +35668,14 @@ fn a_class_parses_as_a_struct_does() {
         .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_STATIC_CALL)
         .map(|(index, _)| letter.text(letter.nodes()[letter.child(index as u32, 0) as usize].text))
         .collect();
-    assert_eq!(parsed, ["App\\Letter"], "the engine builds each copy, so the one call is `tryParse`'s own");
+    assert_eq!(parsed, Vec::<String>::new(), "the engine builds each copy, so no `parse` calls another");
 
     let methods = |code: &str| {
         let clock = (
             "src/Lib/Clock.php",
             "<?php namespace Lib; class Clock { public static function parse(string $text): static { return new static(); } }",
         );
-        let lowered = Lowered::with(code, &[clock]);
+        let lowered = Lowered::with(code, &[&[clock][..], &common::PARSE_LIBRARY[..]].concat());
 
         lowered
             .nodes()
@@ -35787,19 +35702,19 @@ fn a_class_parses_as_a_struct_does() {
     );
     assert_eq!(
         methods(
-            "namespace App;\n\npublic class Money\n{\n    public Money(public int cents { get; }) { }\n\n    public static Money parse(string text) => new Money(1);\n}\n"
+            "namespace App;\n\npublic class Money\n{\n    public Money(public int cents { get; }) { }\n\n    public static Result<Money, ParseError> parse(Any? value) => Result.Ok(new Money(1));\n}\n"
         ),
         ["__construct", "parse"]
     );
     assert_eq!(
         methods(
-            "namespace App;\n\npublic struct Cents\n{\n    public Cents(public int value { get; }) { }\n\n    public static Cents parse(string text) => new Cents(1);\n}\n"
+            "namespace App;\n\npublic struct Cents\n{\n    public Cents(public int value { get; }) { }\n\n    public static Result<Cents, ParseError> parse(Any? value) => Result.Ok(new Cents(1));\n}\n"
         ),
         ["__construct", "parse", "op_Equality"]
     );
 }
 
-/// Spec sections 10 and 29: the `parse` and `tryParse` a class gets carry their whole type, as a declared method does,
+/// Spec sections 10 and 29: the `parse` a class gets carries its whole type, as a declared method does,
 /// with the effects of what `parse` runs: the main constructor, the `set` accessor of a property it writes, and the
 /// `parse` of a class a field holds, here a fake of an abstract effect class.
 #[test]
@@ -35830,22 +35745,18 @@ fn a_generated_parse_lists_the_effects_of_what_it_runs() {
     let result = |method: &str| order.render(order.child(order.method_named(method), 3));
 
     assert_eq!(
-        [result("parse"), result("tryParse")].join("\n"),
+        result("parse"),
         indoc! {r#"
             SHARP_TYPE_ARGS
-              ZVAL "App\\Order"
-              ZVAL "Function<App.Order(Map<string, Any?>|Object) uses App.Audit, App.Ledger, App.Lines>"
-
-            SHARP_TYPE_ARGS
-              ZVAL [256] "App\\Order"
-              ZVAL "Function<App.Order?(Map<string, Any?>|Object) uses App.Audit, App.Ledger, App.Lines>"
+              ZVAL "Sharp\\Result"
+              ZVAL "Function<Sharp.Result<App.Order, Sharp.ParseError>(Map<string, Any?>|Object) uses App.Audit, App.Ledger, App.Lines>"
         "#}
     );
 }
 
 /// Spec section 10: no input holds a function, so a struct with a function field, also in a list or a tuple, lowers
-/// with no `parse` or `tryParse`, which the checker refuses where they are called. A struct with a pure enum field keeps
-/// both, as the enum has a type text, and the checker refuses those calls too.
+/// with no `parse`, which the checker refuses where it is called. A struct with a pure enum field keeps it, as the enum
+/// has a type text, and the checker refuses that call too.
 #[test]
 fn a_struct_that_holds_a_function_has_no_parse() {
     let methods = |code: &str| {
@@ -35882,7 +35793,7 @@ fn a_struct_that_holds_a_function_has_no_parse() {
     );
     assert_eq!(
         methods("namespace App;\n\npublic struct Feeling\n{\n    public Feeling(public Mood mood { get; }) { }\n}\n"),
-        ["__construct", "op_Equality", "#fields", "parse", "tryParse", "#json"]
+        ["__construct", "op_Equality", "#fields", "parse", "#json"]
     );
 }
 
@@ -36115,7 +36026,7 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
                     null
                     null
                     null
-                    ZVAL "\n$x: int\n$y: float\n$total: App.Money?\n$made set private: int\n$sum: float\ntryParse: Function<App.Point?(Map<string, Any?>|Object)>\nmoved: Function<App.Point(int)>\nop_Equality: Function<bool(Any?, Any?)>\nparse: Function<App.Point(Map<string, Any?>|Object)>\n__construct: Function<Any?(int, float, App.Money?)>"
+                    ZVAL "\n$x: int\n$y: float\n$total: App.Money?\n$made set private: int\n$sum: float\nmoved: Function<App.Point(int)>\nop_Equality: Function<bool(Any?, Any?)>\nparse: Function<Sharp.Result<App.Point, Sharp.ParseError>(Map<string, Any?>|Object)>\n__construct: Function<Any?(int, float, App.Money?)>"
                 null
                 null
         "#}
@@ -37128,7 +37039,7 @@ fn a_backed_struct_with_no_fields_holds_the_value_its_constructor_takes() {
                     null
                     null
                     null
-                    ZVAL "\n$value: int\nop_Equality: Function<bool(Any?, Any?)>\n__construct: Function<void(int)>\nparse: Function<App.UserId(int)>"
+                    ZVAL "\n$value: int\nop_Equality: Function<bool(Any?, Any?)>\n__construct: Function<void(int)>\nparse: Function<Sharp.Result<App.UserId, Sharp.ParseError>(int)>"
                 null
                 null
         "##}
@@ -37148,14 +37059,15 @@ fn a_backed_struct_with_no_fields_holds_the_value_its_constructor_takes() {
               null
               STMT_LIST
                 RETURN
-                  NEW
-                    ZVAL "App\\UserId"
+                  CALL
+                    ZVAL "Sharp\\Internal\\parseHeld"
                     ARG_LIST
+                      ZVAL "App\\UserId"
                       VAR
                         ZVAL "value"
               SHARP_TYPE_ARGS
-                ZVAL "App\\UserId"
-                ZVAL ": App.UserId"
+                ZVAL "Sharp\\Result"
+                ZVAL ": Sharp.Result<App.UserId, Sharp.ParseError>"
               null
         "##}
     );
@@ -37197,15 +37109,15 @@ const METHOD_FAMILY: [(&str, &str); 2] = [
 
 /// Spec section 10: `Json.encode` writes a variant with its name under its family's key and leaves out a null
 /// `[Key(omitNull: true)]` field, and a backed struct as its `value`. A family's `parse` asks the engine for the
-/// variant its input names, and a call of an interface family's `parse` or `tryParse`, which holds no body, does so
-/// itself. A tuple field reads as each of its elements.
+/// variant its input names, and a call of an interface family's `parse`, which holds no body, does so itself, as a
+/// `Result`. A tuple field reads as each of its elements.
 #[test]
 fn a_family_reads_and_writes_a_variant_by_its_name() {
-    let library = [FAMILY_ATTRIBUTES.as_slice(), METHOD_FAMILY.as_slice()].concat();
+    let library = [FAMILY_ATTRIBUTES.as_slice(), METHOD_FAMILY.as_slice(), common::PARSE_LIBRARY.as_slice()].concat();
     let card = Lowered::with(METHOD_FAMILY[1].1, &[FAMILY_ATTRIBUTES.as_slice(), &METHOD_FAMILY[..1]].concat());
     let code = Lowered::with(
-        "namespace App;\n\npublic struct Code : string\n{\n    private Code(private string text { get; }) { }\n\n    public string value => this.text;\n\n    public static Code parse(string text) => new Code(text);\n}\n",
-        &[],
+        "namespace App;\n\npublic struct Code : string\n{\n    private Code(private string text { get; }) { }\n\n    public string value => this.text;\n\n    public static Result<Code, ParseError> parse(Any? value) => value is string text ? Result.Ok(new Code(text)) : Result.Err(new ParseError([\"\": \"expected string\"]));\n}\n",
+        &common::PARSE_LIBRARY,
     );
     let shape = Lowered::with(
         "namespace App;\n\nimport Sharp.Tag;\n\n[Tag(\"kind\")]\npublic abstract class Shape\n{\n}\n",
@@ -37223,7 +37135,7 @@ fn a_family_reads_and_writes_a_variant_by_its_name() {
         &[],
     );
     let ledger = Lowered::with(
-        "namespace App;\n\npublic class Ledger\n{\n    public static Method method(Map<string, Any?> input) => Method.parse(input);\n\n    public static Method? maybe(Map<string, Any?> input) => Method.tryParse(input);\n}\n",
+        "namespace App;\n\npublic class Ledger\n{\n    public static Result<Method, ParseError> method(Map<string, Any?> input) => Method.parse(input);\n}\n",
         &library,
     );
 
@@ -37320,8 +37232,8 @@ fn a_family_reads_and_writes_a_variant_by_its_name() {
                       VAR
                         ZVAL "value"
               SHARP_TYPE_ARGS
-                ZVAL "App\\Shape"
-                ZVAL "Function<App.Shape(Map<string, Any?>|Object)>"
+                ZVAL "Sharp\\Result"
+                ZVAL "Function<Sharp.Result<App.Shape, Sharp.ParseError>(Map<string, Any?>|Object)>"
               null
         "##}
     );
@@ -37439,115 +37351,21 @@ fn a_family_reads_and_writes_a_variant_by_its_name() {
                     VAR
                       ZVAL "input"
                 RETURN
-                  CALL
-                    ZVAL "Sharp\\Internal\\parseVariant"
-                    ARG_LIST
-                      ZVAL "App\\Method"
-                      CALL
-                        ZVAL "Sharp\\Internal\\arrayOf"
-                        ARG_LIST
-                          VAR
-                            ZVAL "input"
-                      ZVAL true
-              SHARP_TYPE_ARGS
-                ZVAL "App\\Method"
-                ZVAL "Function<App.Method(Map<string, Any?>)>"
-              null
-        "##}
-    );
-    assert_eq!(
-        ledger.declared("maybe"),
-        indoc! {r##"
-            METHOD [17] "maybe" @7-7
-              PARAM_LIST
-                PARAM
-                  TYPE_UNION
-                    ZVAL "Sharp\\Map"
-                    TYPE [7]
-                  ZVAL "input"
-                  null
-                  null
-                  null
-                  null
-                SHARP_TYPE_ARGS
-                  null
-                  ZVAL "Map<string, Any?>"
-              null
-              STMT_LIST
-                ASSIGN
-                  VAR
-                    ZVAL "input"
-                  CONDITIONAL
+                  VERIFY_TYPE_ARGS
                     CALL
-                      ZVAL "is_array"
+                      ZVAL "Sharp\\Internal\\parseVariant"
                       ARG_LIST
-                        VAR
-                          ZVAL "input"
-                    SHARP_TYPE_ARGS
-                      NEW
-                        ZVAL "Sharp\\Map"
-                        ARG_LIST
-                          CALL
-                            ZVAL "array_merge"
-                            ARG_LIST
-                              ARRAY [3]
-                              UNPACK
-                                CALL
-                                  ZVAL "array_map"
-                                  ARG_LIST
-                                    ARROW_FUNC "" @7-7
-                                      PARAM_LIST
-                                        PARAM
-                                          null
-                                          ZVAL "key#1"
-                                          null
-                                          null
-                                          null
-                                          null
-                                        PARAM
-                                          null
-                                          ZVAL "value#2"
-                                          null
-                                          null
-                                          null
-                                          null
-                                      null
-                                      ARRAY [3]
-                                        ARRAY_ELEM
-                                          CAST [6]
-                                            VAR
-                                              ZVAL "key#1"
-                                          null
-                                        ARRAY_ELEM
-                                          VAR
-                                            ZVAL "value#2"
-                                          null
-                                      null
-                                      null
-                                    CALL
-                                      ZVAL "array_keys"
-                                      ARG_LIST
-                                        VAR
-                                          ZVAL "input"
-                                    VAR
-                                      ZVAL "input"
-                      ZVAL "string, Any?"
-                    VAR
-                      ZVAL "input"
-                RETURN
-                  CALL
-                    ZVAL "Sharp\\Internal\\parseVariant"
-                    ARG_LIST
-                      ZVAL "App\\Method"
-                      CALL
-                        ZVAL "Sharp\\Internal\\arrayOf"
-                        ARG_LIST
-                          VAR
-                            ZVAL "input"
-                      ZVAL false
+                        ZVAL "App\\Method"
+                        CALL
+                          ZVAL "Sharp\\Internal\\arrayOf"
+                          ARG_LIST
+                            VAR
+                              ZVAL "input"
+                    ZVAL "Sharp.Result<App.Method, Sharp.ParseError>"
+                    ZVAL "App\\Method::parse()"
               SHARP_TYPE_ARGS
-                ZVAL [256] "App\\Method"
-                ZVAL "Function<App.Method?(Map<string, Any?>)>"
+                ZVAL "Sharp\\Result"
+                ZVAL "Function<Sharp.Result<App.Method, Sharp.ParseError>(Map<string, Any?>)>"
               null
         "##}
     );

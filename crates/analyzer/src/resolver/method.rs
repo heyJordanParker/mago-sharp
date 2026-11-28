@@ -2230,17 +2230,36 @@ pub(crate) fn report_non_existent_method<A>(
         return;
     }
 
+    // Spec sections 24 and 31: `parse` gives a `Result`, and the `tryParse` beside it is gone, so a call of one names the
+    // read that gives the value or null.
+    let replacement = match method_name.as_bytes() {
+        b"tryParse" => Some("parse"),
+        b"tryParseLocal" => Some("parseLocal"),
+        _ => None,
+    };
+    let parsed = replacement.filter(|_| context.dialect.is_sharp()).and_then(|replacement| {
+        let parse = context.codebase.get_method(classname, word(replacement))?;
+        let returned = parse.return_type_metadata.as_ref()?;
+        let [value, _] = crate::expression::result_type_arguments(context.codebase, &returned.type_union)?;
+
+        Some((replacement, crate::utils::names::display_sharp_type(context, &value)))
+    });
+
     let method_name = display_method_name(context, classname, method_name);
     let classname = display_class_like_name(context, classname);
     let issue = if context.dialect.is_sharp() {
         let method = display_sharp_member(classname, method_name);
+        let help = match parsed {
+            Some((replacement, value)) => format!("`{classname}.{replacement}(…).ok()` gives `{value}?`."),
+            None => format!("Ensure the method `{method}` is defined."),
+        };
 
         Issue::error(format!("Method `{method}` does not exist."))
             .with_annotation(Annotation::primary(selector_span).with_message("This method selection is invalid"))
             .with_annotation(
                 Annotation::secondary(obj_span).with_message(format!("This expression has type `{classname}`")),
             )
-            .with_help(format!("Ensure the method `{method}` is defined."))
+            .with_help(help)
     } else {
         Issue::error(format!("Method `{method_name}` does not exist on type `{classname}`."))
             .with_annotation(Annotation::primary(selector_span).with_message("This method selection is invalid"))

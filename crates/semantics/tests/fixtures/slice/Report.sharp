@@ -204,7 +204,7 @@ public class Report
 
     private float parse(string quantity, string? price)
     {
-        return Int.parse(quantity) * (Float.tryParse(price) ?? Float.parse("0.5")) + (Int.tryParse(price) ?? 0);
+        return Int.parse(quantity).unwrap() * (Float.parse(price).ok() ?? Float.parse("0.5").unwrap()) + (Int.parse(price).ok() ?? 0);
     }
 
     public int attempt(int given)

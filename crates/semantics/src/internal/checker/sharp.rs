@@ -389,7 +389,7 @@ const ANY: &[u8] = b"Any";
 ///   `exit()`, which spec section 8 keeps as PHP 8.4's built-in function, and `typeof(X)` on a class written by its
 ///   short name, without a member read or called on it. `new` and each method call, `super.` and
 ///   `Self.` calls included, take type arguments, as in `new PaginatedList<Order>(rows)` and
-///   `Json.decode<WebhookPayload>(body)`, each a method body's type but `void`. `new Self(...)` in an enum is an error,
+///   `Json.parse<WebhookPayload>(body)`, each a method body's type but `void`. `new Self(...)` in an enum is an error,
 ///   because an enum has no constructor. `Self.name` reads and writes a constant, an enum case or a static member of
 ///   the class the code is called on, as `Class.name` does, except in a constant expression, and `super` is only the
 ///   object of a method call, spec section 22.
@@ -436,7 +436,7 @@ const ANY: &[u8] = b"Any";
 ///   `(Int)` as the class `Int` in parentheses, as in `typeof(Int)`.
 /// - A bare `Int`, `Float`, `Bool`, `Position`, `Environment` or `List` names the class `Sharp\<Name>` of the
 ///   standard library wherever a class is named, unless the file imports or declares a class-like of that name, spec
-///   section 23. So `Int.parse(text)`, `Bool.tryParse(value)`, `Position.current()`, `new Environment()` and
+///   section 23. So `Int.parse(text)`, `Bool.parse(value)`, `Position.current()`, `new Environment()` and
 ///   `List.wrap(value)` call it. PHP reserves `Int`, `Float`, `Bool` and
 ///   `List`, so no file declares or imports a class of those, except the standard library's own `Sharp.Int`,
 ///   `Sharp.Float` and `Sharp.Bool`: a file whose namespace is exactly `Sharp` declares them, as the engine allows,
@@ -6497,7 +6497,7 @@ fn supported(place: Place) -> &'static str {
         | Place::SuperCall
         | Place::SelfCall
         | Place::RefusedPart(_) => {
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for` and `for … of`, each with an optional name as in `orders: for (…)`, `break` and `continue` with an optional loop name as in `break orders;`, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)`, with a `required` constructor `new Self(...)`, with a `required` named constructor `new Self.name(...)` and `new TItem.name(...)` of a type parameter, and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)`, `Self.method(...)` and `Self.name`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `try` before a `Result`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`."
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for` and `for … of`, each with an optional name as in `orders: for (…)`, `break` and `continue` with an optional loop name as in `break orders;`, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.parse<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)`, with a `required` constructor `new Self(...)`, with a `required` named constructor `new Self.name(...)` and `new TItem.name(...)` of a type parameter, and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)`, `Self.method(...)` and `Self.name`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `try` before a `Result`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`."
         }
         Place::Attribute => {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."

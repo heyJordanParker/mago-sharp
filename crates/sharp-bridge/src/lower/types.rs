@@ -2299,24 +2299,19 @@ impl<'analysis> Types<'analysis> {
         Some(self.codebase.get_function(*function).map_or(*function, |metadata| metadata.original_name))
     }
 
-    /// The interface the call `call` runs the `parse` or `tryParse` of, a family's, spec section 10, with whether it is
-    /// `parse`, which throws. An interface holds no static method's body, so the engine builds its variant. None for a
-    /// call of any other method.
+    /// The interface the call `call` runs the `parse` of, a family's, spec section 10. An interface holds no static
+    /// method's body, so the engine builds its variant. None for a call of any other method.
     #[must_use]
-    pub fn interface_family_parse(&self, call: &Expression) -> Option<(Word, bool)> {
+    pub fn interface_family_parse(&self, call: &Expression) -> Option<Word> {
         let Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }) =
             self.artifacts.get_callees(call).next()
         else {
             return None;
         };
         let family = self.codebase.get_class_like(*class)?;
-        let throws = match method.as_bytes() {
-            b"parse" => true,
-            b"tryParse" => false,
-            _ => return None,
-        };
 
-        (family.kind.is_interface() && family.tag_key().is_some()).then_some((family.original_name, throws))
+        (method.as_bytes() == b"parse" && family.kind.is_interface() && family.tag_key().is_some())
+            .then_some(family.original_name)
     }
 
     /// The Lean function the method the call `call` runs is marked [`LEAN_FUNCTION`] with, as `max` for `Math.max(…)`.

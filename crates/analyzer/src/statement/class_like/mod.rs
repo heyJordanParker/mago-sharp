@@ -596,8 +596,8 @@ fn check_unused_template_parameters<'ctx, A>(
             else {
                 continue;
             };
-            // The `parse`, `tryParse` and `op_Equality` the codex writes span the whole type and give its own type
-            // parameters back, which uses none of them.
+            // The `parse` and `op_Equality` the codex writes span the whole type and give its own type parameters
+            // back, which uses none of them.
             if function_like.span == class_like_metadata.span {
                 continue;
             }
@@ -1424,6 +1424,7 @@ where
     if context.dialect.is_sharp() && has_complete_hierarchy && class_like_metadata.kind.is_class() {
         method::check_super_call(context, class_like_metadata, members, name_span.unwrap_or(declaration_span));
         method::check_test_method_parameters(context, class_like_metadata, members);
+        method::check_own_parse(context, class_like_metadata, members);
     }
 
     if context.dialect.is_sharp() {

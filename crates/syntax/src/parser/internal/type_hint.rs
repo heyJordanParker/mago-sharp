@@ -536,7 +536,7 @@ where
         }
     }
 
-    /// Parses the PHP# type arguments of a method call, as in `Json.decode<WebhookPayload>(body)`. As C# decides, a
+    /// Parses the PHP# type arguments of a method call, as in `Json.parse<WebhookPayload>(body)`. As C# decides, a
     /// `<` starts them only when every token up to the `>` that closes it can be part of a type and `(` follows that
     /// `>`, so `this.count < limit` stays a comparison.
     pub(crate) fn parse_optional_call_type_argument_list(
