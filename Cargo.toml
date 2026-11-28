@@ -352,7 +352,11 @@ mago-reporting = { workspace = true, features = ["default"] }
 mago-syntax = { workspace = true, features = ["serde"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_env = "musl", target_env = "gnu"))'.dependencies]
-mimalloc = { version = "0.1.47" }
+# mimalloc 3.3.2, the v3 that libmimalloc-sys 0.1.49 builds, leaves a thread's heap NULL until its first malloc on macOS,
+# and a realloc that keeps its block reads that heap unchecked, so a thread whose first allocation is such a realloc
+# crashed with SIGSEGV, as rustls's read thread did during Lean's download (#1088). mimalloc 2 hands such a thread
+# its empty heap. v3.4.5 guards the read, so this can return to v3 once a libmimalloc-sys release builds it.
+mimalloc = { version = "0.1.47", features = ["v2"] }
 
 # TODO(azjezz): replace with https://dev-doc.rust-lang.org/beta/unstable-book/language-features/unix-sigpipe.html once stable.
 [target.'cfg(unix)'.dependencies]
