@@ -1198,28 +1198,29 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// The `parse` and `tryParse` of the struct or PHP# class being lowered, whose `members` are declared and whose name
-    /// is at `span`, where the codex gives it them, spec section 10, with the `#fields` the engine reads a struct or a
-    /// class by. No input holds a function, so a type with a function field, also inside a collection, has none of
-    /// them, and the checker refuses its call. Each carries its whole type, as a declared method does, with the effects
-    /// the analysis records for it, so `is` and `methods()` read it.
+    /// The `parse` of the struct or PHP# class being lowered, whose `members` are declared and whose name is at `span`,
+    /// where the codex gives it one, spec section 10, with the `#fields` the engine reads a struct or a class by. No
+    /// input holds a function, so a type with a function field, also inside a collection, has none, and the checker
+    /// refuses its call. It carries its whole type, `Result<Self, ParseError>`, as a declared method does, with the
+    /// effects the analysis records for it, so `is` and `methods()` read it.
     fn parse_methods(&mut self, members: &Sequence<ClassLikeMember>, span: Span) -> Vec<u32> {
         if !self.types.parses(word(self.class)) {
             return Vec::new();
         }
         if self.types.is_family(word(self.class)) {
-            return vec![self.family_parse(span), self.try_parse(span)];
+            return vec![self.family_parse(span)];
         }
         let Some(fields) = self.parse_fields(members, span) else {
             return Vec::new();
         };
 
-        vec![fields, self.parse(span), self.try_parse(span)]
+        vec![fields, self.parse(span)]
     }
 
     /// The `parse` of the family being lowered, an abstract class or an enum, spec section 10, which builds the variant
-    /// whose name its input holds under the family's key, as the engine's tag table gives it:
-    /// `public static function parse(array|object $value): \App\Step { return \Sharp\Internal\parseVariant('App\Step', $value); }`.
+    /// whose name its input holds under the family's key, as the engine's tag table gives it, as a
+    /// `Result<Self, ParseError>`:
+    /// `public static function parse(array|object $value): \Sharp\Result { return \Sharp\Internal\parseVariant('App\Step', $value); }`.
     /// An interface holds no static method's body, so a call of an interface's `parse` calls the engine directly.
     fn family_parse(&mut self, span: Span) -> u32 {
         self.enter(b"parse");
@@ -1230,7 +1231,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let parsed = self.node(SHARP_AST_RETURN, 0, line, &[parsed]);
         let parameters = self.parse_parameters(span);
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed]);
-        let return_type = self.string(ZEND_NAME_FQ, line, self.class);
+        let return_type = self.string(ZEND_NAME_FQ, line, b"Sharp\\Result");
         let return_type =
             self.function_type(return_type, self.types.method_type(word(self.class), word("parse")), 0, line);
 
@@ -1245,12 +1246,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// What a backed struct with no fields holds, spec section 10, at its name's `span`: the property its value is
-    /// stored in, which [`Self::class_members`]'s constructor sets, and the `parse` that runs that constructor. None for
-    /// any other class.
+    /// stored in, which [`Self::class_members`]'s constructor sets, and the `parse` that runs that constructor in the
+    /// engine and gives its `Result<Self, ParseError>`, whose `Err` holds the `ValueError` the constructor threw. None
+    /// for any other class.
     ///
     /// ```php
     /// public readonly string $value;
-    /// public static function parse(string $value): \App\Email { return new \App\Email($value); }
+    /// public static function parse(string $value): \Sharp\Result { return \Sharp\Internal\parseHeld('App\Email', $value); }
     /// ```
     fn held_value(&mut self, span: Span) -> Vec<u32> {
         let Some(backing) = self.types.held_value(word(self.class)) else {
@@ -1265,17 +1267,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC | ZEND_ACC_READONLY, line, &[hint, declaration, NULL]);
 
         self.enter(b"parse");
-        let class = self.string(ZEND_NAME_FQ, line, self.class);
+        let class = self.string(0, line, self.class);
         let value = self.variable(span, b"value");
-        let argument = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
-        let built = self.node(SHARP_AST_NEW, 0, line, &[class, argument]);
+        let built = self.global_call(line, b"Sharp\\Internal\\parseHeld", &[class, value]);
         let built = self.node(SHARP_AST_RETURN, 0, line, &[built]);
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[built]);
         let hint = self.string(ZEND_NAME_NOT_FQ, line, backing);
         let name = self.string(0, line, b"value");
         let parameter = self.node(SHARP_AST_PARAM, 0, line, &[hint, name, NULL, NULL, NULL, NULL]);
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
-        let return_type = self.string(ZEND_NAME_FQ, line, self.class);
+        let return_type = self.string(ZEND_NAME_FQ, line, b"Sharp\\Result");
         let return_type =
             self.function_type(return_type, self.types.method_type(word(self.class), word("parse")), 0, line);
         let parse = self.declaration(
@@ -1631,10 +1632,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A struct's or a PHP# class's `parse`, spec section 10, as
-    /// `public static function parse(array|object $value): \App\Point`, spanning the type's name, at `span`: the
+    /// `public static function parse(array|object $value): \Sharp\Result`, spanning the type's name, at `span`: the
     /// engine's reader builds the type from the input, a `Map`, the PHP array plain PHP passes for one, or an object's
-    /// public properties, by the rows of its `#fields`, and throws one `\Sharp\InvalidFields` that lists every bad
-    /// field. A generic type's reads its own type arguments, which it takes as a static method does, spec section 11:
+    /// public properties, by the rows of its `#fields`, and gives it as an `Ok`, or an `Err` whose `\Sharp\ParseError`
+    /// lists every bad field. A generic type's reads its own type arguments, which it takes as a static method does, spec section 11:
     ///
     /// ```php
     /// return \Sharp\Internal\parseAs('App\Point', $value, false);
@@ -1661,7 +1662,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let parameters = self.parse_parameters(span);
         self.static_type_parameters = None;
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed]);
-        let return_type = self.string(ZEND_NAME_FQ, line, self.class);
+        let return_type = self.string(ZEND_NAME_FQ, line, b"Sharp\\Result");
         let return_type =
             self.function_type(return_type, self.types.method_type(word(self.class), word("parse")), 0, line);
 
@@ -1675,57 +1676,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// A struct's or a PHP# class's `tryParse`, spec section 10: its `parse`, giving null wherever `parse` throws, a
-    /// `\ValueError` its main constructor throws included, of which `\Sharp\InvalidFields` is one.
-    ///
-    /// ```php
-    /// public static function tryParse(array|object $value): ?\App\Point
-    /// {
-    ///     try { return \App\Point::parse($value); } catch (\ValueError) { return null; }
-    /// }
-    /// ```
-    fn try_parse(&mut self, span: Span) -> u32 {
-        self.enter(b"tryParse");
-        self.static_type_parameters = self.types.static_type_parameters(word(self.class));
-        let line = self.line(span);
-        let class = self.string(ZEND_NAME_FQ, line, self.class);
-        let method = self.string(0, line, b"parse");
-        let mut arguments = vec![self.variable(span, b"value")];
-        if let Some(count) = self.static_type_parameters {
-            arguments.push(self.type_arguments_argument(line, &type_parameters_text(count), None));
-        }
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
-        let parsed = self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments]);
-        let parsed = self.node(SHARP_AST_RETURN, 0, line, &[parsed]);
-        let parsed = self.node(SHARP_AST_STMT_LIST, 0, line, &[parsed]);
-        let exception = self.string(ZEND_NAME_FQ, line, b"ValueError");
-        let exception = self.node(SHARP_AST_NAME_LIST, 0, line, &[exception]);
-        let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
-        let null = self.node(SHARP_AST_RETURN, 0, line, &[null]);
-        let null = self.node(SHARP_AST_STMT_LIST, 0, line, &[null]);
-        let catch = self.node(SHARP_AST_CATCH, 0, line, &[exception, NULL, null]);
-        let catches = self.node(SHARP_AST_CATCH_LIST, 0, line, &[catch]);
-        let r#try = self.node(SHARP_AST_TRY, 0, line, &[parsed, catches, NULL]);
-
-        let parameters = self.parse_parameters(span);
-        self.static_type_parameters = None;
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[r#try]);
-        let return_type = self.string(ZEND_NAME_FQ, line, self.class);
-        self.nodes[return_type as usize].attr |= ZEND_TYPE_NULLABLE;
-        let return_type =
-            self.function_type(return_type, self.types.method_type(word(self.class), word("tryParse")), 0, line);
-
-        self.declaration(
-            SHARP_AST_METHOD,
-            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC,
-            span,
-            span,
-            b"tryParse",
-            &[parameters, NULL, body, return_type, NULL],
-        )
-    }
-
-    /// `(array|object $value)`, what `parse` and `tryParse` take: a `Map<string, Any?>` or an object. A generic type's
+    /// `(array|object $value)`, what `parse` takes: a `Map<string, Any?>` or an object. A generic type's
     /// ends with the bounds of its type parameters, as any static method of it does.
     fn parse_parameters(&mut self, span: Span) -> u32 {
         let line = self.line(span);
@@ -2849,7 +2800,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The `#invariants` of the class of the case `case` of the machine `machine`, spec section 20.2, which the engine
-    /// calls on each case it reads, as `Json.decode` and `parse` do: each law of the machine whose one parameter is the
+    /// calls on each case it reads, as `Json.parse<T>` and `parse` do: each law of the machine whose one parameter is the
     /// case, an invariant, holds of it, or the method throws a `ValueError` that names the invariant:
     /// `public function '#invariants'() { $paid = $this; if (!($paid->cents > 0)) { throw new \ValueError('OrderStatus.Paid breaks paidIsPositive.'); } }`.
     /// A law with a `when` condition holds where the condition does. None for a case no invariant names.
@@ -9229,9 +9180,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if let Expression::SuperOf(_) = call.object {
             return self.super_of_call(expression, call);
         }
-        // Spec section 10: an interface holds no static method's body, so a family's `parse` and `tryParse` of an
-        // interface run in the engine, as `\Sharp\Internal\parseVariant('App\PaymentMethod', $value, false)`.
-        if let Some((family, throws)) = self.types.interface_family_parse(expression) {
+        // Spec section 10: an interface holds no static method's body, so a family's `parse` of an interface runs in
+        // the engine, as `\Sharp\Internal\parseVariant('App\PaymentMethod', $value)`.
+        if let Some(family) = self.types.interface_family_parse(expression) {
             let line = self.line(call);
             let (parameters, callee) = (self.types.call_parameters(expression), self.types.sharp_callee(expression));
 
@@ -9240,14 +9191,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let count = this.nodes[arguments as usize].child_count as usize;
                 let value = this.children[first..first + count].to_vec();
                 let family = this.string(0, line, family.as_bytes());
-                let throws =
-                    this.zval(line, if throws { sharp_value::SHARP_TRUE } else { sharp_value::SHARP_FALSE }, |_| {});
 
-                this.global_call(
-                    line,
-                    b"Sharp\\Internal\\parseVariant",
-                    &[[family].as_slice(), &value, &[throws]].concat(),
-                )
+                this.global_call(line, b"Sharp\\Internal\\parseVariant", &[[family].as_slice(), &value].concat())
             });
         }
         if let Some(function) = self.types.namespace_function(expression) {

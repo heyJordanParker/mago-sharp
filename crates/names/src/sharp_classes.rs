@@ -29,7 +29,6 @@ pub(crate) const SHARP_CLASSES: [&str; 49] = [
     "Sharp\\Float",
     "Sharp\\ImmediateDispatcher",
     "Sharp\\Int",
-    "Sharp\\InvalidFields",
     "Sharp\\IterableMembers",
     "Sharp\\Key",
     "Sharp\\List",
@@ -40,6 +39,7 @@ pub(crate) const SHARP_CLASSES: [&str; 49] = [
     "Sharp\\Math",
     "Sharp\\Method",
     "Sharp\\Parameter",
+    "Sharp\\ParseError",
     "Sharp\\Position",
     "Sharp\\Property",
     "Sharp\\Random",
@@ -62,7 +62,7 @@ pub(crate) const SHARP_CLASSES: [&str; 49] = [
 /// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute`, the interfaces a PHP# class
 /// implements for a plain PHP library, the classes a plain PHP library hands PHP# code, and the DOM that reads and
 /// writes markup. Sorted.
-pub const STANDARD_ROOT_CLASSES: [&str; 71] = [
+pub const STANDARD_ROOT_CLASSES: [&str; 70] = [
     "ArgumentCountError",
     "ArithmeticError",
     "AssertionError",
@@ -115,7 +115,6 @@ pub const STANDARD_ROOT_CLASSES: [&str; 71] = [
     "OutOfRangeException",
     "OverflowException",
     "PDOException",
-    "ParseError",
     "PharException",
     "RangeException",
     "ReflectionException",

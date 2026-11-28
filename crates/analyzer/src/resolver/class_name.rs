@@ -196,6 +196,55 @@ impl ResolvedClassname {
         )
     }
 
+    /// Whether this is the class value of an intersection, as a `Class<Owner & Row>` holds, spec section 24.
+    fn joins_types(&self) -> bool {
+        matches!(self.origin, ResolutionOrigin::SpecificClassLikeString(TClassLikeString::OfType { .. }))
+            && !self.intersections.is_empty()
+    }
+
+    /// The class `new` of this name creates, spec section 25: the class it names, or, from the class value of an
+    /// interface joined with a class, as a `Class<Owner & Row>` holds, that class, `Row`, since an interface declares
+    /// no constructor, spec section 9.
+    pub fn created_class(&self, codebase: &CodebaseMetadata) -> Option<Word> {
+        let named = self.fqcn?;
+        if !self.joins_types() || !codebase.get_class_like(named).is_some_and(|metadata| metadata.kind.is_interface()) {
+            return Some(named);
+        }
+
+        let class = self
+            .intersections
+            .iter()
+            .filter_map(|part| part.fqcn)
+            .find(|part| codebase.get_class_like(*part).is_some_and(|metadata| metadata.kind.is_class()));
+
+        Some(class.unwrap_or(named))
+    }
+
+    /// The object `new` of this name creates, where `created` is the object of [`Self::created_class`] with its type
+    /// arguments: from the class value of an intersection, an object of every type it joins, in the order it writes
+    /// them, spec section 24.
+    pub fn created_object(&self, created: TAtomic, codebase: &CodebaseMetadata) -> TAtomic {
+        let (Some(named), true) = (self.fqcn, self.joins_types()) else {
+            return created;
+        };
+        let class = self.created_class(codebase);
+
+        let mut object = if Some(named) == class {
+            created.clone()
+        } else {
+            TAtomic::Object(TObject::Named(TNamedObject::new(named)))
+        };
+        for part in &self.intersections {
+            object.add_intersection_type(if part.fqcn == class {
+                created.clone()
+            } else {
+                part.get_object_type(codebase)
+            });
+        }
+
+        object
+    }
+
     #[inline]
     pub fn get_object_type(&self, codebase: &CodebaseMetadata) -> TAtomic {
         if let ResolutionOrigin::SpecificClassLikeString(class_string) = &self.origin {

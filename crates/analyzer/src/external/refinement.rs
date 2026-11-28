@@ -54,7 +54,7 @@ const DOCBLOCK_TYPE_MISMATCH: &str = "docblock-type-mismatch";
 const UNRESOLVED_BODY_RETURN: &str = "unsupported-type";
 
 /// One declaration's refinement, located in the file that declares it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeclarationRefinement {
     file_id: FileId,
     /// The plugin of the host that refines the declaration.
@@ -63,7 +63,7 @@ pub struct DeclarationRefinement {
     issues: Vec<Issue>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Declaration {
     /// A named class-like by its name as written, which `apply` keys, or an anonymous class by the
     /// synthetic name its declaration offset gives it.
@@ -81,13 +81,13 @@ enum Declaration {
     FunctionLike { key: (Word, Word), signature: Box<SignatureRefinement> },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct RefinedType {
     type_union: TUnion,
     span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct RefinedTemplate {
     name: Word,
     bound: RefinedType,
@@ -95,14 +95,14 @@ struct RefinedTemplate {
     variance: Variance,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct InheritedApplication {
     ancestor: Word,
     span: Span,
     arguments: Vec<TUnion>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct SignatureRefinement {
     templates: Vec<RefinedTemplate>,
     parameters: Vec<(Word, RefinedType)>,

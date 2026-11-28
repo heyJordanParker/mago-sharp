@@ -27,8 +27,11 @@ pub const SET_MEMBERS: (&str, &str) = library_file!("Sharp/SetMembers.sharp");
 /// The lazy operations of an `Iterable`, as `LIST_MEMBERS` are a `List`'s members.
 pub const ITERABLE_MEMBERS: (&str, &str) = library_file!("Sharp/IterableMembers.sharp");
 
-pub const EFFECT_CLASSES: [(&str, &str); 65] = [
+pub const EFFECT_CLASSES: [(&str, &str); 68] = [
     LIST_MEMBERS,
+    library_file!("Sharp/Error.sharp"),
+    library_file!("Sharp/Result.sharp"),
+    library_file!("Sharp/ParseError.sharp"),
     MAP_MEMBERS,
     SET_MEMBERS,
     ITERABLE_MEMBERS,

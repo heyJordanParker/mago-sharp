@@ -480,11 +480,11 @@ fn analyze_fix_refuses_a_fix_that_would_edit_a_sharp_file() {
 const TYPE_CLASSES: [(&str, &str); 2] = [
     (
         "Float",
-        "namespace Sharp;\n\nimport ValueError;\n\npublic static class Float\n{\n    public static float parse(Any? value)\n    {\n        const number = Float.tryParse(value);\n        if (number is float) {\n            return number;\n        }\n        throw new ValueError(\"Sharp\\\\Float::parse(): Argument #1 ($value) must hold a float\");\n    }\n\n    public static float? tryParse(Any? value)\n    {\n        const number = (value is string text) && global.is_numeric(text) ? global.floatval(text) : null;\n        return (number is float) && global.is_finite(number) ? number : null;\n    }\n}\n",
+        "namespace Sharp;\n\npublic static class Float\n{\n    public static Result<float, ParseError> parse(string text)\n    {\n        const number = global.is_numeric(text) ? global.floatval(text) : null;\n        return (number is float) && global.is_finite(number) ? Result.Ok(number) : Result.Err(new ParseError([\"\": `Float.parse: \"${text}\" is not a float`]));\n    }\n}\n",
     ),
     (
         "Bool",
-        "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => global.filter_var(value, global.FILTER_VALIDATE_BOOLEAN, global.FILTER_NULL_ON_FAILURE);\n}\n",
+        "namespace Sharp;\n\npublic static class Bool\n{\n    public static Result<bool, ParseError> parse(Any? value)\n        => global.filter_var(value, global.FILTER_VALIDATE_BOOLEAN, global.FILTER_NULL_ON_FAILURE) is bool read\n            ? Result.Ok(read)\n            : Result.Err(new ParseError([\"\": \"Bool.parse: the value is not a bool\"]));\n}\n",
     ),
 ];
 
@@ -764,7 +764,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Compiled 71 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
+    assert!(printed.contains("Compiled 74 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
     assert!(root.join(".sharp/current/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
     assert!(root.join(".sharp/current/library/Sharp/System/Environment.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/current/example/App/Title.sharpc")).unwrap();
@@ -836,7 +836,7 @@ fn analyze_reports_an_extern_method_in_a_project_file() {
 #[test]
 fn analyze_types_the_parse_calls_of_the_standard_library_from_the_vendored_package() {
     let directory = library_workspace(
-        "namespace App;\n\npublic class Page\n{\n    public int count() => Int.parse(\"1\");\n\n    public float? price() => Float.tryParse(\"x\");\n\n    public bool? flag() => Bool.tryParse(\"yes\");\n}\n",
+        "namespace App;\n\npublic class Page\n{\n    public int count() => Int.parse(\"1\").unwrap();\n\n    public float? price() => Float.parse(\"x\").ok();\n\n    public bool? flag() => Bool.parse(\"yes\").ok();\n}\n",
     );
 
     let output = run(directory.path(), "analyze", &[]);
@@ -848,14 +848,12 @@ fn analyze_types_the_parse_calls_of_the_standard_library_from_the_vendored_packa
 
     assert_eq!(
         page_errors(
-            "namespace App;\n\npublic class Page\n{\n    public string count() => Int.parse(\"1\");\n\n    public string price() => Float.tryParse(\"x\");\n\n    public string flag() => Bool.tryParse(\"yes\");\n}\n"
+            "namespace App;\n\npublic class Page\n{\n    public string count() => Int.parse(\"1\");\n\n    public string price() => Float.parse(\"x\");\n\n    public string flag() => Bool.parse(\"yes\");\n}\n"
         ),
         [
-            "src/App/Page.sharp:5:30:error - invalid-return-statement: Invalid return type for method `Page.count`: expected `string`, but found `int`.",
-            "src/App/Page.sharp:7:30:error - nullable-return-statement: Method `Page.price` is declared to return `string` but possibly returns a nullable value (inferred as `float?`).",
-            "src/App/Page.sharp:7:30:error - invalid-return-statement: Invalid return type for method `Page.price`: expected `string`, but found `float?`.",
-            "src/App/Page.sharp:9:29:error - nullable-return-statement: Method `Page.flag` is declared to return `string` but possibly returns a nullable value (inferred as `bool?`).",
-            "src/App/Page.sharp:9:29:error - invalid-return-statement: Invalid return type for method `Page.flag`: expected `string`, but found `bool?`.",
+            "src/App/Page.sharp:5:30:error - invalid-return-statement: Invalid return type for method `Page.count`: expected `string`, but found `Result<int, ParseError>`.",
+            "src/App/Page.sharp:7:30:error - invalid-return-statement: Invalid return type for method `Page.price`: expected `string`, but found `Result<float, ParseError>`.",
+            "src/App/Page.sharp:9:29:error - invalid-return-statement: Invalid return type for method `Page.flag`: expected `string`, but found `Result<bool, ParseError>`.",
         ]
     );
 }
@@ -1001,7 +999,7 @@ fn a_member_read_through_data_is_no_string_fixed_at_compile_time() {
 #[test]
 fn analyze_reports_a_type_class_of_the_standard_library_in_a_project_file() {
     let directory = library_workspace(
-        "namespace App;\n\npublic class Page\n{\n    public bool? yes() => Bool.tryParse(\"yes\");\n}\n",
+        "namespace App;\n\npublic class Page\n{\n    public bool? yes() => Bool.parse(\"yes\").ok();\n}\n",
     );
     write(
         directory.path(),

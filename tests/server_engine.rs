@@ -350,8 +350,8 @@ fn a_hook_reads_a_method_that_takes_a_function_with_every_flag() {
     assert_eq!(reads(&issues, "read"), ["Run 1: `App\\Calls::apply` is Public. `$f` takes on effects."]);
 }
 
-/// A hook tells a method the compiler generates from one the source writes: a `[Tag]` variant's `parse` and
-/// `tryParse` are generated, and a static method the enum writes is not.
+/// A hook tells a method the compiler generates from one the source writes: a `[Tag]` variant's `parse` is generated,
+/// and a static method the enum writes is not.
 #[test]
 fn a_hook_reads_whether_the_compiler_generated_a_method() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -364,13 +364,12 @@ fn a_hook_reads_whether_the_compiler_generated_a_method() {
         repository,
         database(&[
             ("src/parse.php", "<?php\n// reads: App\\Outcome\\Paid::parse\n"),
-            ("src/try.php", "<?php\n// reads: App\\Outcome\\Paid::tryParse\n"),
             ("src/settled.php", "<?php\n// reads: App\\Outcome::settled\n"),
             ("src/Outcome.sharp", outcome),
         ]),
     );
     let issues = server.analyze().expect("the analysis reads the methods").issues;
-    // The worker reads the three files in any order, so each read is compared without its run.
+    // The worker reads the two files in any order, so each read is compared without its run.
     let mut read: Vec<String> = reads(&issues, "read")
         .iter()
         .map(|message| message.split_once(": ").map_or_else(|| message.clone(), |(_, read)| read.to_owned()))
@@ -378,11 +377,7 @@ fn a_hook_reads_whether_the_compiler_generated_a_method() {
     read.sort();
     assert_eq!(
         read,
-        [
-            "`App\\Outcome::settled` is Public.",
-            "`App\\Outcome\\Paid::parse` is Public. It is generated.",
-            "`App\\Outcome\\Paid::tryParse` is Public. It is generated.",
-        ]
+        ["`App\\Outcome::settled` is Public.", "`App\\Outcome\\Paid::parse` is Public. It is generated.",]
     );
 }
 

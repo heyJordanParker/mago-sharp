@@ -839,6 +839,29 @@ fn a_compile_error_in_a_file_no_host_reaches_reports_that_file_and_every_host_ru
     assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\n");
 }
 
+/// A rule a host asks as it loads, whose lowering fails on its errors, is refused in the hosts' folder before the hosts
+/// start, so the first compile with an empty cache names the rule's errors, as every later compile does, and never
+/// says the rule isn't compiled yet.
+#[test]
+fn a_host_that_loads_a_refused_rule_gets_its_errors_on_the_first_compile_with_an_empty_cache() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the refused rule host test") {
+        return;
+    }
+    let directory = project_with_a_host_asking_a_rule();
+    let root = directory.path();
+    let refused = "namespace App.Rules;\n\nimport Sharp.Encoding.Missing;\n\npublic class Naming\n{\n    public static string message() => Missing.of(\"x\");\n}\n";
+    write(root, "app/Rules/Naming.sharp", refused);
+    let cache = tempfile::tempdir().unwrap();
+
+    let first = process::output(command(root, "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
+    let second = process::output(command(root, "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
+
+    assert!(!printed(&first).contains("isn't compiled for the extension hosts yet"), "{}", printed(&first));
+    assert!(printed(&second).contains("app/Rules/Naming.sharp has"), "{}", printed(&second));
+    assert!(printed(&first).contains("app/Rules/Naming.sharp has"), "{}", printed(&first));
+}
+
 /// The `extern` lines of a file nothing names apply to every file, as an analysis of the whole project applies them, so
 /// a rule a host asks as it loads that calls a Composer `files` helper an `extern` line declares compiles before the
 /// hosts start, and the first compile with the host passes.
@@ -4950,6 +4973,43 @@ fn a_compile_after_a_body_edit_gives_what_a_full_compile_gives() {
         |_| {},
         |root| write(root, "app/Order.sharp", &ORDER.replace("extra + 1", "extra + 2")),
     );
+}
+
+/// A compile with an extension host keeps the analysis the host took over, and after a body edit restores it and
+/// reports what a full compile with the host reports, in a project whose package holds a `.sharp` file with an error.
+#[test]
+fn a_compile_with_an_extension_host_after_a_body_edit_gives_what_a_full_compile_gives() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the compile with a host after an edit") {
+        return;
+    }
+    let hosted = |root: &Path| {
+        write(root, "app/Cart.sharp", CART);
+        write(root, MONEY_PATH, &MONEY.replace("return 100;", "return \"100\";"));
+        write(root, "tools/host.php", HOST_READING_THE_COMPILED_FILE);
+        write(
+            root,
+            "mago.toml",
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nfile = \"tools/host.php\"\n",
+        );
+    };
+    let edit = |root: &Path| write(root, "app/Order.sharp", &ORDER.replace("extra + 1", "extra + 2"));
+    let seeded = project(ORDER, MONEY);
+    hosted(seeded.path());
+    let first = compile_lines(seeded.path());
+    assert!(issue_lines(&first).iter().any(|line| line.contains("Money")), "{}", printed(&first));
+    assert!(seeded.path().join(".sharp/analysis.bin").is_file(), "the compile with a host kept no analysis");
+    edit(seeded.path());
+
+    let after = compile_lines(seeded.path());
+
+    let fresh = project(ORDER, MONEY);
+    hosted(fresh.path());
+    edit(fresh.path());
+    let full = compile_lines(fresh.path());
+    assert_eq!(after.status.code(), full.status.code(), "{}", printed(&after));
+    assert_eq!(issue_lines(&after), issue_lines(&full), "{}", printed(&after));
+    assert_eq!(compiled_keys(seeded.path()), compiled_keys(fresh.path()));
 }
 
 /// After a signature edit that breaks a caller in another file, a compile restores the last analysis, checks the

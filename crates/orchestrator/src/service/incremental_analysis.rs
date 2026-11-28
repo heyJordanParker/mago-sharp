@@ -37,6 +37,7 @@ use mago_analyzer::external::FileReads;
 use mago_analyzer::external::Listing;
 use mago_analyzer::external::ReturnTypeRequests;
 use mago_analyzer::external::SessionReads;
+use mago_analyzer::external::StoredCodebaseScanFile;
 use mago_analyzer::external::apply_refinements;
 use mago_analyzer::is_collection_member;
 use mago_analyzer::plugin::PluginRegistry;
@@ -171,6 +172,9 @@ struct Persisted<'state> {
     extern_namespaces: Cow<'state, ExternNamespaces>,
     declared_returns: Cow<'state, HashMap<(Word, Word), Option<TypeMetadata>>>,
     class_logs: Cow<'state, ClassLogs>,
+    /// Each selected file's codebase scan, by its file, which the decoded state takes from the database.
+    codebase_scan_files: Vec<(FileId, StoredCodebaseScanFile)>,
+    refinements: Cow<'state, HashMap<FileId, Vec<DeclarationRefinement>>>,
     /// The path of each vendor file the autoloader served, which the decoded state reads again.
     autoloaded: Vec<PathBuf>,
 }
@@ -236,6 +240,9 @@ pub struct IncrementalAnalysisService {
     /// Each file's declaration refinements, as the last codebase scan that scanned the file gave them. A file whose
     /// refinements change changes every declaration it holds, though its code stays as it was.
     refinements: HashMap<FileId, Vec<DeclarationRefinement>>,
+    /// Whether this process's extension hosts were never given the codebase scan the service holds, as after
+    /// [`Self::restore`], so the next analysis gives it to them.
+    codebase_scan_unsent: bool,
     /// The class-likes of the codebase that win over a default class-like in their namespace, which every file resolves
     /// its names against.
     namespace_classes: NamespaceClasses,
@@ -305,6 +312,7 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("codebase_scan_plan", &self.codebase_scan_plan.is_some())
             .field("codebase_scan_files", &self.codebase_scan_files.len())
             .field("refinements", &self.refinements.len())
+            .field("codebase_scan_unsent", &self.codebase_scan_unsent)
             .field("namespace_classes", &self.namespace_classes)
             .field("changing_members", &self.changing_members)
             .field("extern_namespaces", &self.extern_namespaces)
@@ -375,6 +383,7 @@ impl IncrementalAnalysisService {
             codebase_scan_plan: None,
             codebase_scan_files: HashMap::default(),
             refinements: HashMap::default(),
+            codebase_scan_unsent: false,
             namespace_classes: NamespaceClasses::default(),
             changing_members: ChangingMembers::default(),
             extern_namespaces: ExternNamespaces::default(),
@@ -490,6 +499,7 @@ impl IncrementalAnalysisService {
         self.lifecycle_issues = IssueCollection::default();
         self.analysis_snapshots.clear();
         self.codebase_scan_plan = None;
+        self.codebase_scan_unsent = false;
         self.codebase_scan_files.clear();
         self.refinements.clear();
         self.namespace_classes = NamespaceClasses::default();
@@ -501,14 +511,14 @@ impl IncrementalAnalysisService {
 
     /// The service's state after its last analysis, encoded after `key`, which [`Self::restore`] reads back: the
     /// codebase, the reference graphs and each file's state, so a later run rechecks only what changed since, as watch
-    /// mode does. None before the first analysis, when an extension scans the codebase, since the declarations it is
-    /// given hold values no decoding rebuilds, and when a vendor file the autoloader served has no path to read again.
+    /// mode does, the extensions' codebase scan and its refinements included. None before the first analysis, and when a
+    /// vendor file the autoloader served has no path to read again.
     ///
     /// # Errors
     ///
     /// Returns [`OrchestratorError`] when the state does not encode.
     pub fn persist(&self, key: &[u8]) -> Result<Option<Vec<u8>>, OrchestratorError> {
-        if !self.initialized || self.codebase_scan_plan.is_some() {
+        if !self.initialized {
             return Ok(None);
         }
         let Some(autoloaded) = self.autoloaded.iter().map(|file| file.path.clone()).collect::<Option<Vec<_>>>() else {
@@ -529,6 +539,12 @@ impl IncrementalAnalysisService {
             extern_namespaces: Cow::Borrowed(&self.extern_namespaces),
             declared_returns: Cow::Borrowed(&self.declared_returns),
             class_logs: Cow::Borrowed(&self.class_logs),
+            codebase_scan_files: self
+                .codebase_scan_files
+                .iter()
+                .map(|(file_id, scan)| (*file_id, scan.stored()))
+                .collect(),
+            refinements: Cow::Borrowed(&self.refinements),
             autoloaded,
         };
         let mut bytes = key.to_vec();
@@ -541,14 +557,14 @@ impl IncrementalAnalysisService {
 
     /// Takes the state [`Self::persist`] encoded in `bytes` as the state its last analysis left: the analysis's state,
     /// with the database the service was made with and each vendor file the autoloader served then, read again, so
-    /// [`Self::analyze_incremental`] rechecks each file that changed since. Returns whether it took it. It takes none,
-    /// and the service stays as it was, when `bytes` don't start with `key` or hold no state, when an extension now
-    /// scans the codebase, and when a vendor file served then is gone.
+    /// [`Self::analyze_incremental`] rechecks each file that changed since, and gives this process's extension hosts the
+    /// codebase scan the state holds. Returns whether it took it. It takes none, and the service stays as it was, when
+    /// `bytes` don't start with `key` or hold no state, and when a vendor file served then is gone.
     ///
     /// # Errors
     ///
-    /// Returns [`OrchestratorError`] when the extensions' codebase scan plan can't be made, or a vendor file served
-    /// then can't be read.
+    /// Returns [`OrchestratorError`] when a vendor file served then can't be read, or the extensions' codebase scan
+    /// plan can't be made.
     pub fn restore(&mut self, bytes: &[u8], key: &[u8]) -> Result<bool, OrchestratorError> {
         let Some(encoded) = bytes.strip_prefix(key) else {
             return Ok(false);
@@ -558,14 +574,6 @@ impl IncrementalAnalysisService {
         else {
             return Ok(false);
         };
-        if self
-            .plugin_registry
-            .external_codebase_scan_plan()
-            .map_err(mago_analyzer::error::AnalysisError::from)?
-            .is_some()
-        {
-            return Ok(false);
-        }
         let mut autoloaded = Vec::with_capacity(state.autoloaded.len());
         for path in &state.autoloaded {
             let Some(file) = self.autoloader.as_ref().map(|autoloader| autoloader.file_at(path)).transpose()?.flatten()
@@ -592,6 +600,22 @@ impl IncrementalAnalysisService {
         self.extern_namespaces = state.extern_namespaces.into_owned();
         self.declared_returns = state.declared_returns.into_owned();
         self.class_logs = state.class_logs.into_owned();
+        self.codebase_scan_files = state
+            .codebase_scan_files
+            .into_iter()
+            .filter_map(|(file_id, scan)| {
+                let file = self.database.get(&file_id).ok()?;
+
+                Some((file_id, CodebaseScanFile::restored(file, scan)))
+            })
+            .collect();
+        self.refinements = state.refinements.into_owned();
+        self.codebase_scan_plan = self
+            .plugin_registry
+            .external_codebase_scan_plan()
+            .map_err(mago_analyzer::error::AnalysisError::from)?
+            .map(Arc::new);
+        self.codebase_scan_unsent = true;
         self.initialized = true;
 
         Ok(true)
@@ -942,6 +966,7 @@ impl IncrementalAnalysisService {
     /// analysis fails.
     pub fn analyze(&mut self) -> Result<AnalysisResult, OrchestratorError> {
         let scan = Phase::start("scan");
+        self.codebase_scan_unsent = false;
         self.codebase_scan_plan = self
             .plugin_registry
             .external_codebase_scan_plan()
@@ -1616,7 +1641,8 @@ impl IncrementalAnalysisService {
             .collect();
         let scanned_files: Vec<_> = scans.into_iter().map(|(scan, _)| scan).collect();
 
-        let scan_state_changed = self.codebase_scan_files.keys().any(|file_id| !current_file_ids.contains(file_id))
+        let scan_state_changed = std::mem::take(&mut self.codebase_scan_unsent)
+            || self.codebase_scan_files.keys().any(|file_id| !current_file_ids.contains(file_id))
             || scanned_files
                 .iter()
                 .any(|(file_id, _, snapshot)| snapshot.is_some() || self.codebase_scan_files.contains_key(file_id));
@@ -5223,8 +5249,8 @@ mod tests {
     }
 
     /// The standard library's reflection classes, whose `attributes<T>()` and `defaultValue()` read the whole program,
-    /// and its `Json`, whose `decode<T>()` takes a type argument and reads no attributes.
-    const LIBRARY: [(&str, &str); 9] = [
+    /// and its `Json`, whose `parse<T>()` takes a type argument, reads no attributes and gives a `Result`.
+    const LIBRARY: [(&str, &str); 12] = [
         (
             "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ClassMembers.sharp",
             include_str!("../../../../../composer/library/Sharp/ClassMembers.sharp"),
@@ -5260,6 +5286,18 @@ mod tests {
         (
             "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/JsonValue.sharp",
             include_str!("../../../../../composer/library/Sharp/Encoding/JsonValue.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Result.sharp",
+            include_str!("../../../../../composer/library/Sharp/Result.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Error.sharp",
+            include_str!("../../../../../composer/library/Sharp/Error.sharp"),
+        ),
+        (
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ParseError.sharp",
+            include_str!("../../../../../composer/library/Sharp/ParseError.sharp"),
         ),
     ];
 
@@ -5297,14 +5335,14 @@ mod tests {
     /// Spec sections 1 and 25: `attributes<Column>()` of a PHP# attribute class is pure only while no plain PHP class
     /// extends `Column`, so a plain PHP descendant added in another file refuses the pure caller in a watch, as a full
     /// analysis refuses it, though the caller's file is unchanged. A call that takes a class as its type argument and
-    /// reads no attributes, as `Json.decode<Order>()`, keeps its file unanalyzed when the class gains a descendant.
+    /// reads no attributes, as `Json.parse<Order>()`, keeps its file unanalyzed when the class gains a descendant.
     #[test]
     fn test_watch_a_plain_descendant_of_an_attribute_class_refuses_its_pure_reader() {
         let column = "namespace App;\n\n[Attribute]\npublic class Column\n{\n    public Column(public string name { get; } = \"\") { }\n}\n";
         let ledger = "namespace App;\n\npublic interface Ledger\n{\n    bool marked(Class<Object> type);\n}\n";
         let entry = "namespace App;\n\n[Column(\"entries\")]\npublic class Entry : Ledger\n{\n    public bool marked(Class<Object> type) => type.attributes<Column>().count() > 0;\n}\n";
         let order = "namespace App;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n}\n";
-        let orders = "namespace App;\n\nimport Sharp.Encoding.Json;\n\npublic class Orders\n{\n    public Order read(string json) => Json.decode<Order>(json);\n}\n";
+        let orders = "namespace App;\n\nimport Sharp.Encoding.Json;\n\npublic class Orders\n{\n    public Order read(string json) => Json.parse<Order>(json).unwrap();\n}\n";
         let loud = "<?php\n\nnamespace Lib;\n\nclass LoudColumn extends \\App\\Column\n{\n    public function __construct()\n    {\n        echo \"loud\\n\";\n        parent::__construct(\"loud\");\n    }\n}\n";
         let big_order = "<?php\n\nnamespace Lib;\n\nclass BigOrder extends \\App\\Order\n{\n}\n";
         let files = [

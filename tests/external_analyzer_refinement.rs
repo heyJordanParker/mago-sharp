@@ -242,6 +242,34 @@ fn declaration_refinements_reach_declarations_bodies_and_incremental_removal() {
     assert_eq!(removed, fresh, "incremental analysis after removal matches a fresh analysis");
 }
 
+/// The state of an analysis with a refining host, stored and restored by a new service whose hosts are new, as the
+/// next compile's are, rechecks an edit that removes the refinement, and one that adds it, as a fresh analysis with the
+/// host reports it.
+#[test]
+fn a_restored_analysis_with_a_refining_host_rechecks_an_edit_as_a_fresh_analysis_does() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the restored refinement test") {
+        return;
+    }
+    const KEY: &[u8] = b"refined";
+
+    for (before, after) in [(true, false), (false, true)] {
+        let (first, _) = database(before);
+        let mut analyzed = service(&first, registry(repository));
+        analyzed.analyze().expect("the first analysis runs");
+        let bytes = analyzed.persist(KEY).expect("the state encodes").expect("an analysis with a host is stored");
+
+        let (edited, _) = database(after);
+        let mut restored = service(&first, registry(repository));
+        assert!(restored.restore(&bytes, KEY).expect("the state decodes"), "the stored state is restored");
+        restored.update_database(edited.read_only());
+        let rechecked = codes(&restored.analyze_incremental(None).expect("the recheck runs").issues);
+
+        let fresh = codes(&service(&edited, registry(repository)).analyze().expect("the fresh analysis runs").issues);
+        assert_eq!(rechecked, fresh, "refined before the edit: {before}");
+    }
+}
+
 /// A run that analyzed with no host, as a compile does, then takes the hosts in reports what an analysis with them
 /// reports: a declaration a host's scan refines reaches each file that reads it, though no file changed.
 #[test]

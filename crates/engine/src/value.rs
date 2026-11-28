@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ffi::c_char;
 
 use crate::EngineError;
@@ -6,7 +7,8 @@ use crate::EngineError;
 ///
 /// A list is a PHP array with the keys 0, 1, 2 and on in order, and a map is any other PHP array. A map's key that
 /// reads as a decimal integer becomes an integer key, as it does in a PHP array literal.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::unsafe_derive_deserialize)]
 pub enum Value {
     Null,
     Bool(bool),
@@ -18,13 +20,13 @@ pub enum Value {
     /// An object of the loaded class `class`, with no constructor run, and each instance property the class declares
     /// set once to its value, which its type takes as it is.
     Object {
-        class: &'static str,
-        properties: Vec<(&'static str, Value)>,
+        class: Cow<'static, str>,
+        properties: Vec<(Cow<'static, str>, Value)>,
     },
     /// The case `case` of the loaded enum `enumeration`.
     Case {
-        enumeration: &'static str,
-        case: &'static str,
+        enumeration: Cow<'static, str>,
+        case: Cow<'static, str>,
     },
 }
 

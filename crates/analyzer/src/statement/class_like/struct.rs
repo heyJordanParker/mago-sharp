@@ -227,7 +227,7 @@ where
     if !declares_parse {
         report(
             format!(
-                "`{name}` has fields, so it declares `public static {name} parse({backing} value)`, which builds it back from the `{backing}` it is stored as."
+                "`{name}` has fields, so it declares `public static Result<{name}, ParseError> parse(Any? value)`, which builds it back from the `{backing}` it is stored as."
             ),
             r#struct.name.span,
         );
@@ -269,7 +269,7 @@ where
 }
 
 /// Reports each key the stored form of a struct or a PHP# class in `r#type` would read into two fields, spec section
-/// 10's language rule 10, at `span`, where `parse`, `Json.encode` or `Json.decode` of it is called, so a type nothing
+/// 10's language rule 10, at `span`, where `parse`, `Json.encode` or `Json.parse<T>` of it is called, so a type nothing
 /// stores compiles. It reads each variant of a family and each field's type, also inside a collection, `visiting` the
 /// classes it is inside. The parameters come first, so the first reader of a key is a main constructor parameter, the
 /// one `[Key]` can rename.
@@ -503,7 +503,7 @@ where
     );
 }
 
-/// Reports `Order.parse`, or `Order.tryParse` when it does not `throws`, on a struct or a PHP# class with a field
+/// Reports `Order.parse` on a struct or a PHP# class with a field
 /// `parse` can't read from a value, spec section 10's language rule 11: an enum with no backing value, a function
 /// type, or a class no `parse` builds, also inside a collection or a nested struct or class. A generic type's field
 /// reads as the call's `type_arguments` give it, as `int` for `TFirst` of `Pair<int, string>.parse`, and one of a type
@@ -514,13 +514,12 @@ pub(crate) fn check_struct_parse<A>(
     context: &mut Context<'_, '_, A>,
     r#struct: &ClassLikeMetadata,
     type_arguments: &[TUnion],
-    throws: bool,
     span: Span,
 ) where
     A: Arena,
 {
     report_class_keys_read_twice(context, r#struct, span, &mut Vec::new());
-    let method = if throws { "parse" } else { "tryParse" };
+    let method = "parse";
     let class = display_class_like_name(context, r#struct.original_name);
     for (parsed, type_arguments) in parsed_classes(context.codebase, r#struct, type_arguments) {
         for field in context.codebase.struct_parse_fields(parsed.name) {
@@ -569,7 +568,7 @@ fn parsed_classes<'codebase, 'arguments>(
 }
 
 /// Reports the type argument `parsed` of a call of `parser`, a method the standard library marks `ParsesTypeArgument`,
-/// as `Json.decode<T>`, when it is a type no field `parse` reads can hold, spec section 10: the struct parse check's
+/// as `Json.parse<T>`, when it is a type no field `parse` reads can hold, spec section 10: the struct parse check's
 /// error for a struct or a PHP# class, and the unreadable part of any other type, as `List<Function<void()>>`. A type
 /// parameter is the caller's to bound, and a class that doesn't exist was reported where it is written.
 pub(crate) fn check_parsed_type_argument<A>(context: &mut Context<'_, '_, A>, parser: &str, parsed: &TUnion, span: Span)
@@ -585,7 +584,7 @@ where
         .and_then(|named| Some((named, codebase.get_class_like(named.name)?)))
         .filter(|(_, class)| codebase.parses(class.name));
     if let Some((named, class)) = parsing {
-        check_struct_parse(context, class, named.type_parameters.as_deref().unwrap_or_default(), true, span);
+        check_struct_parse(context, class, named.type_parameters.as_deref().unwrap_or_default(), span);
 
         return;
     }

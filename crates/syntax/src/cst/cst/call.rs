@@ -44,7 +44,7 @@ pub struct MethodCall<'arena> {
     pub object: &'arena Expression<'arena>,
     pub arrow: Span,
     pub method: ClassLikeMemberSelector<'arena>,
-    /// PHP#'s type arguments, as in `Json.decode<WebhookPayload>(body)`. Always `None` in PHP.
+    /// PHP#'s type arguments, as in `Json.parse<WebhookPayload>(body)`. Always `None` in PHP.
     pub type_arguments: Option<TypeArgumentList<'arena>>,
     pub argument_list: ArgumentList<'arena>,
 }
