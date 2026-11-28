@@ -220,6 +220,9 @@ pub struct EffectSummary {
     /// it needs: the full name of the class that declares the member reached, and an empty member, or an empty class
     /// and the full name of a function.
     pub(crate) undeclared: Vec<(Span, (Word, Word))>,
+    /// The `none` a method with a body writes after `uses`, which changes nothing, spec section 29, since the method's
+    /// effects come from its code.
+    pub(crate) uses_none: Option<Span>,
     /// The name each import of the body's file gives its class, and the file's namespace and imports, as
     /// `Context::imported_names` and `Context::scope` hold them, shared by the file's bodies. A message about the body
     /// names classes, and the imports its code needs, as its file does.
@@ -389,6 +392,8 @@ pub struct Effects {
     /// makes it, whose file names the line's class: the body's own, and a value of the plain PHP method or function a
     /// function value gives a place.
     undeclared: Vec<(Span, (Word, Word), usize)>,
+    /// Each `none` a method with a body writes after `uses`, with the position of the body.
+    uses_none: Vec<(Span, usize)>,
     /// The file of each call, with the position of each body it reaches.
     calls: Vec<(FileId, Vec<usize>)>,
 }
@@ -531,6 +536,11 @@ impl Effects {
                 .flat_map(|(position, summary)| summary.readonly_calls.iter().map(move |call| (call.clone(), position)))
                 .collect(),
             undeclared: undeclared(summaries),
+            uses_none: summaries
+                .iter()
+                .enumerate()
+                .filter_map(|(position, summary)| Some((summary.uses_none?, position)))
+                .collect(),
             calls: summaries
                 .iter()
                 .zip(targets)
@@ -673,6 +683,7 @@ impl Effects {
         issues.extend(check::laws_must_be_pure(self, codebase));
         issues.extend(check::function_values_must_fit_their_types(self, codebase));
         issues.extend(check::implementations_must_fit_their_declarations(self, codebase));
+        issues.extend(check::bodies_write_no_uses_none(self, codebase));
         issues.extend(check::required_constructors_add_no_effect(self, codebase));
         issues.extend(check::readonly_values_call_readonly_methods(self, codebase));
         issues.extend(check::values_have_no_effects(self, codebase));
@@ -791,6 +802,22 @@ impl Effects {
             reported.push(value.span);
 
             Some((value, name, &*self.imports[*giver], &*self.scopes[*giver], impurity))
+        })
+    }
+
+    /// Each `none` a method with a body writes after `uses`, with the method as messages name it, the imports of its
+    /// file, and the first call in the body that has an effect, or `None` when the body has none.
+    fn written_uses_none<'effects>(
+        &'effects self,
+        codebase: &'effects CodebaseMetadata,
+    ) -> impl Iterator<Item = (Span, (Word, Word), &'effects WordMap<Word>, Option<Impurity>)> + 'effects {
+        self.uses_none.iter().map(move |(span, position)| {
+            (
+                *span,
+                self.names[*position],
+                &*self.imports[*position],
+                self.effect_outside(codebase, self.bodies[*position], &[]),
+            )
         })
     }
 

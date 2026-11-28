@@ -128,6 +128,14 @@ pub(crate) fn record<'ast, 'arena, A>(
     artifacts.effect_summaries.append(&mut lambdas);
 }
 
+/// Records the `none` that the method with a body `body`, whose summary [`record`] recorded, writes after `uses` at
+/// `none`, which changes nothing, spec section 29, so the effect rules warn with the body's first effect.
+pub(crate) fn record_uses_none(artifacts: &mut AnalysisArtifacts, body: Body, none: Span) {
+    if let Some(summary) = artifacts.effect_summaries.iter_mut().rev().find(|summary| summary.body == body) {
+        summary.uses_none = Some(none);
+    }
+}
+
 /// Records the `get` and `set` accessors of the property `property` of the class `block_context` is in, which runs
 /// through `behaviors`, each a class and where `via` names it, spec section 6.4. A behavior's `get` and `set` are the
 /// property's accessors, so a read calls each behavior's `get` and a write each one's `set`, on the behavior the object
@@ -171,6 +179,7 @@ pub(crate) fn record_behaviors<A>(
             function_values: Vec::new(),
             readonly_calls: Vec::new(),
             undeclared: Vec::new(),
+            uses_none: None,
             imports: Arc::clone(&context.imported_names),
             scope: Arc::clone(&context.scope),
         });
@@ -208,6 +217,7 @@ pub(crate) fn record_parse<A>(
             function_values: Vec::new(),
             readonly_calls: Vec::new(),
             undeclared: Vec::new(),
+            uses_none: None,
             imports: Arc::clone(&context.imported_names),
             scope: Arc::clone(&context.scope),
         }
@@ -538,6 +548,7 @@ where
         function_values: Vec::new(),
         readonly_calls: Vec::new(),
         undeclared: Vec::new(),
+        uses_none: None,
         imports: Arc::clone(&imports),
         scope: Arc::clone(&scope),
     };
