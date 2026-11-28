@@ -32323,6 +32323,69 @@ fn a_use_of_a_class_s_statics_has_the_effects_of_their_initial_values() {
     );
 }
 
+/// A refusal of the pure lambda at `at` in `file`, which reaches `callee` and through it `Disk.save`.
+fn pure_lambda_refused(file: &str, at: &str, callee: &str) -> String {
+    format!(
+        "app/Shop/{file}:{at} invalid-argument: This lambda reaches `{callee}`, which calls `Disk.save` with the effect `Database`, so a pure `Function<Any?() uses none>` cannot hold it."
+    )
+}
+
+/// Spec sections 6, 11 and 25: a use of a static runs its class's initial values that are not constant, and its `get`,
+/// whichever way it names the class: `Stamped.at`, `Self.at`, which names the class the code is called on, and
+/// `TItem.at`, which names the class the type argument is. So a pure lambda that reads one is refused each way.
+#[test]
+fn a_static_read_through_self_or_a_type_parameter_has_its_class_s_initial_values_and_its_get() {
+    let stamped = (
+        "app/Shop/Stamped.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\npublic class Stamped\n{\n    public static int at { get; } = Stamped.saved();\n\n    public static int hits { get { Disk.save(); return 1; } }\n\n    private static int saved() { Disk.save(); return 1; }\n\n    private static Any? pure(Function<Any?() uses none> work) => work();\n\n    public static Any? initialViaName() => Stamped.pure(() => Stamped.at);\n\n    public static Any? initialViaSelf() => Stamped.pure(() => Self.at);\n\n    public static Any? getViaName() => Stamped.pure(() => Stamped.hits);\n\n    public static Any? getViaSelf() => Stamped.pure(() => Self.hits);\n}\n",
+    );
+    let reads = (
+        "app/Shop/Reads.sharp",
+        "namespace App.Shop;\n\npublic class Reads\n{\n    private static Any? pure(Function<Any?() uses none> work) => work();\n\n    public static Any? viaBound() => Reads.pure(() => Stamped.at);\n\n    public static Any? viaParameter<TItem : Stamped>() => Reads.pure(() => TItem.at);\n}\n",
+    );
+    let [disk, stub, _, _] = BUILT;
+
+    assert_eq!(
+        effect_issues(&[reads, stamped, disk, stub]),
+        [
+            pure_lambda_refused("Reads.sharp", "7:49", "Stamped.saved"),
+            pure_lambda_refused("Reads.sharp", "9:70", "Stamped.saved"),
+            pure_lambda_refused("Stamped.sharp", "15:57", "Stamped.saved"),
+            pure_lambda_refused("Stamped.sharp", "17:57", "Stamped.saved"),
+            pure_lambda_refused("Stamped.sharp", "19:53", "Stamped.hits"),
+            pure_lambda_refused("Stamped.sharp", "21:53", "Stamped.hits"),
+        ]
+    );
+}
+
+/// Spec sections 6, 6.2 and 6.4: a write of a static runs its `set` and its observers on each write after its initial
+/// value, as a write of an instance's property does, and it is a use of its class's statics, which runs their initial
+/// values. So a pure lambda that writes one is refused, through the class's name and through `Self`.
+#[test]
+fn a_static_write_runs_its_set_its_observers_and_its_class_s_initial_values() {
+    let tally = (
+        "app/Shop/Tally.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\npublic class Tally\n{\n    public static int total { get; set { Disk.save(); field = value; } } = 0;\n\n    public static int seen { get; set; didSet => Disk.save(); } = 0;\n\n    public int level { get; set { Disk.save(); field = value; } } = 0;\n\n    private static Any? pure(Function<Any?() uses none> work) => work();\n\n    public Any? instanceSet() => Tally.pure(() => this.level = 1);\n\n    public static Any? staticSet() => Tally.pure(() => Tally.total = 1);\n\n    public static Any? staticSetViaSelf() => Tally.pure(() => Self.total = 1);\n\n    public static Any? staticDidSet() => Tally.pure(() => Tally.seen = 1);\n}\n",
+    );
+    let started = (
+        "app/Shop/Started.sharp",
+        "namespace App.Shop;\n\nimport Lib.Disk;\n\npublic class Started\n{\n    public static int at { get; } = Started.saved();\n\n    public static int count { get; set; } = 0;\n\n    private static int saved() { Disk.save(); return 1; }\n\n    private static Any? pure(Function<Any?() uses none> work) => work();\n\n    public static Any? read() => Started.pure(() => Started.count);\n\n    public static Any? written() => Started.pure(() => Started.count = 1);\n}\n",
+    );
+    let [disk, stub, _, _] = BUILT;
+
+    assert_eq!(
+        effect_issues(&[started, tally, disk, stub]),
+        [
+            pure_lambda_refused("Started.sharp", "15:47", "Started.saved"),
+            pure_lambda_refused("Started.sharp", "17:50", "Started.saved"),
+            pure_lambda_refused("Tally.sharp", "15:45", "Tally.level"),
+            pure_lambda_refused("Tally.sharp", "17:50", "Tally.total"),
+            pure_lambda_refused("Tally.sharp", "19:57", "Tally.total"),
+            pure_lambda_refused("Tally.sharp", "21:53", "Tally.seen"),
+        ]
+    );
+}
+
 /// Spec section 2: a `using` local's block calls `dispose()` on the value it holds when it ends, so the value is a
 /// `Disposable`, as `Archive` is. Any other value is refused.
 #[test]

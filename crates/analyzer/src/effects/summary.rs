@@ -840,19 +840,23 @@ where
                 }
             }
             Expression::Access(Access::Property(access)) => {
-                if StaticProperty::from_property_access(access, self.context.resolved_names).is_some() {
-                    self.change(Roots::from([Changed::Shared]), span, place);
-                    return;
-                }
-
-                let receiver = self.roots(access.object);
+                // A static is shared state, and a write of it is a use of its class's statics, spec section 6, which
+                // runs its `set` and its observers as an instance's write does, spec sections 6.2 and 6.4.
+                let receiver = if StaticProperty::from_property_access(access, self.context.resolved_names).is_some() {
+                    Roots::from([Changed::Shared])
+                } else {
+                    self.roots(access.object)
+                };
                 self.change(receiver.clone(), span, place);
+                if let ClassLikeMemberSelector::Identifier(name) = &access.property {
+                    self.use_statics_at(name.value, access.span());
+                }
                 let arguments = vec![value.map(|value| self.roots(value)).unwrap_or_default()];
                 // A write of `this` while a constructor builds it runs no observer, spec section 6.2.
                 let builds_this = self.builds_this
                     && matches!(access.object.unparenthesized(), Expression::ConstantAccess(name)
                         if self.context.resolved_names.binding(&name.name) == Some(Binding::This));
-                for set in self.accessors(access.object, &access.property, b"set") {
+                for set in self.accessors(access.object, &access.property, access.span(), b"set") {
                     // The write runs the observers inside the `set` hook too, spec section 6.2. A property without one
                     // has no such body, and a call of a body without a summary adds nothing.
                     let Body::Accessor(class, property, _) = set else {
@@ -899,31 +903,32 @@ where
             .collect()
     }
 
-    /// The `accessor` bodies a read or write of `object.property` runs. For `Class.property`, a static's, they are the
-    /// class's own.
+    /// The `accessor` bodies a read or write at `span` of `object.property` runs. For a static's, they are its class's
+    /// own.
     fn accessors(
         &self,
         object: &Expression<'arena>,
         property: &ClassLikeMemberSelector<'arena>,
+        span: Span,
         accessor: &[u8],
     ) -> Vec<Body> {
         let ClassLikeMemberSelector::Identifier(name) = property else {
             return Vec::new();
         };
 
-        self.member_classes(object).into_iter().filter_map(|class| self.accessor(class, name.value, accessor)).collect()
+        self.member_classes(object, span)
+            .into_iter()
+            .filter_map(|class| self.accessor(class, name.value, accessor))
+            .collect()
     }
 
-    /// The classes a member read through `object` reaches: the class `Class.member` names, for a static, or each class
-    /// the value may hold an object of.
-    fn member_classes(&self, object: &Expression<'arena>) -> Vec<Word> {
-        match object.unparenthesized() {
-            Expression::ConstantAccess(class)
-                if self.context.resolved_names.binding(&class.name) == Some(Binding::Class) =>
-            {
-                vec![word(self.context.resolved_names.get(&class.name))]
-            }
-            _ => self.object_classes(object),
+    /// The classes the member access at `span` through `object` reaches: for a static, the class the analysis resolved
+    /// its name to, whichever way it names it, `Class.member`, `Self.member`, `TItem.member` or `Counter<Order>.member`,
+    /// and else each class the value may hold an object of.
+    fn member_classes(&self, object: &Expression<'arena>, span: Span) -> Vec<Word> {
+        match self.artifacts.get_static_classes(span) {
+            Some(classes) => classes.to_vec(),
+            None => self.object_classes(object),
         }
     }
 
@@ -951,14 +956,14 @@ where
                 self.summary.effects.push((Effect::Class(effect), span, (class, member)));
             }
         }
-        for class in self.member_classes(object) {
+        for class in self.member_classes(object, span) {
             if codebase.get_class_like(class).is_some_and(|metadata| !metadata.flags.is_sharp()) {
                 self.plain_property(class, php_variable_name(name.value), span);
             }
         }
 
         let receiver = self.roots(object);
-        for callee in self.accessors(object, property, b"get") {
+        for callee in self.accessors(object, property, span, b"get") {
             self.summary.calls.push(Call {
                 callee,
                 span,
@@ -968,10 +973,15 @@ where
             });
         }
 
-        if let Expression::ConstantAccess(class) = object.unparenthesized()
-            && self.context.resolved_names.binding(&class.name) == Some(Binding::Class)
-        {
-            self.use_statics(word(self.context.resolved_names.get(&class.name)), name.value, span);
+        self.use_statics_at(name.value, span);
+    }
+
+    /// Records a use at `span` of the static `property` of each class the static access there names, as
+    /// [`Self::use_statics`] records it. An access of an instance's property names none.
+    fn use_statics_at(&mut self, property: &[u8], span: Span) {
+        let classes = self.artifacts.get_static_classes(span).map(<[Word]>::to_vec).unwrap_or_default();
+        for class in classes {
+            self.use_statics(class, property, span);
         }
     }
 
