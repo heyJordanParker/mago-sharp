@@ -66,7 +66,7 @@ use mago_orchestrator::service::incremental_analysis::codex::LibraryCodex;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::CompiledFiles;
 use mago_orchestrator::service::incremental_analysis::compile::Folder;
-use mago_orchestrator::service::incremental_analysis::compile::LOWERING_PANIC;
+use mago_orchestrator::service::incremental_analysis::compile::INTERNAL_COMPILER_ERROR;
 use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::IssueCollection;
 use mago_reporting::Level;
@@ -357,7 +357,7 @@ impl ConvertCommand {
         };
         let plain = session.proof(&prover)?;
         // The judgement leaves out a file the plain project's compile refuses too, so a lowering that panicked there,
-        // a defect of the checker, is an error of the run of its own.
+        // a defect of the compiler, is an error of the run of its own.
         let panics = panics(&plain);
         for panic in &panics {
             tracing::error!("{panic}");
@@ -424,7 +424,7 @@ impl ConvertCommand {
         outcome.externs =
             prover.externs.text(&accepted).map(|(before, after)| (prover.externs.name.clone(), before, after));
 
-        // A lowering that panicked is a defect of the checker, which fails the run.
+        // A lowering that panicked is a defect of the compiler, which fails the run.
         outcome.failed |= !panics.is_empty();
         if !self.dry_run && !accepted.is_empty() {
             // The declarations file goes first, so no converted file is on disk without the lines it needs.
@@ -817,7 +817,7 @@ fn load(
     Ok((orchestrator, database))
 }
 
-/// The text of each lowering of `proof` that panicked, in file name order, each a defect of the checker.
+/// The text of each lowering of `proof` that panicked, in file name order, each a defect of the compiler.
 fn panics(proof: &Proof) -> Vec<String> {
     let mut refused: Vec<(&Vec<u8>, &IssueCollection)> = proof.refused.iter().collect();
     refused.sort_by(|a, b| a.0.cmp(b.0));
@@ -825,7 +825,7 @@ fn panics(proof: &Proof) -> Vec<String> {
     refused
         .into_iter()
         .flat_map(|(_, errors)| errors.iter())
-        .filter(|error| error.code.as_deref() == Some(LOWERING_PANIC))
+        .filter(|error| error.code.as_deref() == Some(INTERNAL_COMPILER_ERROR))
         .map(|error| error.message.clone())
         .collect()
 }
@@ -869,10 +869,10 @@ fn judge(plain: &Proof, proof: &Proof, swaps: &[&Candidate]) -> Judgement {
     }
     for (file, errors) in proof.refused.iter().filter(|(file, _)| !plain.refused.contains_key(*file)) {
         // The compile's first error says why it refuses the file. A lowering that panicked names a defect of the
-        // checker, so its text is the reason whatever else the file holds, never hidden.
+        // compiler, so its text is the reason whatever else the file holds, never hidden.
         let reason = errors
             .iter()
-            .find(|error| error.code.as_deref() == Some(LOWERING_PANIC))
+            .find(|error| error.code.as_deref() == Some(INTERNAL_COMPILER_ERROR))
             .or_else(|| errors.iter().next())
             .map_or_else(String::new, |error| format!(": {}", error.message));
         let written = format!("{}: mago compile would refuse it{reason}", display(file));
@@ -2389,7 +2389,7 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     }
 
     /// A file the compile refuses once converted fails its proof with the compile's first error, and a converted file
-    /// whose lowering panicked with the panic's text, a defect of the checker, whatever else the refusal names.
+    /// whose lowering panicked with the panic's text, a defect of the compiler, whatever else the refusal names.
     #[test]
     fn a_refused_compile_names_its_first_error_and_a_lowering_that_panicked_names_the_panic() {
         let candidate = Candidate {
@@ -2403,7 +2403,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         };
         let panicked = IssueCollection::from(vec![
             Issue::error("Invalid return.").with_code("invalid-return-statement"),
-            Issue::error("A defect of the checker: boom").with_code(LOWERING_PANIC),
+            Issue::error("Internal compiler error: the lowering of src/Box.sharp panicked: boom")
+                .with_code(INTERNAL_COMPILER_ERROR),
         ]);
         let linked = IssueCollection::from(vec![Issue::error("Shelf::size() must be compatible with Box::size().")]);
         let plain = Proof { issues: Issues::default(), refused: HashMap::new() };
@@ -2415,7 +2416,12 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
         let judgement = judge(&plain, &proof, &[&candidate]);
 
         let shown: Vec<&str> = judgement.own[&candidate.name].iter().map(|found| found.shown.as_str()).collect();
-        assert_eq!(shown, ["src/Box.php: mago compile would refuse it once converted: A defect of the checker: boom"]);
+        assert_eq!(
+            shown,
+            [
+                "src/Box.php: mago compile would refuse it once converted: Internal compiler error: the lowering of src/Box.sharp panicked: boom"
+            ]
+        );
         let others: Vec<&str> = judgement.others.iter().map(|found| found.shown.as_str()).collect();
         assert_eq!(
             others,
@@ -2429,7 +2435,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     fn a_lowering_that_panicked_in_the_plain_proof_names_its_panic() {
         let panicked = IssueCollection::from(vec![
             Issue::error("Invalid return.").with_code("invalid-return-statement"),
-            Issue::error("The lowering of src/Box.sharp panicked: boom").with_code(LOWERING_PANIC),
+            Issue::error("Internal compiler error: the lowering of src/Box.sharp panicked: boom")
+                .with_code(INTERNAL_COMPILER_ERROR),
         ]);
         let refused =
             IssueCollection::from(vec![Issue::error("Invalid return.").with_code("invalid-return-statement")]);
@@ -2438,7 +2445,7 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             refused: HashMap::from([(b"src/Box.sharp".to_vec(), panicked), (b"src/Shelf.sharp".to_vec(), refused)]),
         };
 
-        assert_eq!(panics(&plain), ["The lowering of src/Box.sharp panicked: boom"]);
+        assert_eq!(panics(&plain), ["Internal compiler error: the lowering of src/Box.sharp panicked: boom"]);
     }
 
     /// Two issues of one member with one message stay two, told apart by their line of the PHP#, and an issue outside

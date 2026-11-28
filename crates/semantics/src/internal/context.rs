@@ -19,7 +19,8 @@ use mago_syntax::cst::Program;
 
 use crate::internal::checker::sharp::Place;
 
-const ISSUE_CODE: &str = "semantics";
+/// The code of an issue the semantic checks report, unless the issue carries its own.
+pub const SEMANTICS_ISSUE_CODE: &str = "semantics";
 
 #[derive(Debug)]
 pub struct Context<'ctx, 'ast, 'arena> {
@@ -110,14 +111,14 @@ impl<'ctx, 'ast, 'arena> Context<'ctx, 'ast, 'arena> {
 
     /// Reports a semantic issue with the given `Issue`.
     ///
-    /// This method adds the issue to the context's issue collection, with the `ISSUE_CODE` unless the issue carries the
+    /// This method adds the issue to the context's issue collection, with the `SEMANTICS_ISSUE_CODE` unless the issue carries the
     /// code the analyzer reports the same rule with.
     ///
     /// # Arguments
     ///
     /// `issue`: The `Issue` to report, which contains details about the semantic violation.
     pub fn report(&mut self, issue: Issue) {
-        self.issues.push(if issue.code.is_some() { issue } else { issue.with_code(ISSUE_CODE) });
+        self.issues.push(if issue.code.is_some() { issue } else { issue.with_code(SEMANTICS_ISSUE_CODE) });
     }
 
     /// Finalizes the context and returns the collected issues.

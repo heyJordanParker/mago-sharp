@@ -42,6 +42,7 @@ use mago_codex::ttype::atomic::callable::parameter::TCallableParameter;
 use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -331,12 +332,14 @@ impl<'analysis> Types<'analysis> {
             .position(|(_, element)| element.is_some_and(|element| element.as_bytes() == name.value))
     }
 
-    /// The declaration the fully qualified class name `class` resolves to.
+    /// The declaration the fully qualified class name `class` resolves to. A class the codebase doesn't declare, which
+    /// the checker refuses, is a class of the name as written, so code with errors lowers as written and PHP raises
+    /// that it finds no such class when it runs, spec section 27.
     #[must_use]
     pub fn class_declaration(&self, class: Word) -> Declaration {
-        let metadata = self.codebase.get_class_like(class).unwrap_or_else(|| {
-            unreachable!("the checker refuses the unknown class `{}`", String::from_utf8_lossy(class.as_bytes()))
-        });
+        let Some(metadata) = self.codebase.get_class_like(class) else {
+            return Declaration { kind: DeclarationKind::Class, class, name: class, public: true };
+        };
 
         let kind = if metadata.kind.is_interface() {
             DeclarationKind::Interface
@@ -632,7 +635,7 @@ impl<'analysis> Types<'analysis> {
     pub(crate) fn call_type_arguments(&self, call: &Expression) -> Option<String> {
         let span = call.span();
         let arguments = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?;
-        let callee = self.call_target(call).class;
+        let callee = self.call_target(call)?.class;
         if self.codebase.get_class_like(callee).is_none_or(|callee| callee.flags.is_built_in()) {
             return None;
         }
@@ -1680,26 +1683,17 @@ impl<'analysis> Types<'analysis> {
 
     /// The declaration `member` of the fully qualified class name `class` resolves to when code reads it: an enum case,
     /// a constant, a property, then a method, which the read takes as a first-class callable. Only when the class
-    /// declares none of them is it a property its `__get` serves, or its `__set` takes a write to. A read of an object
-    /// is [`Self::read_member`]'s, and a call is [`Self::call_target`]'s.
+    /// declares none of them is it a property its `__get` serves, or its `__set` takes a write to. A member no class
+    /// declares, which the checker refuses, is such a property too, so code with errors lowers as written and PHP raises
+    /// what it raises for it when it runs, spec section 27. A read of an object is [`Self::read_member`]'s, and a call
+    /// is [`Self::call_target`]'s.
     #[must_use]
     pub fn member_declaration(&self, class: Word, member: Word) -> Declaration {
-        self.declared_member(class, member).unwrap_or_else(|| {
-            if !self.codebase.method_exists(class, word("__get")) && !self.codebase.method_exists(class, word("__set"))
-            {
-                unreachable!(
-                    "the checker refuses `{}.{}`, which names no member",
-                    String::from_utf8_lossy(class.as_bytes()),
-                    String::from_utf8_lossy(member.as_bytes())
-                )
-            }
-
-            Declaration {
-                kind: DeclarationKind::Property { typed: false },
-                class: word(class),
-                name: word(member),
-                public: true,
-            }
+        self.declared_member(class, member).unwrap_or(Declaration {
+            kind: DeclarationKind::Property { typed: false },
+            class: word(class),
+            name: word(member),
+            public: true,
         })
     }
 
@@ -1763,9 +1757,11 @@ impl<'analysis> Types<'analysis> {
     /// call: a method, a method the class's `__call` or `__callStatic` serves, or a property holding a function, as spec
     /// section 14 calls one. Every class the receiver can be has the same kind of member, and the declaration is the
     /// first the analysis recorded. A call of a property also records what the function it holds runs, such as an
-    /// object's `__invoke`, for the effects check, and lowers as the property alone.
+    /// object's `__invoke`, for the effects check, and lowers as the property alone. None for a call the analysis
+    /// resolved to nothing, as one of a member no class declares in code with errors, which lowers as written and
+    /// raises what PHP raises when it runs, as the hosts' compile lowers it, spec section 27.
     #[must_use]
-    pub fn call_target(&self, call: &Expression) -> Declaration {
+    pub fn call_target(&self, call: &Expression) -> Option<Declaration> {
         let targets: Vec<&CallTarget> = self.artifacts.get_callees(call).collect();
         let calls_property = targets.iter().any(|target| matches!(target, CallTarget::Property { .. }));
         let declarations: Vec<Declaration> = targets
@@ -1773,15 +1769,10 @@ impl<'analysis> Types<'analysis> {
             .filter(|target| !calls_property || matches!(target, CallTarget::Property { .. }))
             .map(|target| self.target_declaration(target))
             .collect();
-        let Some(&declaration) = declarations.first() else {
-            unreachable!(
-                "the analysis records what each call of a file the checker accepted runs, not {:?}",
-                call.span()
-            );
-        };
+        let declaration = *declarations.first()?;
         agreed_kind(declarations.iter().map(|declaration| declaration.kind));
 
-        declaration
+        Some(declaration)
     }
 
     /// The position of the tuple element whose function the method call `call` runs, spec section 30, as `entry.twice(2)`
@@ -3391,6 +3382,11 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
         && object.is_static
     {
         return "Self".to_owned();
+    }
+    // A class the analysis found no declaration of, which the checker refuses, is its name as written, so code with
+    // errors lowers as written and the engine finds no such class when it runs, spec section 27.
+    if let TAtomic::Reference(TReference::Symbol { name, .. }) = atomic {
+        return class_text(*name, codebase);
     }
     let Some(sharp_type) = get_sharp_type(atomic) else {
         unreachable!("the analyzer refuses a type PHP# can't write, not `{}`", atomic.get_id())

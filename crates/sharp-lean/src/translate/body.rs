@@ -800,7 +800,7 @@ impl<'body, 'program> Body<'body, 'program> {
         if !self.reach.same_class(class, right.name.as_bytes()) {
             return None;
         }
-        let owner = types.call_target(expression).class;
+        let owner = types.call_target(expression)?.class;
         let owner = owner.as_bytes();
         let held = self.reach.same_class(owner, class) || self.implements(class, owner);
         if !held || self.reach.method(owner, comparison).is_none() {
@@ -1759,7 +1759,9 @@ impl<'body, 'program> Body<'body, 'program> {
 
                 return self.held(expression.span(), class, format!("({})", constructor.join(" ")));
             }
-            let target = self.checked.types().call_target(expression);
+            let Some(target) = self.checked.types().call_target(expression) else {
+                return "default".to_owned();
+            };
             if target.kind != DeclarationKind::StaticMethod {
                 return self.unmodeled(expression.span(), "a call through a class value".to_owned(), issues::TYPE_TEST);
             }
@@ -1794,7 +1796,9 @@ impl<'body, 'program> Body<'body, 'program> {
                 let Some(method) = self.method_name(&call.method) else {
                     return "default".to_owned();
                 };
-                let target = self.checked.types().call_target(expression);
+                let Some(target) = self.checked.types().call_target(expression) else {
+                    return "default".to_owned();
+                };
                 let receiver = (target.kind != DeclarationKind::StaticMethod).then(|| "this".to_owned());
 
                 return self.call(
@@ -1844,7 +1848,9 @@ impl<'body, 'program> Body<'body, 'program> {
         let Some(class) = self.receiver_class(call.object) else {
             return "default".to_owned();
         };
-        let target = self.checked.types().call_target(expression);
+        let Some(target) = self.checked.types().call_target(expression) else {
+            return "default".to_owned();
+        };
         let read = self.read_as(word(class));
         match target.kind {
             DeclarationKind::Method { overridable: false } => {}
@@ -2157,7 +2163,9 @@ impl<'body, 'program> Body<'body, 'program> {
         let Some(method) = self.method_name(&call.method) else {
             return "default".to_owned();
         };
-        let target = self.checked.types().call_target(expression);
+        let Some(target) = self.checked.types().call_target(expression) else {
+            return "default".to_owned();
+        };
         if target.kind != (DeclarationKind::Method { overridable: false }) {
             return self.overridable(expression, word(class), target.name.as_bytes());
         }

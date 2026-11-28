@@ -33692,6 +33692,54 @@ fn json_and_query_parse_have_the_effects_of_the_readers_their_type_argument_hold
     );
 }
 
+/// Spec sections 12 and 29, the program on #1122: a `parse` into `Any?` builds only maps, lists, strings, numbers,
+/// booleans and null, and runs no class's reader, so `Json.parse<T>`, `Query.parse<T>` and `typeof(T).parse` of an
+/// `Any?`, or of a `Map` or `List` of it, have only their text read's effects, as of a struct and a
+/// `Map<string, string>`. Each lambda is a `Function<int() uses none>`. An open class whose constructor isn't
+/// `required` may be any subclass, whose reader may have any effect, so its parse still may.
+#[test]
+fn a_parse_into_any_runs_no_reader_and_an_open_class_may_have_every_effect() {
+    let point = (
+        "app/Shop/Point.sharp",
+        "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; } = 0) { }\n}\n",
+    );
+    let loose = (
+        "app/Shop/Loose.sharp",
+        "namespace App.Shop;\n\npublic class Loose\n{\n    public Loose(public int x { get; } = 0) { }\n}\n",
+    );
+    let probe = (
+        "app/Shop/LooseProbe.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\nimport Sharp.Encoding.Query;\n\npublic class LooseProbe\n{\n    private static int run(Function<int() uses none> work) => work();\n\n    public static int count()\n    {\n        return LooseProbe.run(() => Json.parse<Point>(\"{}\").unwrap().x)\n            + LooseProbe.run(() => Json.parse<Map<string, string>>(\"{}\").unwrap().count())\n            + LooseProbe.run(() => Json.parse<Map<string, Any?>>(\"{}\").unwrap().count())\n            + LooseProbe.run(() => Json.parse<Any?>(\"1\").ok() == null ? 0 : 1)\n            + LooseProbe.run(() => Json.parse<List<Any?>>(\"[]\").unwrap().count())\n            + LooseProbe.run(() => typeof(Map<string, Any?>).parse([\"a\": 1]).unwrap().count())\n            + LooseProbe.run(() => Query.parse<Map<string, Any?>>(\"a=1\").unwrap().count())\n            + LooseProbe.run(() => Json.parse<Loose>(\"{}\").unwrap().x);\n    }\n}\n",
+    );
+    let [a, b, c, d, e, f, g] = REFLECTION;
+    let [json, json_value, query, url] = TEXT_READERS;
+
+    assert_eq!(
+        effect_issues(&[
+            probe,
+            point,
+            loose,
+            json,
+            json_value,
+            query,
+            url,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+            PARSE_LIBRARY[0],
+            PARSE_LIBRARY[1],
+            PARSE_LIBRARY[2],
+        ]),
+        [
+            "app/Shop/LooseProbe.sharp:19:30 invalid-argument: This lambda reaches `Json.parse`, which may have every effect, so a pure `Function<int() uses none>` cannot hold it. Help: It runs code no `uses` can name, so call it where no `uses` limits the effects."
+        ]
+    );
+}
+
 /// Spec sections 25 and 29: `attributeData<T>()` reads attributes as written and builds none, so the pure `Counting.count`
 /// accepts a method that reads them, and rebuilding one from its data goes through `createInstance`, which may have
 /// every effect, so the pure `Rebuilding.rebuild` refuses a method that does it and a method no `uses` limits does it.

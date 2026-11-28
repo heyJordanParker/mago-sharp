@@ -830,7 +830,9 @@ impl Lowering<'_, '_> {
             None if self.takes_receiver(call.object) && self.steps(call.object, names, steps) => {}
             None => return false,
         }
-        let declaration = self.types.call_target(expression);
+        let Some(declaration) = self.types.call_target(expression) else {
+            return false;
+        };
 
         (declaration.public || self.types.inline_form(&declaration).is_some())
             && matches!(declaration.kind, DeclarationKind::Method { .. } | DeclarationKind::StaticMethod)
@@ -869,7 +871,7 @@ impl Lowering<'_, '_> {
             None if self.takes_receiver(call.object) => Some(call.object),
             None => return None,
         };
-        let declaration = self.types.call_target(expression);
+        let declaration = self.types.call_target(expression)?;
 
         self.inlined(
             expression,
