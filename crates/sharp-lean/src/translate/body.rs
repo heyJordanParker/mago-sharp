@@ -905,8 +905,10 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// `==` of `lhs` and `rhs`, two values of `interface`, an interface that extends `Equatable`, spec section 19: equal
     /// when they are values of one implementer and its own `==` holds. A sealed interface's value is one of its
-    /// implementers' values, spec section 20.1, so `==` splits on each implementer, and else is false. Lean knows nothing
-    /// about the values of any other interface, so `==` on them is Lean's equality of the values.
+    /// implementers' values, spec section 20.1, so `==` splits on each implementer, and else is false. Each branch runs
+    /// the implementer's `==` on `lhs` and `rhs` themselves, since an implementer's value is the interface's, as its
+    /// `==` takes it. Lean knows nothing about the values of any other interface, so `==` on them is Lean's equality of
+    /// the values.
     fn own_type_equal(&mut self, span: Span, interface: &[u8], (lhs, rhs): (&str, &str)) -> String {
         self.reads(interface);
         let reach = self.reach;
@@ -923,9 +925,8 @@ impl<'body, 'program> Body<'body, 'program> {
                 _ => TAtomic::Object(TObject::Named(TNamedObject::new(*implementer))),
             });
             let constructor = names::member(&lean, names::short_name(implementer.as_bytes()).as_bytes());
-            let (a, b) = (self.fresh(), self.fresh());
-            let equal = self.nested_lines(|body| body.equal(span, (&held, &held), (&a, &b), false));
-            alternatives.push((format!("({constructor} {a}), ({constructor} {b})"), Choice::Branch(equal)));
+            let equal = self.nested_lines(|body| body.equal(span, (&held, &held), (lhs, rhs), false));
+            alternatives.push((format!("({constructor} _), ({constructor} _)"), Choice::Branch(equal)));
         }
         if implementers.len() > 1 {
             alternatives.push(("_, _".to_owned(), Choice::Branch(vec!["pure false".to_owned()])));
