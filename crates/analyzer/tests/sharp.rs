@@ -33341,6 +33341,25 @@ fn new_from_a_class_value_parameter_has_its_required_constructor_s_effects() {
     );
 }
 
+/// Spec sections 11 and 29: `new TItem(…)` builds the type argument, a class its bound names or one below it, whose
+/// constructor below the bound's `required` one may add no effect, so it has the effects of the bound's constructor,
+/// as `new Saved(…)` has them.
+#[test]
+fn new_of_a_type_parameter_has_its_bound_s_required_constructor_s_effects() {
+    let maker = (
+        "app/Shop/Maker.sharp",
+        "namespace App.Shop;\n\npublic class Maker\n{\n    private static Any? pure(Function<Any?() uses none> work) => work();\n\n    public static Any? viaName() => Maker.pure(() => new Saved());\n\n    public static Any? viaParameter<TItem : Saved>() => Maker.pure(() => new TItem());\n}\n",
+    );
+    let [disk, stub, saved, _] = BUILT;
+    let refused = |at: &str| {
+        format!(
+            "app/Shop/Maker.sharp:{at} invalid-argument: This lambda reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so a pure `Function<Any?() uses none>` cannot hold it."
+        )
+    };
+
+    assert_eq!(effect_issues(&[maker, disk, stub, saved]), [refused("7:48"), refused("9:68")]);
+}
+
 /// Spec sections 25 and 29: `new (type)(…)` has the effects of the `required` constructor of the class `type`'s
 /// `Class<T>` names, as `new T(…)` has them. So a pure method that builds a `Saved` through a `Class<Saved>` is refused
 /// as one that writes `new Saved()` is, one whose `uses` lists `Database` compiles, and one that builds a `Note`, whose
