@@ -25868,6 +25868,35 @@ fn new_from_a_class_value_of_an_interface_and_a_class_is_of_both_and_reads_the_c
     );
 }
 
+/// Spec sections 11 and 25: `new (type)(…)` needs a `required` constructor, and an interface has no constructor. So
+/// `new (type)()` from a `Class<Counted>`, with `Counted` an interface, is refused with a Help that names the form the
+/// language accepts, a `Class<…>` of an abstract class that implements `Counted` with a `required` constructor, which
+/// compiles. A class bound keeps its message, and no message names `class-string<…>`, which users don't write.
+#[test]
+fn new_from_an_interface_class_value_names_the_abstract_base_form() {
+    let counted = ("src/Demo/Counted.sharp", "namespace Demo;\n\ninternal interface Counted\n{\n    int used();\n}\n");
+    let base = (
+        "src/Demo/CountedBase.sharp",
+        "namespace Demo;\n\ninternal abstract class CountedBase : Counted\n{\n    public required CountedBase() {}\n\n    public int used() => 1;\n}\n",
+    );
+    let loose = ("src/Demo/Loose.sharp", "namespace Demo;\n\ninternal class Loose\n{\n}\n");
+    let report = (
+        "src/Demo/Report.sharp",
+        "namespace Demo;\n\ninternal class Report\n{\n    public int count(Class<Counted> type) => new (type)().used();\n\n    public int based(Class<CountedBase> type) => new (type)().used();\n\n    public Loose loose(Class<Loose> type) => new (type)();\n}\n",
+    );
+
+    let issues = worded(report, &[counted, base, loose]);
+
+    assert_eq!(
+        issues,
+        [
+            "5:46 unsafe-instantiation `new (type)(…)` needs a `required` constructor, and `Counted` is an interface, which has no constructor. | Created here. | Hold a `Class<…>` of an abstract class that implements `Counted` and declares a `required` constructor, as in `abstract class CountedBase : Counted { public required CountedBase() {} }`.",
+            "9:46 unsafe-instantiation `new (type)(…)` needs a `required` constructor: a class value can hold any subclass of `Loose`, so every subclass must keep a constructor that `new (type)(…)` can call. | Created here. | Declare the constructor of `Loose` `required`, as in `public required Loose(…)`.",
+        ]
+    );
+    assert!(issues.iter().all(|issue| !issue.contains("class-string")), "{issues:?}");
+}
+
 /// `typeof(Box<Order>)` is a `Class<Box<Order>>`, spec section 25, which carries its type arguments, so it is no
 /// `Class<Box<int>>`. The wrong return shows the type the expression has.
 #[test]

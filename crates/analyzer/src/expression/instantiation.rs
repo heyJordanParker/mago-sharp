@@ -612,7 +612,11 @@ where
 
         return Ok(refused_instantiation(context));
     }
-    if classname.is_from_class_string() && (metadata.kind.is_interface() || metadata.kind.is_trait()) {
+    // A `.sharp` file's `new (type)()` on an interface is refused below, with the form that works.
+    if classname.is_from_class_string()
+        && (metadata.kind.is_interface() || metadata.kind.is_trait())
+        && !(context.dialect.is_sharp() && metadata.kind.is_interface())
+    {
         let kind_name = if metadata.kind.is_interface() { "interface" } else { "trait" };
 
         context.collector.report_with_code(
@@ -995,16 +999,33 @@ where
             );
         }
     } else if has_inconsistent_constructor && through_class_value && metadata.flags.is_sharp() {
-        let (written, holder) = (written(), holder());
+        let written = written();
+        // An interface has no constructor, so the form that works is a `Class<…>` of an abstract class below it.
+        let (message, help) = if metadata.kind.is_interface() {
+            (
+                format!(
+                    "`new {written}(…)` needs a `required` constructor, and `{classname_str}` is an interface, which has no constructor."
+                ),
+                format!(
+                    "Hold a `Class<…>` of an abstract class that implements `{classname_str}` and declares a `required` constructor, as in `abstract class {classname_str}Base : {classname_str} {{ public required {classname_str}Base() {{}} }}`."
+                ),
+            )
+        } else {
+            (
+                format!(
+                    "`new {written}(…)` needs a `required` constructor: {holder} any subclass of `{classname_str}`, so every subclass must keep a constructor that `new {written}(…)` can call.",
+                    holder = holder(),
+                ),
+                format!(
+                    "Declare the constructor of `{classname_str}` `required`, as in `public required {classname_str}(…)`."
+                ),
+            )
+        };
         context.collector.report_with_code(
             IssueCode::UnsafeInstantiation,
-            Issue::error(format!(
-                "`new {written}(…)` needs a `required` constructor: {holder} any subclass of `{classname_str}`, so every subclass must keep a constructor that `new {written}(…)` can call.",
-            ))
-            .with_annotation(Annotation::primary(instantiation_span).with_message("Created here."))
-            .with_help(format!(
-                "Declare the constructor of `{classname_str}` `required`, as in `public required {classname_str}(…)`."
-            )),
+            Issue::error(message)
+                .with_annotation(Annotation::primary(instantiation_span).with_message("Created here."))
+                .with_help(help),
         );
     } else if has_inconsistent_constructor
         && !skip_constructor_warning
