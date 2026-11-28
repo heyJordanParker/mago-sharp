@@ -2377,8 +2377,10 @@ fn finish(
 pub(crate) struct Outcome {
     /// The issues of each file the compile refused, which the checker's report prints.
     issues: IssueCollection,
-    /// The name of each file an issue points into, whose lines the report prints.
-    issue_files: Vec<String>,
+    /// The id and the name of each file an issue points into, whose lines the report prints. A file of the standard
+    /// library is named by its path in the project and identified by its path in the library's package, so the id
+    /// can't be computed from the name.
+    issue_files: Vec<(FileId, String)>,
     /// Each other error the compile found, as a PHP file someone wrote where a source's PHP file goes.
     errors: Vec<String>,
     /// The line the compile printed last.
@@ -2404,8 +2406,8 @@ impl Outcome {
             .iter()
             .flat_map(|issue| &issue.annotations)
             .filter_map(|annotation| database.get_ref(&annotation.span.file_id).ok())
-            .map(|file| String::from_utf8_lossy(&file.name).into_owned())
-            .collect::<BTreeSet<String>>()
+            .map(|file| (file.id, String::from_utf8_lossy(&file.name).into_owned()))
+            .collect::<BTreeSet<(FileId, String)>>()
             .into_iter()
             .collect();
 
@@ -2446,7 +2448,8 @@ impl Outcome {
     }
 
     /// The files the issues point into, for the report of a compile with nothing to do: each file in the project of
-    /// `root`, as the compile read it, which every input being as it was keeps, and each of the prelude's. None when
+    /// `root`, as the compile read it, which every input being as it was keeps, under the id its issues point at it
+    /// by, and each of the prelude's. None when
     /// [`read_listed`] finds one of the project's gone since the record was checked, which makes the record stale.
     ///
     /// # Errors
@@ -2455,11 +2458,12 @@ impl Outcome {
     fn report_database(&self, root: &Path) -> Result<Option<ReadDatabase>, Error> {
         let mut database = Database::new(DatabaseConfiguration::new(root, vec![], vec![], vec![], vec![]));
         let mut prelude = None;
-        for name in &self.issue_files {
+        for (id, name) in &self.issue_files {
             let path = root.join(name);
             if let Some(contents) = read_listed(&path)? {
-                let name = name.as_bytes().to_vec().into();
-                database.add(File::new(name, FileType::Host, Some(path), contents.into()));
+                let mut file = File::new(name.as_bytes().to_vec().into(), FileType::Host, Some(path), contents.into());
+                file.id = *id;
+                database.add(file);
                 continue;
             }
             let prelude = prelude.get_or_insert_with(|| {
@@ -3903,7 +3907,7 @@ final class Boxes implements Plugin, MethodReturnTypeProvider
     fn a_file_the_reprinted_issues_point_into_that_is_gone_makes_the_record_stale() {
         let (_directory, root, _) = project();
         let outcome = |names: &[&str]| Outcome {
-            issue_files: names.iter().map(|name| (*name).to_owned()).collect(),
+            issue_files: names.iter().map(|name| (FileId::new(name.as_bytes()), (*name).to_owned())).collect(),
             ..Outcome::default()
         };
 
