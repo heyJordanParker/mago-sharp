@@ -332,9 +332,9 @@ fn decoded_readers<'codebase>(
 }
 
 /// Pushes onto `readers` the class of each reader `parse` of `r#type` runs, once each, spec section 29: a type that is
-/// no class runs only the readers of the classes inside it, so a scalar, an enum and `null` add none, and a `List`, a
-/// `Map`, a tuple, a `Set`, a union and a generic class's type arguments add their classes'. `None` for a type whose
-/// reader may be any, as [`reader_of`] says.
+/// no class runs only the readers of the classes inside it, so a scalar, an enum and `null` add none, and so does
+/// `Any` and `Any?`, which read only maps, lists, scalars and null, and a `List`, a `Map`, a tuple, a `Set`, a union and a
+/// generic class's type arguments add their classes'. `None` for a type whose reader may be any, as [`reader_of`] says.
 fn readers_of<'codebase>(
     codebase: &'codebase CodebaseMetadata,
     r#type: &TUnion,
@@ -342,7 +342,7 @@ fn readers_of<'codebase>(
 ) -> Option<()> {
     for atomic in r#type.types.iter() {
         match atomic {
-            TAtomic::Null | TAtomic::Scalar(_) | TAtomic::Object(TObject::Enum(_)) => {}
+            TAtomic::Null | TAtomic::Mixed(_) | TAtomic::Scalar(_) | TAtomic::Object(TObject::Enum(_)) => {}
             TAtomic::Array(array) => {
                 let (keys, values) = get_array_parameters(array, codebase);
                 readers_of(codebase, &keys, readers)?;
