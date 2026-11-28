@@ -4518,6 +4518,55 @@ fn a_law_reaching_a_type_that_holds_itself_is_refused() {
     );
 }
 
+/// Spec sections 20 and 28: a case of an enum that carries data runs as a class, so an enum whose case holds the enum
+/// in a `List` or a `Map` holds itself, and a law over it is refused as a class that holds itself is.
+#[test]
+fn a_law_over_an_enum_that_holds_itself_in_a_list_or_a_map_is_refused() {
+    for case in ["Items(List<Doc> items)", "Fields(Map<string, Doc> fields)"] {
+        let source = format!(
+            "namespace App.Shared;\n\npublic enum Doc\n{{\n    case Text(string text);\n    case {case};\n\n    law sameIsSame(Doc a) => a == a;\n}}\n"
+        );
+        let directory = library_project(&[("app/Shared/Doc.sharp", &source)]);
+        let root = directory.path();
+
+        let output = compile_without_lean(root);
+
+        assert_eq!(output.status.code(), Some(1), "{case}: {}", printed(&output));
+        assert!(
+            printed(&output).contains("error - unmodeled-construct: Law sameIsSame reaches a type that holds itself in Doc. A law reasons only about a class whose properties never hold a value of the class itself."),
+            "{case}: {}",
+            printed(&output)
+        );
+        assert!(!compiled(root, "app/Shared/Doc.sharp").exists());
+    }
+}
+
+/// Spec section 28: the small values that break a law are built at most two classes deep, so a law over a class that
+/// holds a class that holds an enum whose cases hold only ints names the case that breaks it, as the deepest class.
+#[test]
+fn a_law_over_a_class_that_holds_a_data_case_two_classes_down_names_the_case_that_breaks_it() {
+    let cart = "namespace App.Shop;\n\npublic class Cart\n{\n    public Cart(public Order order { get; }) { }\n\n    law paidIsZero(Cart c) => c.order.status == Status.Paid(0);\n}\n";
+    let order =
+        "namespace App.Shop;\n\npublic class Order\n{\n    public Order(public Status status { get; }) { }\n}\n";
+    let status =
+        "namespace App.Shop;\n\npublic enum Status\n{\n    case Paid(int cents);\n    case Owed(int cents);\n}\n";
+    let directory = library_project(&[
+        ("app/Shop/Cart.sharp", cart),
+        ("app/Shop/Order.sharp", order),
+        ("app/Shop/Status.sharp", status),
+    ]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("error[law-unproven]: law paidIsZero is not proven\n"), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(" = fails for: c = new Cart(new Order(Status.Paid(1)))\n"),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// A value pattern tests a List by `==`, which a `when` guard writes, so the refusal says to write it there.
 #[test]
 fn a_law_reaching_a_value_pattern_on_a_list_is_refused() {
