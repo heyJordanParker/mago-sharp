@@ -33319,6 +33319,29 @@ const MAKER: (&str, &str) =
     ("app/Shop/Maker.sharp", "namespace App.Shop;\n\npublic interface Maker\n{\n    Saved make();\n}\n");
 
 /// Spec sections 25 and 29: `new (type)(…)` has the effects of the `required` constructor of the class `type`'s
+/// `Class<T>` names, whichever expression gives the class value. So a pure lambda that builds a `Saved`, whose
+/// `required` constructor writes to the database, is refused through a parameter, a local and a property as through
+/// `typeof(Saved)`, and one that builds a `Note`, whose constructor has no effect, compiles.
+#[test]
+fn new_from_a_class_value_parameter_has_its_required_constructor_s_effects() {
+    let maker = (
+        "app/Shop/Maker.sharp",
+        "namespace App.Shop;\n\npublic class Maker\n{\n    private Class<Saved> saved { get; } = typeof(Saved);\n\n    private static Any? pure(Function<Any?() uses none> work) => work();\n\n    public Any? viaParameter(Class<Saved> type) => Maker.pure(() => new (type)());\n\n    public Any? viaLocal()\n    {\n        Class<Saved> type = typeof(Saved);\n        return Maker.pure(() => new (type)());\n    }\n\n    public Any? viaProperty() => Maker.pure(() => new (this.saved)());\n\n    public Any? viaTypeof() => Maker.pure(() => new (typeof(Saved))());\n\n    public Any? pureNote(Class<Note> note) => Maker.pure(() => new (note)());\n}\n",
+    );
+    let [disk, stub, saved, note] = BUILT;
+    let refused = |at: &str| {
+        format!(
+            "app/Shop/Maker.sharp:{at} invalid-argument: This lambda reaches `Saved.Saved`, which calls `Disk.save` with the effect `Database`, so a pure `Function<Any?() uses none>` cannot hold it."
+        )
+    };
+
+    assert_eq!(
+        effect_issues(&[maker, disk, stub, saved, note]),
+        [refused("9:63"), refused("14:27"), refused("17:45"), refused("19:43")]
+    );
+}
+
+/// Spec sections 25 and 29: `new (type)(…)` has the effects of the `required` constructor of the class `type`'s
 /// `Class<T>` names, as `new T(…)` has them. So a pure method that builds a `Saved` through a `Class<Saved>` is refused
 /// as one that writes `new Saved()` is, one whose `uses` lists `Database` compiles, and one that builds a `Note`, whose
 /// constructor has no effect, compiles.
