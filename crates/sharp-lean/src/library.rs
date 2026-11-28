@@ -250,7 +250,7 @@ pub(crate) fn output_before_deadline(command: &mut Command, input: &[u8]) -> io:
         mago_extension::process_group::block_sigpipe(&stdin);
         stdin.write_all(&input)
     });
-    let output = wait_before_deadline(&mut group, deadline(), ProcessGroup::end)?;
+    let output = wait_before_deadline(&mut group, deadline(), &SystemClock, processor_time, ProcessGroup::end)?;
     // Only a command that succeeded must have read its input. The writer to one that failed ends on its own, or never,
     // when a process of the group outlived its end and never reads.
     if output.0.status.success() {
@@ -265,10 +265,14 @@ pub(crate) fn output_before_deadline(command: &mut Command, input: &[u8]) -> io:
 /// once the group has written nothing for [`SETTLE`]: once for each burst of writes, where it read it after each chunk
 /// of a runner's line for each module, and on Linux each read lists every process of `/proc`. A process of the group that outlives the end, as one the kernel holds on a
 /// stalled disk, keeps the group's pipes open, so the output is what the group wrote before the end, and a leader that
-/// still runs counts as ended by SIGKILL, since waiting for it could wait forever.
+/// still runs counts as ended by SIGKILL, since waiting for it could wait forever. The wait is `clock`'s, which wakes
+/// the moment the group writes, and `processor_time` reads the group's processor time, as [`processor_time`] does, so
+/// a test of the deadline runs on a `FakeClock` with the processor time it scripts.
 fn wait_before_deadline(
     group: &mut ProcessGroup,
     deadline: Duration,
+    clock: &impl Clock,
+    mut processor_time: impl FnMut(u32) -> Option<u64>,
     mut end: impl FnMut(&mut ProcessGroup) -> io::Result<()>,
 ) -> io::Result<(Output, bool)> {
     let missing = || io::Error::other("a law checker process has no output stream");
@@ -285,7 +289,7 @@ fn wait_before_deadline(
     // Whether `used` was read after the group last wrote.
     let mut read = true;
     while open > 0 {
-        match written.recv_timeout(if read { deadline } else { SETTLE.min(deadline) }) {
+        match clock.recv_timeout(&written, if read { deadline } else { SETTLE.min(deadline) }) {
             Ok((_, Ok(chunk))) if chunk.is_empty() => open -= 1,
             Ok((stream, Ok(chunk))) => {
                 streams[stream].extend_from_slice(&chunk);
@@ -948,6 +952,9 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    use mago_database::clock::FakeClock;
+    use mago_database::clock::poll_until;
+
     use super::*;
 
     /// Each process a `Lake` starts, `lake` itself or anything run in its place, runs under the processor-time limit,
@@ -978,7 +985,8 @@ mod tests {
             Err(io::Error::new(io::ErrorKind::TimedOut, "process group 4321 still ran 1000 ms after SIGKILL"))
         };
 
-        let waited = wait_before_deadline(&mut group, Duration::from_millis(200), outlived);
+        let waited =
+            wait_before_deadline(&mut group, Duration::from_millis(200), &SystemClock, processor_time, outlived);
         drop(group);
         let (output, waited) = waited?;
 
@@ -986,6 +994,99 @@ mod tests {
             (output.status.signal(), output.stdout.as_slice(), output.stderr.as_slice(), waited),
             (Some(libc::SIGKILL), b"answer\n".as_slice(), b"module 0 Code.App.Shared.Money\n".as_slice(), true)
         );
+
+        Ok(())
+    }
+
+    /// Spec section 28: heartbeats alone bound a proof, so a runner that computes past its deadline without writing, as
+    /// one on a busy machine does, is not ended there. The deadline counts from the group's last processor time, which
+    /// grows on each read here, so the group runs until the clock is three deadlines on, reads the line it waits for,
+    /// and gives its answer.
+    #[test]
+    fn a_group_that_computes_past_its_deadline_without_writing_is_not_ended_and_gives_its_answer() -> io::Result<()> {
+        let deadline = Duration::from_secs(8);
+        let clock = FakeClock::new();
+        let mut command = Command::new("sh");
+        command.args(["-c", "read line; echo answer"]);
+        let mut group =
+            ProcessGroup::spawn(command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
+        let mut stdin = group.leader().stdin.take();
+        let mut used = 0;
+        let mut wrote = Ok(());
+        let computing = |_: u32| {
+            used += 1;
+            if clock.moved() > deadline * 3
+                && let Some(mut stdin) = stdin.take()
+            {
+                wrote = stdin.write_all(b"go\n");
+            }
+            Some(used)
+        };
+        let mut ends = 0;
+        let end = |group: &mut ProcessGroup| {
+            ends += 1;
+            group.end()
+        };
+
+        let (output, waited) = wait_before_deadline(&mut group, deadline, &clock, computing, end)?;
+        wrote?;
+
+        assert_eq!(
+            (output.status.success(), output.stdout.as_slice(), waited, ends),
+            (true, b"answer\n".as_slice(), false, 0)
+        );
+        assert!(clock.moved() > deadline * 3, "the clock moved {:?}", clock.moved());
+
+        Ok(())
+    }
+
+    /// Spec section 28: a law checker that waits, writing nothing and using no processor time, is ended a deadline
+    /// after it last used processor time. Here its processor time grows until the clock is 8 seconds on and then
+    /// stays, so it is ended at 16 seconds, as a stopped check.
+    #[test]
+    fn a_group_that_stops_computing_is_ended_a_deadline_after_its_last_processor_time() -> io::Result<()> {
+        let deadline = Duration::from_secs(8);
+        let clock = FakeClock::new();
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 2147483647"]);
+        let mut group = ProcessGroup::spawn(command.stdout(Stdio::piped()).stderr(Stdio::piped()))?;
+        let mut used = 0;
+        let computing = |_: u32| {
+            if clock.moved() < deadline * 2 {
+                used += 1;
+            }
+            Some(used)
+        };
+        let mut ended_at = Vec::new();
+        // The ended group's pipes close in real time, which the fake clock may pass another deadline in, so the wait
+        // may end the group again once only its exited leader is left, which no signal reaches. Only the first end is
+        // the one the deadline makes, and it alone signals the group.
+        let end = |group: &mut ProcessGroup| {
+            ended_at.push(clock.moved());
+            if ended_at.len() == 1 { group.end() } else { Ok(()) }
+        };
+
+        let (output, waited) = wait_before_deadline(&mut group, deadline, &clock, computing, end)?;
+
+        assert_eq!((output.stdout.as_slice(), waited, ended_at.first()), (b"".as_slice(), true, Some(&(deadline * 2))));
+
+        Ok(())
+    }
+
+    /// Spec section 28: the deadline counts from the group's last processor time, which counts every process of the
+    /// group, so it grows while a child of the leader computes, as a Lake runner's does.
+    #[test]
+    fn a_group_s_processor_time_grows_while_a_child_of_its_leader_computes() -> io::Result<()> {
+        let mut command = Command::new("sh");
+        command.args(["-c", "perl -MTime::HiRes=time -e 'my $end = time + 0.3; 1 while time < $end' & wait"]);
+        let mut group = ProcessGroup::spawn(command.stdout(Stdio::null()).stderr(Stdio::null()))?;
+        let id = group.leader().id();
+        let started = processor_time(id);
+
+        let grew = poll_until(Duration::from_secs(1), || processor_time(id) > started);
+        group.end()?;
+
+        assert!(grew, "the group's processor time stayed {started:?}");
 
         Ok(())
     }
