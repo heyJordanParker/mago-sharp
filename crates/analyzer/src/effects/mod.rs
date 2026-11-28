@@ -163,22 +163,32 @@ pub(crate) struct Call {
     pub(crate) receiver: Roots,
     /// The roots of each argument, by the callee's parameter index.
     pub(crate) arguments: Vec<Roots>,
-    /// The call's type arguments, by the callee's own type parameter index, as a read of attributes through one takes
-    /// them, which [`through`] substitutes.
-    pub(crate) type_arguments: Vec<AttributeArgument>,
+    /// The call's type arguments, by the callee's own type parameter index, as a read of attributes or a parse through
+    /// one takes them, which [`through`] and [`Effects::solve`] substitute.
+    pub(crate) type_arguments: Vec<TypeArgument>,
 }
 
 /// What a call's type argument is to a read of the attributes of the class it names, `attributes<TAttribute>()`, spec
-/// sections 1 and 25.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum AttributeArgument {
-    /// A class-like by its name, whose attributes a read creates with no effects when [`sharp_attributes`] holds for
-    /// it in the codebase the effects are solved against, and with every effect otherwise.
-    Class(Word),
+/// sections 1 and 25, and to a parse into it, as `Json.parse<T>`, spec sections 25 and 29.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum TypeArgument {
+    /// A type. `class` is the class-like it names, if it names one, whose attributes a read creates with no effects
+    /// when [`sharp_attributes`] holds for it in the codebase the effects are solved against, and with every effect
+    /// otherwise. `readers` is the `parse` of each class a parse of it runs, or `None` when one may be any class's
+    /// reader, so a parse may have every effect.
+    Type { class: Option<Word>, readers: Option<Vec<Body>> },
     /// The type parameter at this index of the calling body's own method, which its callers give in turn.
     Parameter(u32),
-    /// Any other type, whose attributes a read may create with every effect.
-    Other,
+}
+
+impl TypeArgument {
+    /// The `parse` of each class a parse into the type runs, when the type is known and so is each of them.
+    fn readers(&self) -> Option<&[Body]> {
+        match self {
+            TypeArgument::Type { readers: Some(readers), .. } => Some(readers),
+            TypeArgument::Type { readers: None, .. } | TypeArgument::Parameter(_) => None,
+        }
+    }
 }
 
 /// Whether a read creates the attributes of `class` with no effects, spec sections 1 and 25: a PHP# class-like that no
@@ -211,6 +221,9 @@ pub struct EffectSummary {
     /// `type.attributes<TAttribute>()` in `has<TAttribute>`, with the call and its callee: each call of the body gives
     /// it the effects of the class it names.
     pub(crate) attribute_reads: Vec<(u32, Span, (Word, Word))>,
+    /// Each parse into the body's own type parameter at an index, as `Json.parse<T>(json)` in `read<T>`, with the call
+    /// and its callee: each call of the body gives it the effects of the readers its type argument runs.
+    pub(crate) parses: Vec<(u32, Span, (Word, Word))>,
     pub(crate) calls: Vec<Call>,
     /// Each change, with the write and the place written as the source writes it.
     pub(crate) changes: Vec<(Changed, Span, Word)>,
@@ -326,22 +339,24 @@ fn written((class, member): (Word, Word), class_name: &dyn Fn(Word) -> String) -
     }
 }
 
-/// What a body does: an effect, a change of a root, or a read of the attributes of the class the type parameter at an
-/// index of the body's own method names, whose effects each call gives, as [`through`] substitutes them.
+/// What a body does: an effect, a change of a root, or a read of the attributes of, or a parse into, the type the type
+/// parameter at an index of the body's own method names, whose effects each call gives, as [`through`] and
+/// [`Effects::solve`] substitute them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Item {
     Effect(Effect),
     Changed(Changed),
     AttributesOf(u32),
+    ParsedInto(u32),
 }
 
 impl Item {
-    /// The effect the item has where it is, `None` for a change. A read of attributes no call has named the class of
-    /// may have every effect, as a read of a plain PHP class's does.
+    /// The effect the item has where it is, `None` for a change. A read of attributes, or a parse, that no call has
+    /// named the type of may have every effect, as a read of a plain PHP class's does.
     fn effect(self) -> Option<Effect> {
         match self {
             Item::Effect(effect) => Some(effect),
-            Item::AttributesOf(_) => Some(Effect::Any),
+            Item::AttributesOf(_) | Item::ParsedInto(_) => Some(Effect::Any),
             Item::Changed(_) => None,
         }
     }
@@ -439,26 +454,31 @@ impl Effects {
 
         // A callee with no summary contributes nothing but its overrides. A call of a method without a body has the
         // effects its `uses` lists instead of a callee.
+        let bodies_of = |callee: &Body| -> Vec<usize> {
+            index.get(callee).into_iter().chain(overrides.get(callee).into_iter().flatten()).copied().collect()
+        };
         let targets: Vec<Vec<Vec<usize>>> = summaries
             .iter()
-            .map(|summary| {
-                summary
-                    .calls
-                    .iter()
-                    .map(|call| {
-                        index
-                            .get(&call.callee)
-                            .into_iter()
-                            .chain(overrides.get(&call.callee).into_iter().flatten())
-                            .copied()
-                            .collect()
-                    })
-                    .collect()
-            })
+            .map(|summary| summary.calls.iter().map(|call| bodies_of(&call.callee)).collect())
             .collect();
 
-        let successors: Vec<Vec<usize>> =
-            targets.iter().map(|calls| calls.iter().flatten().copied().collect()).collect();
+        // A parse into a callee's type parameter runs the readers the call's type argument names, spec section 25, so
+        // a caller is solved after each reader any of its calls names.
+        let successors: Vec<Vec<usize>> = targets
+            .iter()
+            .zip(summaries)
+            .map(|(calls, summary)| {
+                let readers = summary
+                    .calls
+                    .iter()
+                    .flat_map(|call| &call.type_arguments)
+                    .filter_map(TypeArgument::readers)
+                    .flatten()
+                    .flat_map(bodies_of);
+
+                calls.iter().flatten().copied().chain(readers).collect()
+            })
+            .collect();
 
         let mut solved: Vec<Vec<(Item, Origin)>> = summaries.iter().map(own_items).collect();
         for part in strongly_connected_parts(&successors) {
@@ -467,17 +487,42 @@ impl Effects {
                 for &body in &part {
                     for (call, call_targets) in summaries[body].calls.iter().zip(&targets[body]) {
                         for &target in call_targets {
-                            let reached: Vec<(Item, Item)> = solved[target]
+                            let mut reached: Vec<(usize, Item, Item)> = solved[target]
                                 .iter()
-                                .flat_map(|(item, _)| through(codebase, *item, call).map(move |mapped| (*item, mapped)))
+                                .flat_map(|(item, _)| {
+                                    through(codebase, *item, call).map(move |mapped| (target, *item, mapped))
+                                })
                                 .collect();
+                            // The call runs each reader of the type argument a parse in the callee takes, with nothing
+                            // of the caller's passed.
+                            for (item, _) in &solved[target] {
+                                let Item::ParsedInto(parameter) = *item else {
+                                    continue;
+                                };
+                                let parsed = call.type_arguments.get(parameter as usize);
+                                for &callee in parsed.and_then(TypeArgument::readers).unwrap_or_default() {
+                                    let read = Call {
+                                        callee,
+                                        span: call.span,
+                                        receiver: Roots::new(),
+                                        arguments: Vec::new(),
+                                        type_arguments: Vec::new(),
+                                    };
+                                    for reader in bodies_of(&callee) {
+                                        reached.extend(solved[reader].iter().flat_map(|(read_item, _)| {
+                                            through(codebase, *read_item, &read)
+                                                .map(move |mapped| (reader, *read_item, mapped))
+                                        }));
+                                    }
+                                }
+                            }
 
-                            for (callee_item, item) in reached {
+                            for (source, callee_item, item) in reached {
                                 if !solved[body].iter().any(|(known, _)| *known == item) {
                                     let origin = Origin {
                                         span: call.span,
                                         cause: (empty_word(), empty_word()),
-                                        via: Some((target, callee_item)),
+                                        via: Some((source, callee_item)),
                                     };
                                     solved[body].push((item, origin));
                                     grew = true;
@@ -754,9 +799,9 @@ impl Effects {
             }
         }
 
-        // A read of attributes no call named the class of reaches the standard library member it calls, as
-        // `ClassMembers.attributes`, which may have every effect.
-        if let Item::AttributesOf(_) = item {
+        // A read of attributes, or a parse, that no call named the type of reaches the standard library member it calls,
+        // as `ClassMembers.attributes` or `Json.parse`, which may have every effect.
+        if let Item::AttributesOf(_) | Item::ParsedInto(_) = item {
             path.push(origin.cause);
             every_effect = true;
         }
@@ -1033,9 +1078,10 @@ fn own_items(summary: &EffectSummary) -> Vec<(Item, Origin)> {
     let effects = summary.effects.iter().map(|(effect, span, cause)| (Item::Effect(*effect), *span, *cause));
     let attribute_reads =
         summary.attribute_reads.iter().map(|(index, span, cause)| (Item::AttributesOf(*index), *span, *cause));
+    let parses = summary.parses.iter().map(|(index, span, cause)| (Item::ParsedInto(*index), *span, *cause));
     let changes =
         summary.changes.iter().map(|(changed, span, place)| (Item::Changed(*changed), *span, (empty_word(), *place)));
-    for (item, span, cause) in effects.chain(attribute_reads).chain(changes) {
+    for (item, span, cause) in effects.chain(attribute_reads).chain(parses).chain(changes) {
         if !items.iter().any(|(known, _)| *known == item) {
             items.push((item, Origin { span, cause, via: None }));
         }
@@ -1048,10 +1094,11 @@ fn own_items(summary: &EffectSummary) -> Vec<(Item, Origin)> {
 /// What a callee's item is in the caller: an effect stays, a change maps through the roots the call passes, and a read
 /// of attributes through a type parameter maps through the type argument the call gives it: none for a PHP# attribute
 /// class, spec section 1, as `codebase` holds its descendants now, the caller's own type parameter for one it passes on,
-/// and every effect for any other type.
+/// and every effect for any other type. A parse through a type parameter maps the same way, but a type whose readers
+/// the call knows gives what those readers do, which [`Effects::solve`] adds, so it gives no item here.
 fn through<'call>(codebase: &CodebaseMetadata, item: Item, call: &'call Call) -> impl Iterator<Item = Item> + 'call {
     let roots: Vec<Changed> = match item {
-        Item::Effect(_) | Item::AttributesOf(_) => Vec::new(),
+        Item::Effect(_) | Item::AttributesOf(_) | Item::ParsedInto(_) => Vec::new(),
         Item::Changed(Changed::This) => call.receiver.iter().copied().collect(),
         Item::Changed(Changed::HeldByThis) => call.receiver.iter().map(|root| root.held()).collect(),
         Item::Changed(Changed::Parameter(index)) => {
@@ -1063,11 +1110,16 @@ fn through<'call>(codebase: &CodebaseMetadata, item: Item, call: &'call Call) ->
     let effect = match item {
         Item::Effect(_) => Some(item),
         Item::AttributesOf(index) => match call.type_arguments.get(index as usize) {
-            Some(AttributeArgument::Class(class)) => {
+            Some(TypeArgument::Type { class: Some(class), .. }) => {
                 (!sharp_attributes(codebase, *class)).then_some(Item::Effect(Effect::Any))
             }
-            Some(AttributeArgument::Parameter(own)) => Some(Item::AttributesOf(*own)),
-            Some(AttributeArgument::Other) | None => Some(Item::Effect(Effect::Any)),
+            Some(TypeArgument::Parameter(own)) => Some(Item::AttributesOf(*own)),
+            Some(TypeArgument::Type { class: None, .. }) | None => Some(Item::Effect(Effect::Any)),
+        },
+        Item::ParsedInto(index) => match call.type_arguments.get(index as usize) {
+            Some(TypeArgument::Type { readers: Some(_), .. }) => None,
+            Some(TypeArgument::Parameter(own)) => Some(Item::ParsedInto(*own)),
+            Some(TypeArgument::Type { readers: None, .. }) | None => Some(Item::Effect(Effect::Any)),
         },
         Item::Changed(_) => None,
     };
