@@ -5,6 +5,8 @@
 //! tokio's paused clock do (#958). A wait for another process's event, which no clock can move, polls it with a
 //! ceiling through [`poll_until`].
 
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -15,6 +17,17 @@ pub trait Clock: Send + Sync {
 
     /// Waits `duration`.
     fn sleep(&self, duration: Duration);
+
+    /// Waits at most `timeout` for the next message of `receiver`, as [`Receiver::recv_timeout`] does, so a wait on
+    /// another thread wakes the moment its message arrives, as tokio's paused clock drives its own timers.
+    ///
+    /// # Errors
+    ///
+    /// [`RecvTimeoutError::Timeout`] when no message arrived within `timeout`, and
+    /// [`RecvTimeoutError::Disconnected`] when every sender is gone.
+    fn recv_timeout<T>(&self, receiver: &Receiver<T>, timeout: Duration) -> Result<T, RecvTimeoutError>
+    where
+        Self: Sized;
 }
 
 /// The operating system's monotonic clock, and a sleep of the calling thread.
@@ -32,6 +45,10 @@ impl Clock for SystemClock {
     )]
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+
+    fn recv_timeout<T>(&self, receiver: &Receiver<T>, timeout: Duration) -> Result<T, RecvTimeoutError> {
+        receiver.recv_timeout(timeout)
     }
 }
 
@@ -80,6 +97,19 @@ impl Clock for FakeClock {
     fn sleep(&self, duration: Duration) {
         self.advance(duration);
     }
+
+    /// Takes the message that is already there, or moves the clock by `timeout` when none is, as tokio's paused clock
+    /// advances to a timer at once.
+    fn recv_timeout<T>(&self, receiver: &Receiver<T>, timeout: Duration) -> Result<T, RecvTimeoutError> {
+        receiver.try_recv().map_err(|error| match error {
+            std::sync::mpsc::TryRecvError::Empty => {
+                self.advance(timeout);
+
+                RecvTimeoutError::Timeout
+            }
+            std::sync::mpsc::TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+        })
+    }
 }
 
 /// The first and the longest pause between two looks of [`poll_until`].
@@ -122,6 +152,32 @@ mod tests {
 
         assert_eq!(clock.now().duration_since(started), Duration::from_micros(3_050));
         assert_eq!(clock.moved(), Duration::from_micros(3_050));
+    }
+
+    /// A fake clock's wait on a channel takes the message already there without moving, and moves by the whole timeout
+    /// when none is there, as each wait of tokio's paused clock ends at once.
+    #[test]
+    fn a_fake_clock_moves_by_a_channel_wait_only_when_no_message_is_there() {
+        let clock = FakeClock::new();
+        let (send, receive) = std::sync::mpsc::channel();
+        assert_eq!(send.send(1), Ok(()));
+
+        let taken = clock.recv_timeout(&receive, Duration::from_secs(8));
+        let moved_after_message = clock.moved();
+        let timed_out = clock.recv_timeout(&receive, Duration::from_secs(8));
+        drop(send);
+        let ended = clock.recv_timeout(&receive, Duration::from_secs(8));
+
+        assert_eq!(
+            (taken, moved_after_message, timed_out, clock.moved(), ended),
+            (
+                Ok(1),
+                Duration::ZERO,
+                Err(RecvTimeoutError::Timeout),
+                Duration::from_secs(8),
+                Err(RecvTimeoutError::Disconnected)
+            )
+        );
     }
 
     /// A condition that holds from the start ends the poll at its first look, and one that never holds ends it at its

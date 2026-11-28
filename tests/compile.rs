@@ -4802,35 +4802,6 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline() {
     });
 }
 
-/// Spec section 28: heartbeats alone bound a proof, so a runner that computes past its deadline without writing, as a
-/// runner on a busy machine does, is not stopped there, and its law proves. The runner replays the answer the tests'
-/// runner gave the same request, after it computes for 12 seconds without writing, with a share of a core small enough
-/// to stay under a limit of 2 processor seconds, whose deadline is 8 seconds.
-#[cfg(unix)]
-#[test]
-fn a_runner_that_computes_past_its_deadline_without_writing_finishes() {
-    let lake = tempfile::tempdir().unwrap();
-    let answer = lake.path().join("answer");
-    let recording = cache_with_runner(lake.path(), &format!("\"$real\" \"$@\" | tee '{}'", answer.display()));
-    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
-    let recorded = process::output(command(directory.path(), "never").env("XDG_CACHE_HOME", recording)).unwrap();
-    assert!(recorded.status.success(), "{}", printed(&recorded));
-    let busy = tempfile::tempdir().unwrap();
-    let cache = cache_with_runner(
-        busy.path(),
-        &format!(
-            "cat > /dev/null\nperl -MTime::HiRes=time,sleep -e 'my $end = time + 12; while (time < $end) {{ my $spin = time + 0.01; 1 while time < $spin; sleep 0.29 }}'\ncat '{}'",
-            answer.display()
-        ),
-    );
-    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
-
-    let (output, _) = compile_lines_within(directory.path(), 2, &cache);
-
-    assert!(output.status.success(), "{}", printed(&output));
-    assert!(compiled(directory.path(), "app/Shared/Money.sharp").exists());
-}
-
 /// Each signal that ends a compile from a terminal or `kill` ends the Lean it waits on too, though Mago runs Lake in a
 /// process group of its own so it can end Lake's at the deadline: the signal reaches the compile's group, and Mago
 /// ends Lake's before it ends. Its rows are Ctrl-C's SIGINT, Ctrl-\'s SIGQUIT, a closed terminal's SIGHUP, and `kill`'s

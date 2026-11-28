@@ -13,6 +13,7 @@ use mago_codex::symbol::SymbolIdentifier;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::is_equatable_interface;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::FileId;
 use mago_span::Span;
@@ -106,7 +107,8 @@ impl Reach {
     /// references under the law's own symbol, its class and its name as the class keys a method. A law reaches only
     /// what the members it reaches run, so the walk skips each [`CascadeEdge::Attribute`]: an attribute's constructor
     /// never runs as part of them. A sealed interface reaches each of its implementers, the closed set a law tells its
-    /// values apart by, spec section 20.1. A struct's generated `==` reaches the `==` of each class its fields hold. A
+    /// values apart by, spec section 20.1, and one that extends `Equatable` reaches each implementer's `==`, which its
+    /// own `==` runs, spec section 19. A struct's generated `==` reaches the `==` of each class its fields hold. A
     /// class reaches the PHP# class it extends, whose fields it holds, and a member a class inherits reaches the
     /// member of the PHP# class that declares it. The laws of a machine reach each of its entry points and moves.
     #[must_use]
@@ -228,6 +230,14 @@ impl Reach {
                     {
                         pending
                             .extend(inheritors.iter().map(|inheritor| (codebase.class_key(*inheritor), empty_word())));
+                        if is_equatable_interface(next.0, codebase) {
+                            pending.extend(
+                                inheritors
+                                    .iter()
+                                    .map(|inheritor| keyed(codebase, (*inheritor, word("op_Equality"))))
+                                    .filter(|(class, method)| codebase.get_method(*class, *method).is_some()),
+                            );
+                        }
                         let mut implementers: Vec<Word> = inheritors
                             .iter()
                             .filter_map(|inheritor| codebase.get_class_like(*inheritor))

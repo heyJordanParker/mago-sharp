@@ -2756,6 +2756,42 @@ fn compile_proves_a_law_over_an_interface_that_extends_equatable() {
     }
 }
 
+/// Spec sections 19, 20.1 and 28: `==` on two values of a sealed interface that extends `Equatable` runs the `==` of the
+/// implementer both are, the one a struct gets with no code or the one a class declares, so a law over the family
+/// proves when that `==` holds, and a claim it breaks names the implementers it is broken for.
+#[test]
+fn a_law_over_a_sealed_equatable_family_of_structs_and_classes_proves() {
+    let card =
+        "namespace App.Pay;\n\npublic struct Card : Tender\n{\n    public Card(public string last4 { get; }) { }\n}\n";
+    let cash_struct =
+        "namespace App.Pay;\n\npublic struct Cash : Tender\n{\n    public Cash(public int cents { get; }) { }\n}\n";
+    let cash_class = "namespace App.Pay;\n\npublic final class Cash : Tender\n{\n    public Cash(public int cents { get; }) { }\n\n    public static bool operator ==(Cash a, Cash b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n";
+    let compiled_with = |law: &str, cash: &str| {
+        let tender = format!("namespace App.Pay;\n\npublic sealed interface Tender : Equatable\n{{\n    {law}\n}}\n");
+        let directory = lawful_project(&[
+            ("app/Pay/Tender.sharp", &tender),
+            ("app/Pay/Card.sharp", card),
+            ("app/Pay/Cash.sharp", cash),
+        ]);
+        let output = compile(directory.path());
+
+        (directory, output)
+    };
+
+    for cash in [cash_struct, cash_class] {
+        let (directory, output) = compiled_with("law sameIsSame(Tender a) => a == a;", cash);
+
+        assert!(output.status.success(), "{}", printed(&output));
+        assert!(compiled(directory.path(), "app/Pay/Tender.sharp").exists());
+    }
+
+    let (_directory, output) = compiled_with("law anyTwoAreOne(Tender a, Tender b) => a == b;", cash_class);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("`Card` breaks `Tender.anyTwoAreOne`"), "{}", printed(&output));
+    assert!(printed(&output).contains("when a is Card && b is Cash"), "{}", printed(&output));
+}
+
 /// A type test over an interface that is not sealed is refused: its implementers are open, so a law cannot tell them apart.
 #[test]
 fn a_law_reaching_a_type_test_over_an_open_interface_is_refused() {
