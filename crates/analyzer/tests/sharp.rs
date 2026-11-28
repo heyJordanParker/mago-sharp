@@ -1383,6 +1383,60 @@ fn an_internal_class_or_member_a_framework_reaches_is_too_narrow() {
     );
 }
 
+/// Spec section 5: a `public` member of an `internal` class is internal, "unless it replaces a member of a parent class
+/// or an interface that reaches further, since code reaches it through that member". So the framework of a marked
+/// attribute that reaches such a member of an `internal` base, through the subclass that carries the attribute, reaches
+/// it through the interface, and nothing throws. A public member of the base that replaces nothing is still the base's
+/// own, and its reach refuses the base.
+#[test]
+fn a_framework_reaches_a_public_member_of_an_internal_base_through_the_interface_it_implements() {
+    let marker = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/DynamicallyAccessed.sharp",
+        include_str!("../../../../composer/library/Sharp/DynamicallyAccessed.sharp"),
+    );
+    let model = "namespace App.Repro;\n\npublic abstract class Model { }\n";
+    let page = "namespace App.Repro;\n\npublic final class Page : Model { }\n";
+    let projects = "namespace App.Repro;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_CLASS)]\n[DynamicallyAccessed]\npublic final class Projects\n{\n    public Projects(public Class<Model> source { get; }) { }\n}\n";
+    let projection = "namespace App.Repro;\n\npublic interface Projection\n{\n    List<Model> dependencies(Model source);\n\n    void sync(Model source);\n}\n";
+    let base = "namespace App.Repro;\n\ninternal abstract class Base : Projection\n{\n    public List<Model> dependencies(Model source) => [];\n}\n";
+    let leaf = "namespace App.Repro;\n\n[Projects(typeof(Page))]\npublic final class Leaf : Base\n{\n    public void sync(Model source) { }\n}\n";
+    let project = |base: &'static str| {
+        [
+            marker,
+            ("src/App/Repro/Model.sharp", model),
+            ("src/App/Repro/Page.sharp", page),
+            ("src/App/Repro/Projects.sharp", projects),
+            ("src/App/Repro/Projection.sharp", projection),
+            ("src/App/Repro/Base.sharp", base),
+            ("src/App/Repro/Leaf.sharp", leaf),
+        ]
+    };
+    // The `internal-access` errors alone: in one namespace, the public types and `Projects.source` are also too wide.
+    let internal_access = |files: &[(&'static str, &'static str)]| {
+        let test_files = test_files(files);
+        project_errors(
+            files,
+            |codebase, references| {
+                mago_analyzer::too_wide_members(codebase, references, &test_files)
+                    .into_iter()
+                    .filter(|issue| issue.code.as_deref() == Some("internal-access"))
+                    .collect()
+            },
+            |issue| format!("{} | {}", issue.message, issue.help.as_deref().unwrap_or_default()),
+        )
+    };
+
+    assert_eq!(internal_access(&project(base)), Vec::<String>::new());
+
+    let sized = "namespace App.Repro;\n\ninternal abstract class Base : Projection\n{\n    public List<Model> dependencies(Model source) => [];\n\n    public int size() => 0;\n}\n";
+    assert_eq!(
+        internal_access(&project(sized)),
+        [
+            "src/App/Repro/Base.sharp 3:25 `Base` is internal, and the framework that reads `Projects` reaches it from outside `App.Repro`, so it throws when it runs. | Declare it public."
+        ]
+    );
+}
+
 /// Spec sections 5 and 23: plain PHP calls an `[Export]` method through the global function it declares, which the
 /// checker never sees, so the method never warns. The other marks say nothing about who reaches their member, so an
 /// `[Import]` method and a `[Key]` property warn as members without them do. An `override` and an `internal` member
